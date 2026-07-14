@@ -1,0 +1,9 @@
+_Other/*.rbf
+build/
+work/
+deploy/solarus-run
+deploy/libs/
+*.qws
+*.rpt
+db/
+incremental_db/
