@@ -165,7 +165,12 @@ module blitter_top #(
         S_TRI_WR=6'd54,            // drive blt_blend; write comp_fbram on write_en
         S_TRI_ADV=6'd55,          // step w*/attributes by per-x deltas, wrap rows by per-row deltas
         S_TRI_NEXT=6'd56,         // triangle done: next triangle or finish the command
-        S_TRI_MUL=6'd57;          // round the W*recip products, clamp texel, issue P_SRC read
+        S_TRI_MUL=6'd57,          // round the W*recip products, clamp texel, issue P_SRC read
+        // [pipeline] per-pixel blend/write path staged like comp_mixer (LAT=3) for
+        // timing closure: the old single-cycle S_TRI_WR (tint+alpha-combine+MAC+/255+
+        // pack) is split into three register stages A/B/C.
+        S_TRI_WR2=6'd58,          // stage B: per-channel MAC/add/mul intermediate
+        S_TRI_WR3=6'd59;          // stage C: /255,/31,/63 reduce + RGB565 pack + fb write
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
                      OP_TRILIST=8'd10;
@@ -391,6 +396,22 @@ module blitter_top #(
     reg         [15:0] tw1r, th1r;
     reg         [31:0] texbyte;
 
+    // [pipeline] per-pixel blend/write pipeline registers (LAT=3, comp_mixer A/B/C):
+    //   stage A (S_TRI_WR)  -> b1_*: tinted source channels + combined alpha ea/na + we
+    //   stage B (S_TRI_WR2) -> b2_*: per-channel MAC / add / mul intermediate
+    //   stage C (S_TRI_WR3) -> reduce (/255,/31,/63) + RGB565 pack -> fb write
+    // (c_blend / c_colorkey / dst_qw_q / dst_lane_q are stable across the 3 stages, so
+    //  they are used directly rather than re-registered per stage.)
+    reg  [5:0]  b1_tsr, b1_tsg, b1_tsb, b1_dr, b1_dg, b1_db;
+    reg  [7:0]  b1_ea, b1_na;
+    reg         b1_we;
+    reg  [16:0] b2_r, b2_g, b2_b;
+    reg         b2_we;
+    // combinational (blocking) temps: stage-A /255 divide, stage-C reduce/clamp/pack
+    reg  [7:0]  ea_t;
+    reg  [5:0]  bl_or, bl_og, bl_ob;
+    reg  [6:0]  bl_ar, bl_ag, bl_ab;
+
     // blt_tri_setup registered outputs (stable from `valid` until the next start)
     wire               ts_valid, ts_degenerate;
     wire        [15:0] ts_ox, ts_oy;
@@ -418,14 +439,20 @@ module blitter_top #(
         .dWudx(ts_dWudx), .dWvdx(ts_dWvdx), .dWrdx(ts_dWrdx), .dWgdx(ts_dWgdx), .dWbdx(ts_dWbdx), .dWadx(ts_dWadx),
         .dWudy(ts_dWudy), .dWvdy(ts_dWvdy), .dWrdy(ts_dWrdy), .dWgdy(ts_dWgdy), .dWbdy(ts_dWbdy), .dWady(ts_dWady));
 
-    // blend core (byte-identical to blt_tri.sv:121-148), driven from the walk's latches
-    wire        tri_blend_we;
-    wire [15:0] tri_blend_pix;
-    blt_blend u_tri_blend (
-        .texel(texel_q), .dst(dst_q),
-        .cr(cr_q), .cg(cg_q), .cb(cb_q), .ca(ca_q),
-        .g_alpha(c_alpha), .blend_mode(c_blend), .colorkey(c_colorkey),
-        .write_en(tri_blend_we), .out_pix(tri_blend_pix));
+    // ── blend datapath (byte-identical to blt_tri.sv:121-148 / blt_blend.sv) ──────
+    // [pipeline] The blend USED to be a single combinational block (blt_blend, driven
+    // in one S_TRI_WR cycle): ca_q -> tint (texel*cr / red255) -> alpha-combine
+    // ea=(ca*g_alpha)/255 -> per-channel MAC -> /255 reduce -> RGB565 pack ->
+    // tri_fb_wr_pix. That whole chain in one fabric-clock cycle was the -27.884ns
+    // setup violator. It is now split across three register stages A/B/C exactly like
+    // comp_mixer (S_TRI_WR -> S_TRI_WR2 -> S_TRI_WR3). blt_blend.sv is kept UNCHANGED
+    // (still used by the tb_tri_mixer_equiv combinational spike); the same arithmetic
+    // is reproduced here, staged, with these identical divide-free reductions:
+    function automatic [5:0] red255(input [16:0] t); reg [17:0] m; begin m={1'b0,t}+18'd128; red255=(m+(m>>8))>>8; end endfunction
+    function automatic [4:0] red31 (input [11:0] t); reg [12:0] m; begin m={1'b0,t}+13'd16;  red31 =(m+(m>>5))>>5; end endfunction
+    function automatic [5:0] red63 (input [12:0] t); reg [13:0] m; begin m={1'b0,t}+14'd32;  red63 =(m+(m>>6))>>6; end endfunction
+    // per-channel colour-mod: div255_round(ch*mod)
+    function automatic [5:0] modch(input [5:0] ch, input [7:0] mod); modch = red255(ch*mod); endfunction
 
     // bbox-max (from raw verts, matching blt_tri.c: (hx+ONE-1)>>SUB clamp FB-1)
     wire signed [15:0] tri_hx = (tri_vx0>tri_vx1)?((tri_vx0>tri_vx2)?tri_vx0:tri_vx2)
@@ -839,13 +866,85 @@ module blitter_top #(
                 dst_q <= fb_rd_qword[dst_lane_q*16 +: 16];
                 state<=S_TRI_WR;
             end
-            // Drive blt_blend (combinational) and write comp_fbram if not culled.
+            // ── blend stage A (comp_mixer stage A analogue) ──────────────────────
+            // Tint the source channels (red255(texel*c)), split the dst channels, and
+            // combine the per-vertex alpha with the global alpha: ea=(ca*g_alpha)/255,
+            // na=255-ea. Register everything the MAC needs. One small multiply-or-
+            // reduce per lane, no chain — mirrors blt_tri.sv:122-129 exactly.
             S_TRI_WR: begin
-                if (tri_blend_we) begin
+                b1_tsr <= modch({1'b0, texel_q[15:11]}, cr_q);   // tinted source channels
+                b1_tsg <= modch(texel_q[10:5],          cg_q);
+                b1_tsb <= modch({1'b0, texel_q[4:0]},   cb_q);
+                b1_dr  <= {1'b0, dst_q[15:11]};  // dst channels (dr/db 5-bit, dg 6-bit)
+                b1_dg  <= dst_q[10:5];
+                b1_db  <= {1'b0, dst_q[4:0]};
+                // ea = (ca*g_alpha)/255, truncating — the ONE real /255 divide, isolated
+                // to this stage (blt_tri.sv:128). na computed from the same temp so the
+                // divider is instantiated once.
+                ea_t   = ({8'd0, ca_q} * {8'd0, c_alpha}) / 16'd255;
+                b1_ea  <= ea_t;
+                b1_na  <= 8'd255 - ea_t;
+                // colorkey cull (stable inputs; carried to the write stage)
+                b1_we  <= !((c_blend==BLEND_KEY) && (texel_q==c_colorkey));
+                state<=S_TRI_WR2;
+            end
+            // ── blend stage B (comp_mixer stage B analogue) ──────────────────────
+            // Per-channel intermediate selected by blend mode: the weighted-sum MAC
+            // (CALPHA), the saturating pre-sum (ADD), the product (MUL), or the tinted
+            // source (COPY/KEY). One multiply-or-add layer, reduced next stage.
+            S_TRI_WR2: begin
+                case (c_blend)
+                  BLEND_ALPHA: begin   // BM_CALPHA: tsr*ea + dr*na  (reduced /255 in C)
+                    b2_r <= b1_tsr*b1_ea + b1_dr*b1_na;
+                    b2_g <= b1_tsg*b1_ea + b1_dg*b1_na;
+                    b2_b <= b1_tsb*b1_ea + b1_db*b1_na;
+                  end
+                  BLEND_ADD: begin     // src+dst (saturated in C)
+                    b2_r <= {10'd0, b1_tsr} + {10'd0, b1_dr};
+                    b2_g <= {10'd0, b1_tsg} + {10'd0, b1_dg};
+                    b2_b <= {10'd0, b1_tsb} + {10'd0, b1_db};
+                  end
+                  BLEND_MULTIPLY: begin // src*dst (round-divided in C)
+                    b2_r <= b1_tsr*b1_dr;
+                    b2_g <= b1_tsg*b1_dg;
+                    b2_b <= b1_tsb*b1_db;
+                  end
+                  default: begin        // COPY / COLORKEY: write tinted src
+                    b2_r <= {11'd0, b1_tsr};
+                    b2_g <= {11'd0, b1_tsg};
+                    b2_b <= {11'd0, b1_tsb};
+                  end
+                endcase
+                b2_we <= b1_we;
+                state<=S_TRI_WR3;
+            end
+            // ── blend stage C (comp_mixer stage C analogue) ──────────────────────
+            // /255,/31,/63 reduce (or ADD saturate), RGB565 pack, and the comp_fbram
+            // write if not culled. Byte-identical result to blt_tri.sv:132-148.
+            S_TRI_WR3: begin
+                case (c_blend)
+                  BLEND_ALPHA: begin
+                    bl_or = red255(b2_r); bl_og = red255(b2_g); bl_ob = red255(b2_b);
+                  end
+                  BLEND_ADD: begin
+                    bl_ar = b2_r[6:0]; bl_ag = b2_g[6:0]; bl_ab = b2_b[6:0];
+                    if (bl_ar > 7'd31) bl_ar = 7'd31;
+                    if (bl_ag > 7'd63) bl_ag = 7'd63;
+                    if (bl_ab > 7'd31) bl_ab = 7'd31;
+                    bl_or = bl_ar[5:0]; bl_og = bl_ag[5:0]; bl_ob = bl_ab[5:0];
+                  end
+                  BLEND_MULTIPLY: begin
+                    bl_or = red31(b2_r[11:0]); bl_og = red63(b2_g[12:0]); bl_ob = red31(b2_b[11:0]);
+                  end
+                  default: begin
+                    bl_or = b2_r[5:0]; bl_og = b2_g[5:0]; bl_ob = b2_b[5:0];
+                  end
+                endcase
+                if (b2_we) begin
                     tri_fb_wr_en   <= 1'b1;
                     tri_fb_wr_qw   <= dst_qw_q;
                     tri_fb_wr_lane <= dst_lane_q;
-                    tri_fb_wr_pix  <= tri_blend_pix;
+                    tri_fb_wr_pix  <= { bl_or[4:0], bl_og[5:0], bl_ob[4:0] };
                 end
                 state<=S_TRI_ADV;
             end
