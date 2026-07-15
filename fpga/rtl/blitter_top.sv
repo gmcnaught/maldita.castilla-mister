@@ -197,6 +197,8 @@ module blitter_top #(
     reg           pipe_busy_q;   // [#44 timing] lockstep duplicate of pipe_busy for the owner-mux select (low fanout)
     // ---- work->scan snapshot routing [FB-in-BRAM double-buffer] ----
     wire          pipe_fb_rd_en; wire [14:0] pipe_fb_rd_qw;  // comp_pipeline's work-read (pre-mux)
+    // comp_pipeline's composite-write outputs (pre-mux); muxed with tri_fb_wr_* below.
+    wire          pipe_fb_wr_en; wire [14:0] pipe_fb_wr_qw; wire [1:0] pipe_fb_wr_lane; wire [15:0] pipe_fb_wr_pix;
     wire          snap_busy, snap_rd_en; wire [14:0] snap_rd_qw;
     reg           snap_start;    // 1-cycle work->scan snapshot trigger
     // [#104] Synchronize vs (scanout vblank; may cross from the video clock) through a
@@ -358,6 +360,8 @@ module blitter_top #(
 
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
+    reg  [15:0]  tri_ox;                               // bbox-min x (row-wrap target)
+    reg  [31:0]  tri_vbase;                            // this triangle's first vertex-qword addr
     reg  signed [63:0] w0, w1, w2;                     // running coverage edges (this pixel)
     reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=ox)
     reg  signed [63:0] Wu, Wv, Wr, Wg, Wb, Wa;         // running weighted attr sums (this pixel)
@@ -700,6 +704,170 @@ module blitter_top #(
                 else if (barrier_seen_busy)  state<=S_NEXT_CMD;
             end
 
+            // ════════════════════════════════════════════════════════════════
+            //  BLT_OP_TRILIST textured-triangle walk (Task 5)
+            // ════════════════════════════════════════════════════════════════
+            // Fetch the current triangle's 6 vertex qwords via the shared bm_*
+            // read master (S_RD_WAIT). Base qword = tri_entry_qw + tri_idx*6.
+            S_TRI_VFETCH: begin
+                tri_vk    <= 3'd0;
+                tri_vbase <= tri_entry_qw + tri_idx*16'd6;
+                bm_rd     <= 1'b1;
+                bm_addr   <= tri_entry_qw + tri_idx*16'd6;
+                rd_ret<=S_TRI_VCOLLECT; state<=S_RD_WAIT;
+            end
+            S_TRI_VCOLLECT: begin
+                tri_vqw[tri_vk] <= rd_data;
+                if (tri_vk==3'd5) state<=S_TRI_DECV;
+                else begin
+                    bm_rd   <= 1'b1;
+                    bm_addr <= tri_vbase + {29'd0, tri_vk} + 32'd1;
+                    tri_vk  <= tri_vk + 3'd1;
+                    rd_ret<=S_TRI_VCOLLECT; state<=S_RD_WAIT;
+                end
+            end
+            // Unpack the 6 qwords -> 3 vertices. Per vertex, 2 qwords:
+            //   qw0 = {v[63:48], u[47:32], y[31:16], x[15:0]}  (x,y s12.4; u,v u12.4)
+            //   qw1[31:0] = r | g<<8 | b<<16 | a<<24
+            S_TRI_DECV: begin
+                tri_vx0<=tri_vqw[0][15:0];  tri_vy0<=tri_vqw[0][31:16];
+                tri_vu0<=tri_vqw[0][47:32]; tri_vv0<=tri_vqw[0][63:48];
+                tri_vr0<=tri_vqw[1][7:0];   tri_vg0<=tri_vqw[1][15:8];
+                tri_vb0<=tri_vqw[1][23:16]; tri_va0<=tri_vqw[1][31:24];
+                tri_vx1<=tri_vqw[2][15:0];  tri_vy1<=tri_vqw[2][31:16];
+                tri_vu1<=tri_vqw[2][47:32]; tri_vv1<=tri_vqw[2][63:48];
+                tri_vr1<=tri_vqw[3][7:0];   tri_vg1<=tri_vqw[3][15:8];
+                tri_vb1<=tri_vqw[3][23:16]; tri_va1<=tri_vqw[3][31:24];
+                tri_vx2<=tri_vqw[4][15:0];  tri_vy2<=tri_vqw[4][31:16];
+                tri_vu2<=tri_vqw[4][47:32]; tri_vv2<=tri_vqw[4][63:48];
+                tri_vr2<=tri_vqw[5][7:0];   tri_vg2<=tri_vqw[5][15:8];
+                tri_vb2<=tri_vqw[5][23:16]; tri_va2<=tri_vqw[5][31:24];
+                state<=S_TRI_SETUP;
+            end
+            // Pulse blt_tri_setup.start (verts are registered/stable).
+            S_TRI_SETUP: begin
+                tri_setup_start <= 1'b1;
+                state<=S_TRI_SWAIT;
+            end
+            // Wait for setup valid; seed bbox + running accumulators at (ox,oy).
+            // Skip degenerate or fully-off (min>max) triangles.
+            S_TRI_SWAIT: if (ts_valid) begin
+                if (ts_degenerate || (ts_ox > tri_maxx_cl) || (ts_oy > tri_maxy_cl))
+                    state<=S_TRI_NEXT;
+                else begin
+                    tri_ox <= ts_ox;
+                    tri_px <= ts_ox;      tri_py <= ts_oy;
+                    tri_maxx <= tri_maxx_cl; tri_maxy <= tri_maxy_cl;
+                    w0<=ts_w0_0; w1<=ts_w1_0; w2<=ts_w2_0;
+                    row_w0<=ts_w0_0; row_w1<=ts_w1_0; row_w2<=ts_w2_0;
+                    Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
+                    row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
+                    row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
+                    state<=S_TRI_PIX;
+                end
+            end
+            // Evaluate coverage at (tri_px,tri_py). If covered, interpolate the
+            // attributes (A = round(W * area_recip / 2^40)), clamp the texel
+            // coord, and issue the P_SRC texel read.
+            S_TRI_PIX: begin
+                if ((w0>=0) && (w1>=0) && (w2>=0)) begin
+                    // texel coords (u12.4) then nearest-texel with clamp
+                    mul_u = Wu * $signed(ts_area_recip);
+                    mul_v = Wv * $signed(ts_area_recip);
+                    rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
+                    rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
+                    itu   = (rnd_u + 64'sd8) >>> 4;
+                    itv   = (rnd_v + 64'sd8) >>> 4;
+                    tw1r  = c_src_x - 16'd1;
+                    th1r  = c_src_y - 16'd1;
+                    if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
+                    if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
+                    // per-vertex colour
+                    mul_r = Wr * $signed(ts_area_recip);
+                    mul_g = Wg * $signed(ts_area_recip);
+                    mul_b = Wb * $signed(ts_area_recip);
+                    mul_a = Wa * $signed(ts_area_recip);
+                    rnd_r = (mul_r + (96'sd1<<<39)) >>> 40;
+                    rnd_g = (mul_g + (96'sd1<<<39)) >>> 40;
+                    rnd_b = (mul_b + (96'sd1<<<39)) >>> 40;
+                    rnd_a = (mul_a + (96'sd1<<<39)) >>> 40;
+                    cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
+                    cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
+                    // texel byte address + P_SRC read (8-byte aligned; lane = byte[2:1])
+                    texbyte = c_src_off + itv*$signed({16'd0,c_src_stride}) + (itu<<<1);
+                    tri_p0_addr <= texbyte[26:0] & ~27'h7;
+                    tri_p0_rd   <= 1'b1;
+                    tex_lane_q  <= texbyte[2:1];
+                    // comp_fbram destination qword/lane for this pixel
+                    dst_qw_q   <= tri_py*16'd80 + (tri_px>>2);
+                    dst_lane_q <= tri_px[1:0];
+                    state<=S_TRI_GOTTEX;
+                end else state<=S_TRI_ADV;
+            end
+            // Wait for the texel; latch it. COPY/COLORKEY need no dst read;
+            // CONST_ALPHA/ADD/MULTIPLY read the destination pixel first.
+            S_TRI_GOTTEX: if (p0_ok) begin
+                texel_q <= p0_dout[tex_lane_q*16 +: 16];
+                if (tri_need_dst) begin
+                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= dst_qw_q;
+                    state<=S_TRI_DSTW;
+                end else begin
+                    dst_q <= 16'd0;
+                    state<=S_TRI_WR;
+                end
+            end
+            // comp_fbram read has 1-cycle latency: DSTW presents rd_en, DSTC
+            // captures the registered qword and lane-selects the dst pixel.
+            S_TRI_DSTW: state<=S_TRI_DSTC;
+            S_TRI_DSTC: begin
+                dst_q <= fb_rd_qword[dst_lane_q*16 +: 16];
+                state<=S_TRI_WR;
+            end
+            // Drive blt_blend (combinational) and write comp_fbram if not culled.
+            S_TRI_WR: begin
+                if (tri_blend_we) begin
+                    tri_fb_wr_en   <= 1'b1;
+                    tri_fb_wr_qw   <= dst_qw_q;
+                    tri_fb_wr_lane <= dst_lane_q;
+                    tri_fb_wr_pix  <= tri_blend_pix;
+                end
+                state<=S_TRI_ADV;
+            end
+            // Advance: within a row step by dx deltas; at row end wrap x to the
+            // bbox min and step the row-start latches by dy deltas.
+            S_TRI_ADV: begin
+                if (tri_px < tri_maxx) begin
+                    tri_px <= tri_px + 16'd1;
+                    w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
+                    Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
+                    Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
+                    state<=S_TRI_PIX;
+                end else if (tri_py < tri_maxy) begin
+                    tri_py <= tri_py + 16'd1;
+                    tri_px <= tri_ox;
+                    row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
+                    row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
+                    row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
+                    row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
+                    row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
+                    row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
+                    row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
+                    row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
+                    row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
+                    state<=S_TRI_PIX;
+                end else state<=S_TRI_NEXT;
+            end
+            // Triangle done: advance to the next triangle, else finish the command.
+            S_TRI_NEXT: begin
+                if (tri_idx + 16'd1 < tri_count) begin
+                    tri_idx <= tri_idx + 16'd1;
+                    state<=S_TRI_VFETCH;
+                end else begin
+                    tri_busy <= 1'b0;
+                    state<=S_NEXT_CMD;
+                end
+            end
+
             S_NEXT_CMD: begin cmd_idx<=cmd_idx+1; state<=S_FETCH; end
 
             // C_PIPE: the FSM holds here (driving no bus traffic — bm_* idle,
@@ -815,7 +983,7 @@ module blitter_top #(
         // on-chip framebuffer (comp_fbram) dest port — threaded straight out [FB-in-BRAM].
         // The work WRITE port is comp_pipeline's alone; the work READ port is shared with
         // the snapshot controller (mux below), so comp_pipeline drives pipe_fb_rd_*.
-        .fb_wr_en(fb_wr_en), .fb_wr_qw(fb_wr_qw), .fb_wr_lane(fb_wr_lane), .fb_wr_pix(fb_wr_pix),
+        .fb_wr_en(pipe_fb_wr_en), .fb_wr_qw(pipe_fb_wr_qw), .fb_wr_lane(pipe_fb_wr_lane), .fb_wr_pix(pipe_fb_wr_pix),
         .fb_rd_en(pipe_fb_rd_en), .fb_rd_qw(pipe_fb_rd_qw), .fb_rd_qword(fb_rd_qword),
         .blit_done(p_blit_done));
 
@@ -840,8 +1008,15 @@ module blitter_top #(
     // once-per-frame work->scan copy; otherwise the normal compositor
     // (comp_pipeline) drives it. (The retired bg-write bake used to sit
     // between these two as a third priority tier.)
-    assign fb_rd_en = snap_busy ? snap_rd_en : pipe_fb_rd_en;
-    assign fb_rd_qw = snap_busy ? snap_rd_qw : pipe_fb_rd_qw;
+    assign fb_rd_en = snap_busy ? snap_rd_en : (tri_busy ? tri_fb_rd_en : pipe_fb_rd_en);
+    assign fb_rd_qw = snap_busy ? snap_rd_qw : (tri_busy ? tri_fb_rd_qw : pipe_fb_rd_qw);
+
+    // fb_wr mux: the TRILIST walk (tri_busy) owns the composite-write port while it
+    // rasterizes; otherwise comp_pipeline (FILL/BLIT) drives it.
+    assign fb_wr_en   = tri_busy ? tri_fb_wr_en   : pipe_fb_wr_en;
+    assign fb_wr_qw   = tri_busy ? tri_fb_wr_qw   : pipe_fb_wr_qw;
+    assign fb_wr_lane = tri_busy ? tri_fb_wr_lane : pipe_fb_wr_lane;
+    assign fb_wr_pix  = tri_busy ? tri_fb_wr_pix  : pipe_fb_wr_pix;
 
     // owner mux: comp_pipeline drives the bus only while pipe_busy; otherwise the
     // FSM's bm_* drive it for ring/clear/STAGE/status traffic.
@@ -866,8 +1041,10 @@ module blitter_top #(
     // the cache-ok p0_* source port directly (idle p0_rd=0 when not fetching). The
     // write/STAGE source ports (src_sdram_we/din/waddr/we_burst/din64) stay driven by
     // the FSM's STAGE path — comp_pipeline never stages.
-    assign p0_addr = p_src_sdram_addr;
-    assign p0_rd   = p_src_sdram_rd;
+    // P_SRC source-read mux: the TRILIST walk fetches texels through p0_* while
+    // tri_busy; otherwise comp_pipeline drives it.
+    assign p0_addr = tri_busy ? tri_p0_addr : p_src_sdram_addr;
+    assign p0_rd   = tri_busy ? tri_p0_rd   : p_src_sdram_rd;
 
     // pipe_busy bookkeeping: raised when pipe_start pulses (S_SETUP hands a blit
     // to the pipeline), lowered on blit_done. pipe_busy_q is a LOCKSTEP DUPLICATE
