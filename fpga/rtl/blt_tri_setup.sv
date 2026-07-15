@@ -25,6 +25,26 @@
 //  would replace the single-cycle divide with a pipelined reciprocal (amortized
 //  ~10 triangles/frame); the OUTPUT interface below is what Task 5 consumes.
 //
+//  Validated operating envelope (tb_tri_setup.sv "envelope_worst_case", passes
+//  at +-1 LSB vs. blt_tri.sv with SHIFT=40 and the 48-bit field widths below):
+//    - vertex coords: 16-bit signed 12.4 (as declared), i.e. |coord| up to
+//      ~2047.9 px; case 4 exercises a ~300x220px triangle near that range.
+//    - signed area (x2, post CCW-normalize): validated up to ~1.7e7 (case 4);
+//      area is carried in a 48-bit field, which holds area up to ~1.4e14 —
+//      vastly beyond what 16-bit-signed 12.4 vertices can produce (max |area|
+//      for two ~17-bit coord diffs is on the order of 2^35), so area itself
+//      never approaches its field's ceiling.
+//    - texture size: up to 2048x2048 texels, u/v up to ~32752 in 12.4 (case 4).
+//    - reciprocal error at this envelope: |area_recip quantization| ~0.15 LSB
+//      of the final attribute (comment above's ~1e-4 bound scales with area;
+//      still far inside +-1 at area~1.7e7).
+//    - w{0,1,2}_0 / dw{0,1,2}dx/dy are 48-bit: a single edgef() term multiplies
+//      two ~17-bit-signed 12.4 coord differences (~34 bits), and the a-b
+//      difference of two such terms is ~35 bits, so 48 bits leaves ~13 bits
+//      of headroom over the worst case producible by in-range vertices.
+//  Exceeding this envelope (e.g. much larger textures/coords, or SHIFT
+//  lowered) would need re-validating against blt_tri.sv before trusting it.
+//
 //  Copyright (C) 2026 — GPL-3.0.
 `default_nettype none
 module blt_tri_setup #(
@@ -47,10 +67,15 @@ module blt_tri_setup #(
     output reg         [15:0]  ox, oy,       // bbox-min pixel = interpolation origin
     output reg signed  [47:0]  area,         // CCW-normalized signed area x2 (>0)
     output reg         [47:0]  area_recip,   // round(2^SHIFT / area), unsigned Q(SHIFT)
-    // coverage edge functions at origin + per-x / per-row integer deltas
-    output reg signed  [31:0]  w0_0, w1_0, w2_0,
-    output reg signed  [31:0]  dw0dx, dw1dx, dw2dx,
-    output reg signed  [31:0]  dw0dy, dw1dy, dw2dy,
+    // coverage edge functions at origin + per-x / per-row integer deltas.
+    // 48-bit (not 32): edgef() multiplies two ~17-bit-signed 12.4 coord
+    // differences (vertex vs. origin sample), so a single term is ~34 bits and
+    // the a-b difference of two such terms is ~35 bits — already past a 32-bit
+    // signed field for in-range vertices. 48 bits matches area/area_recip/W*_0
+    // below and leaves ample headroom (see the envelope note near SHIFT).
+    output reg signed  [47:0]  w0_0, w1_0, w2_0,
+    output reg signed  [47:0]  dw0dx, dw1dx, dw2dx,
+    output reg signed  [47:0]  dw0dy, dw1dy, dw2dy,
     // weighted attribute SUMS at origin (W_A = w0*A0+w1*A1+w2*A2), integer
     output reg signed  [47:0]  Wu_0, Wv_0, Wr_0, Wg_0, Wb_0, Wa_0,
     // per-x / per-row deltas of the weighted sums, integer
@@ -99,7 +124,6 @@ module blt_tri_setup #(
             r2a=vr2; g2a=vg2; b2a=vb2; a2a=va2;
         end
         r0a=vr0; g0a=vg0; b0a=vb0; a0a=va0;
-        u1a=u1a; v1a=v1a;  // (u0/v0 origin attrs are vu0/vv0 directly, below)
 
         n_degen = (n_area == 0);
         den     = n_degen ? 64'sd1 : n_area;
@@ -146,9 +170,9 @@ module blt_tri_setup #(
                 area       <= n_area[47:0];
                 area_recip <= n_recip[47:0];
 
-                w0_0 <= nw0[31:0]; w1_0 <= nw1[31:0]; w2_0 <= nw2[31:0];
-                dw0dx<=ndw0dx[31:0]; dw1dx<=ndw1dx[31:0]; dw2dx<=ndw2dx[31:0];
-                dw0dy<=ndw0dy[31:0]; dw1dy<=ndw1dy[31:0]; dw2dy<=ndw2dy[31:0];
+                w0_0 <= nw0[47:0]; w1_0 <= nw1[47:0]; w2_0 <= nw2[47:0];
+                dw0dx<=ndw0dx[47:0]; dw1dx<=ndw1dx[47:0]; dw2dx<=ndw2dx[47:0];
+                dw0dy<=ndw0dy[47:0]; dw1dy<=ndw1dy[47:0]; dw2dy<=ndw2dy[47:0];
 
                 // origin weighted sums (attr0 uses the un-swapped v0 texel/colour)
                 Wu_0 <= wsum(nw0,nw1,nw2, vu0,u1a,u2a);
