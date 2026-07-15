@@ -112,9 +112,18 @@ module blt_tri_setup #(
     output reg signed  [47:0]  dWudx, dWvdx, dWrdx, dWgdx, dWbdx, dWadx,
     output reg signed  [47:0]  dWudy, dWvdy, dWrdy, dWgdy, dWbdy, dWady
 );
-    // signed area x2 of triangle (a,b,c) — same integer edge function as the golden
+    // signed area x2 of triangle (a,b,c) — same integer edge function as the golden.
+    // [timing/DSP] the coord differences are ~17-bit (12.4 screen coords, |diff| <=
+    // ~5120), so narrow them to 19-bit signed BEFORE multiplying: this makes each
+    // product a single 19x19 DSP instead of a 64x64 longint multiply (~4-6 DSPs).
+    // Value is unchanged for in-envelope coords (guarded by tb_tri_setup).
     function automatic longint edgef(input longint ax, ay, bx, by, cx, cy);
-        edgef = (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+        reg signed [18:0] dbx, dcy, dby, dcx;
+        begin
+            dbx = bx - ax; dcy = cy - ay;
+            dby = by - ay; dcx = cx - ax;
+            edgef = dbx*dcy - dby*dcx;
+        end
     endfunction
     // top-left rule bias: 0 on a top/left edge a->b, else -1 (mirrors blt_tri.sv)
     function automatic longint tlbias(input longint ax, ay, bx, by);
@@ -270,8 +279,10 @@ module blt_tri_setup #(
 
             // ============ P2: the two edgef products ============================
             if (g1) begin
-                p2_prod1 <= p1_dbx * p1_dcy;    // (bx-ax)*(cy-ay)
-                p2_prod2 <= p1_dby * p1_dcx;    // (by-ay)*(cx-ax)
+                // [timing/DSP] diffs are ~17-bit; narrow to 19-bit signed operands so
+                // each area product is one 19x19 DSP, not a 64x64 longint multiply.
+                p2_prod1 <= $signed(p1_dbx[18:0]) * $signed(p1_dcy[18:0]);  // (bx-ax)*(cy-ay)
+                p2_prod2 <= $signed(p1_dby[18:0]) * $signed(p1_dcx[18:0]);  // (by-ay)*(cx-ax)
 
                 p2_vx0 <= p1_vx0; p2_vy0 <= p1_vy0;
                 p2_vx1 <= p1_vx1; p2_vy1 <= p1_vy1;
@@ -407,9 +418,14 @@ module blt_tri_setup #(
             if (e2) begin
                 for (a = 0; a < 6; a = a + 1) begin
                     for (k = 0; k < 3; k = k + 1) begin
-                        p0 [a][k] <= s2_nw[k]    * s2_A[a][k];
-                        pdx[a][k] <= s2_ndwdx[k] * s2_A[a][k];
-                        pdy[a][k] <= s2_ndwdy[k] * s2_A[a][k];
+                        // [timing/DSP] narrow the multiply operands to their real
+                        // envelope so each is ONE DSP (27x18) not a 64x64 longint
+                        // multiply (~4-6 DSPs): w{k} edge functions are ~26-bit
+                        // (screen coords), deltas ~24-bit, attrs (u/v<=32768, rgba<=255)
+                        // ~18-bit. Value unchanged in-envelope (guarded by tb_tri_setup).
+                        p0 [a][k] <= $signed(s2_nw[k][26:0])    * $signed(s2_A[a][k][17:0]);
+                        pdx[a][k] <= $signed(s2_ndwdx[k][23:0]) * $signed(s2_A[a][k][17:0]);
+                        pdy[a][k] <= $signed(s2_ndwdy[k][23:0]) * $signed(s2_A[a][k][17:0]);
                     end
                 end
                 s3_degen <= s2_degen;
