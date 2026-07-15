@@ -171,8 +171,9 @@ module blitter_top #(
         // pack) is split into three register stages A/B/C.
         S_TRI_WR2=6'd58,          // stage B: per-channel MAC/add/mul intermediate
         S_TRI_WR3=6'd59,          // stage C: /255,/31,/63 reduce + RGB565 pack + fb write
-        S_TRI_ADDR=6'd60,         // texel-address multiply (itv*stride), split from S_TRI_MUL
-        S_TRI_MUL0=6'd61;         // pipelined W*area_recip multiply (operands latched in S_TRI_PIX)
+        S_TRI_ADDR=6'd60,         // registered texel-row multiply (itv*stride)
+        S_TRI_MUL0=6'd61,         // pipelined W*area_recip multiply (operands latched in S_TRI_PIX)
+        S_TRI_ADDR2=6'd62;        // texel byte address add + P_SRC read (split from S_TRI_ADDR)
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
                      OP_TRILIST=8'd10;
@@ -407,6 +408,7 @@ module blitter_top #(
     reg  signed [63:0] rnd_u, rnd_v, rnd_r, rnd_g, rnd_b, rnd_a;
     reg  signed [31:0] itu, itv;
     reg  signed [31:0] itu_q, itv_q;   // clamped texel coords, registered for S_TRI_ADDR
+    reg         [31:0] tex_row;        // registered itv_q*stride product (S_TRI_ADDR->ADDR2)
     reg         [15:0] tw1r, th1r;
     reg         [31:0] texbyte;
 
@@ -879,12 +881,22 @@ module blitter_top #(
                 dst_lane_q <= tri_px[1:0];
                 state<=S_TRI_ADDR;
             end
-            // Interpolation stage 3: texel byte address + P_SRC read. Split from
-            // S_TRI_MUL so the itv*stride multiply gets its own cycle (one extra
-            // cycle per covered pixel, negligible vs. the SDRAM texel-read wait).
+            // Interpolation stage 3a: the texel-row multiply itv*stride, REGISTERED
+            // in its own cycle. itv_q is a clamped texel row (<= tex_h-1), so the
+            // low 16 bits carry the whole value -> a single 16x16 DSP; registering
+            // the product (input itv_q + output tex_row) makes it a pipelined DSP.
+            // Doing it combinationally into the address add was an ~8.9 ns multiply
+            // feeding tri_p0_addr (the -2.0 ns worst path).
             S_TRI_ADDR: begin
+                tex_row <= itv_q[15:0] * c_src_stride;
+                state<=S_TRI_ADDR2;
+            end
+            // Interpolation stage 3b: texel byte address add + P_SRC read (adds
+            // only; no multiply). One extra cycle per covered pixel, negligible vs.
+            // the SDRAM texel-read wait.
+            S_TRI_ADDR2: begin
                 // texel byte address (8-byte aligned; lane = byte[2:1])
-                texbyte = c_src_off + itv_q*$signed({16'd0,c_src_stride}) + (itu_q<<<1);
+                texbyte = c_src_off + tex_row + (itu_q<<<1);
                 tri_p0_addr <= texbyte[26:0] & ~27'h7;
                 tri_p0_rd   <= 1'b1;
                 tex_lane_q  <= texbyte[2:1];
