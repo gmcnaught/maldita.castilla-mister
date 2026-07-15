@@ -407,7 +407,8 @@ module blitter_top #(
     reg         b1_we;
     reg  [16:0] b2_r, b2_g, b2_b;
     reg         b2_we;
-    // combinational (blocking) temps: stage-A /255 divide, stage-C reduce/clamp/pack
+    // combinational (blocking) temps: stage-A alpha-combine, stage-C reduce/clamp/pack
+    reg  [15:0] xa_t;   // ca_q*c_alpha product, [0,65025]
     reg  [7:0]  ea_t;
     reg  [5:0]  bl_or, bl_og, bl_ob;
     reg  [6:0]  bl_ar, bl_ag, bl_ab;
@@ -878,10 +879,15 @@ module blitter_top #(
                 b1_dr  <= {1'b0, dst_q[15:11]};  // dst channels (dr/db 5-bit, dg 6-bit)
                 b1_dg  <= dst_q[10:5];
                 b1_db  <= {1'b0, dst_q[4:0]};
-                // ea = (ca*g_alpha)/255, truncating — the ONE real /255 divide, isolated
-                // to this stage (blt_tri.sv:128). na computed from the same temp so the
-                // divider is instantiated once.
-                ea_t   = ({8'd0, ca_q} * {8'd0, c_alpha}) / 16'd255;
+                // ea = (ca*g_alpha)/255, truncating (blt_tri.sv:128). The real /255
+                // divider synthesised a long combinational path (the sole remaining
+                // fabric-clock violator: From ca_q To b1_ea). Replaced with the
+                // divide-free shift-add identity floor(x/255) == ((x<<8)+x+257)>>16,
+                // verified BIT-EXACT over the full product range x in [0,65025]. Only
+                // the divide changes; the 8x8 ca*g_alpha multiply is kept. na from the
+                // same temp so the reduction is instantiated once.
+                xa_t   = {8'd0, ca_q} * {8'd0, c_alpha};   // x = ca*g_alpha, [0,65025]
+                ea_t   = ( ({8'd0, xa_t} << 8) + {8'd0, xa_t} + 24'd257 ) >> 16;
                 b1_ea  <= ea_t;
                 b1_na  <= 8'd255 - ea_t;
                 // colorkey cull (stable inputs; carried to the write stage)
