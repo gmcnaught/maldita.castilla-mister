@@ -215,7 +215,9 @@ module blt_tri_setup #(
     reg               s_vld    = 1'b0;   // SEL produced operands for the MUL stage
     reg               p_vld    = 1'b0;   // a product is in pr* to accumulate
     reg               mac_degen;         // area==0: outputs moot, but drive valid
-    reg        [5:0]  mac_idx;           // SEL step 0..17 (a=idx/3, k=idx%3)
+    reg        [5:0]  mac_idx;           // SEL step counter 0..17 (termination only)
+    reg        [2:0]  mac_a;             // attribute index 0..5 (direct — no /3)
+    reg        [1:0]  mac_k;             // vert index 0..2     (direct — no %3)
     // SEL-stage registered operands (fixed location -> no mux ahead of the DSP)
     reg signed [26:0] sel_w0;            // s2_nw[k]    slice
     reg signed [23:0] sel_wx, sel_wy;    // s2_ndwdx[k] / s2_ndwdy[k] slices
@@ -497,27 +499,30 @@ module blt_tri_setup #(
                 // (still concurrent with the divider, which drains later).
                 mac_busy <= 1'b1;
                 mac_idx  <= 6'd0;
+                mac_a    <= 3'd0;
+                mac_k    <= 2'd0;
             end
 
             // ============ Stage 3 MAC — SEL: operand mux (one step / cycle) ======
-            // Step mac_idx: a = idx/3 (attribute), k = idx%3 (vert). Mux the
-            // NARROWED operands (same slices as the former parallel Stage-3: nw
-            // edge functions ~26b -> 27, deltas ~24b, attrs u/v<=32768,rgba<=255
-            // -> 18b; value unchanged in-envelope, guarded by tb_tri_setup) into
-            // FIXED sel_* registers. Keeping this array-mux OUT of the multiply
-            // cycle is the point: mac_idx->mux->DSP in one cycle was a -4.8 ns
-            // path. The three lanes share the same attribute operand sel_a.
+            // Walk the 18 (attribute mac_a, vert mac_k) pairs with DIRECT counters
+            // (mac_k 0->1->2->0, bumping mac_a) instead of mac_idx/3 and mac_idx%3
+            // — the divide/modulo by 3 synthesized a multi-stage combinational
+            // divider (mac_idx -> Mod0|divider -> sel_a was the -1.6 ns path). Mux
+            // the NARROWED operands (nw ~26b -> 27, deltas ~24b, attrs
+            // u/v<=32768,rgba<=255 -> 18b; value unchanged in-envelope, guarded by
+            // tb_tri_setup) into FIXED sel_* registers; keeping this array-mux OUT
+            // of the multiply cycle is the point. The lanes share sel_a.
             if (mac_busy && mac_idx < 6'd18) begin
-                ma = mac_idx / 3;
-                mk = mac_idx % 3;
-                sel_w0 <= s2_nw[mk][26:0];
-                sel_wx <= s2_ndwdx[mk][23:0];
-                sel_wy <= s2_ndwdy[mk][23:0];
-                sel_a  <= s2_A[ma][mk][17:0];
-                s_a    <= ma[2:0];
-                s_k    <= mk[1:0];
+                sel_w0 <= s2_nw[mac_k][26:0];
+                sel_wx <= s2_ndwdx[mac_k][23:0];
+                sel_wy <= s2_ndwdy[mac_k][23:0];
+                sel_a  <= s2_A[mac_a][mac_k][17:0];
+                s_a    <= mac_a;
+                s_k    <= mac_k;
                 s_vld  <= 1'b1;
                 mac_idx <= mac_idx + 6'd1;
+                if (mac_k == 2'd2) begin mac_k <= 2'd0; mac_a <= mac_a + 3'd1; end
+                else                    mac_k <= mac_k + 2'd1;
             end
 
             // ============ Stage 3 MAC — MUL: products from fixed registers =======
