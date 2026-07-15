@@ -19,11 +19,16 @@
 //  reciprocal-quantization error at any pixel is <= |W_*|*0.5/2^SHIFT, which for
 //  attribute magnitudes (|W_*/area| <= 255) is ~1e-4 — far inside ±1 LSB.
 //
-//  This is a behavioural, longint-precise setup block (a sim-equivalence model,
-//  mirroring blt_tri.sv's style), registered on `clk`: pulse `start` with the
-//  vertices; `valid` rises the next cycle with all outputs stable. A real build
-//  would replace the single-cycle divide with a pipelined reciprocal (amortized
-//  ~10 triangles/frame); the OUTPUT interface below is what Task 5 consumes.
+//  Registered on `clk`: pulse `start` with the vertices; all setup outputs
+//  except area_recip latch immediately, and `valid` rises once the SEQUENTIAL
+//  area reciprocal finishes. The reciprocal is a synthesizable radix-2 restoring
+//  divider unrolled to UNROLL bits/cycle (see the divider below): it computes the
+//  SAME value area_recip = round(2^SHIFT/area) as a single 2^SHIFT/area divide,
+//  but over ITERS cycles with only a short (UNROLL-deep) subtract chain per cycle,
+//  so it closes timing at any reasonable Fmax instead of as one 41-deep divide.
+//  The degenerate (area==0) case skips the divider and asserts `valid` promptly.
+//  All downstream results stay bit-exact-or-±1 vs. the golden (tb_tri_setup).
+//  The OUTPUT interface below is what Task 5 consumes and is unchanged.
 //
 //  Validated operating envelope (tb_tri_setup.sv "envelope_worst_case", passes
 //  at +-1 LSB vs. blt_tri.sv with SHIFT=40 and the 48-bit field widths below):
@@ -97,7 +102,7 @@ module blt_tri_setup #(
     reg  signed [63:0] r0a,g0a,b0a,a0a, r1a,g1a,b1a,a1a, r2a,g2a,b2a,a2a;
     reg  signed [63:0] b0,b1,b2, sx0,sy0, nw0,nw1,nw2;
     reg  signed [63:0] ndw0dx,ndw1dx,ndw2dx, ndw0dy,ndw1dy,ndw2dy;
-    reg  signed [63:0] n_recip;
+    reg  signed [63:0] n_num;                 // dividend = round-numerator of 2^SHIFT/area
     reg  signed [63:0] minx,miny;
     reg         [15:0] n_ox,n_oy;
     reg                n_degen;
@@ -154,48 +159,116 @@ module blt_tri_setup #(
         ndw1dx = 64'sd16 * (y2n - y0 );  ndw1dy = 64'sd16 * (x0  - x2n);
         ndw2dx = 64'sd16 * (y0  - y1n);  ndw2dy = 64'sd16 * (x1n - x0 );
 
-        // --- fixed-point reciprocal of the (positive) area, round-to-nearest ---
-        n_recip = ( (64'sd1 <<< SHIFT) + (den >>> 1) ) / den;
+        // --- fixed-point reciprocal of the (positive) area, round-to-nearest.
+        //     area_recip = round(2^SHIFT/area) = floor(num/den) with
+        //     num = 2^SHIFT + area/2. The floor(num/den) is done SEQUENTIALLY by
+        //     the restoring divider below (num<2^41, so it fits DIVW bits). ---
+        n_num = (64'sd1 <<< SHIFT) + (den >>> 1);
     end
 
-    // ── register everything (single behavioural cycle) ────────────────────────
+    // ── SEQUENTIAL area reciprocal (radix-2 restoring divide, unrolled) ────────
+    //  Computes q = floor(num/den) == round(2^SHIFT/area), identical to the
+    //  former single-cycle `num/den`, but iteratively: standard long division
+    //  shifting the dividend MSB-first into a running remainder, UNROLL bits per
+    //  clock. num < 2^41, so DIVW=48 dividend/quotient bits cover every quotient
+    //  (leading bits are simply 0); den <= ~2^35 fits the 64-bit remainder path.
+    //  Critical path per cycle is UNROLL chained subtract-compares (not a 41-deep
+    //  divide), so this closes timing; latency is 1 (latch) + ITERS busy cycles,
+    //  well inside the downstream valid-wait. degenerate skips the divide.
+    localparam integer DIVW   = 48;            // dividend / quotient width
+    localparam integer UNROLL = 4;             // quotient bits resolved per clock
+    localparam integer ITERS  = DIVW / UNROLL; // busy cycles (12)
+
+    reg               busy = 1'b0;             // power-up idle (rst may be tied 0)
+    reg  [6:0]        iter;                     // remaining busy cycles
+    reg  [DIVW-1:0]   div_N;                    // dividend, shifted left each step
+    reg  [DIVW-1:0]   div_Q;                    // quotient accumulator
+    reg  [63:0]       div_R;                    // running remainder
+    reg  [63:0]       div_D;                    // divisor (den)
+
+    // one clock's worth of UNROLL restoring-division steps
+    reg  [63:0]       step_R;
+    reg  [DIVW-1:0]   step_N, step_Q;
+    integer           u;
+
     always @(posedge clk) begin
         if (rst) begin
-            valid <= 1'b0; degenerate <= 1'b0;
+            valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
         end else begin
-            valid <= start;
-            if (start) begin
-                degenerate <= n_degen;
-                ox <= n_ox; oy <= n_oy;
-                area       <= n_area[47:0];
-                area_recip <= n_recip[47:0];
+            valid <= 1'b0;                      // one-cycle pulse; default low
+            if (!busy) begin
+                if (start) begin
+                    // latch every setup output except area_recip immediately
+                    degenerate <= n_degen;
+                    ox <= n_ox; oy <= n_oy;
+                    area <= n_area[47:0];
 
-                w0_0 <= nw0[47:0]; w1_0 <= nw1[47:0]; w2_0 <= nw2[47:0];
-                dw0dx<=ndw0dx[47:0]; dw1dx<=ndw1dx[47:0]; dw2dx<=ndw2dx[47:0];
-                dw0dy<=ndw0dy[47:0]; dw1dy<=ndw1dy[47:0]; dw2dy<=ndw2dy[47:0];
+                    w0_0 <= nw0[47:0]; w1_0 <= nw1[47:0]; w2_0 <= nw2[47:0];
+                    dw0dx<=ndw0dx[47:0]; dw1dx<=ndw1dx[47:0]; dw2dx<=ndw2dx[47:0];
+                    dw0dy<=ndw0dy[47:0]; dw1dy<=ndw1dy[47:0]; dw2dy<=ndw2dy[47:0];
 
-                // origin weighted sums (attr0 uses the un-swapped v0 texel/colour)
-                Wu_0 <= wsum(nw0,nw1,nw2, vu0,u1a,u2a);
-                Wv_0 <= wsum(nw0,nw1,nw2, vv0,v1a,v2a);
-                Wr_0 <= wsum(nw0,nw1,nw2, r0a,r1a,r2a);
-                Wg_0 <= wsum(nw0,nw1,nw2, g0a,g1a,g2a);
-                Wb_0 <= wsum(nw0,nw1,nw2, b0a,b1a,b2a);
-                Wa_0 <= wsum(nw0,nw1,nw2, a0a,a1a,a2a);
+                    // origin weighted sums (attr0 uses the un-swapped v0 texel/colour)
+                    Wu_0 <= wsum(nw0,nw1,nw2, vu0,u1a,u2a);
+                    Wv_0 <= wsum(nw0,nw1,nw2, vv0,v1a,v2a);
+                    Wr_0 <= wsum(nw0,nw1,nw2, r0a,r1a,r2a);
+                    Wg_0 <= wsum(nw0,nw1,nw2, g0a,g1a,g2a);
+                    Wb_0 <= wsum(nw0,nw1,nw2, b0a,b1a,b2a);
+                    Wa_0 <= wsum(nw0,nw1,nw2, a0a,a1a,a2a);
 
-                // weighted-sum deltas: dW_A/dx = sum_k dw_k/dx * A_k  (affine)
-                dWudx <= wsum(ndw0dx,ndw1dx,ndw2dx, vu0,u1a,u2a);
-                dWvdx <= wsum(ndw0dx,ndw1dx,ndw2dx, vv0,v1a,v2a);
-                dWrdx <= wsum(ndw0dx,ndw1dx,ndw2dx, r0a,r1a,r2a);
-                dWgdx <= wsum(ndw0dx,ndw1dx,ndw2dx, g0a,g1a,g2a);
-                dWbdx <= wsum(ndw0dx,ndw1dx,ndw2dx, b0a,b1a,b2a);
-                dWadx <= wsum(ndw0dx,ndw1dx,ndw2dx, a0a,a1a,a2a);
+                    // weighted-sum deltas: dW_A/dx = sum_k dw_k/dx * A_k  (affine)
+                    dWudx <= wsum(ndw0dx,ndw1dx,ndw2dx, vu0,u1a,u2a);
+                    dWvdx <= wsum(ndw0dx,ndw1dx,ndw2dx, vv0,v1a,v2a);
+                    dWrdx <= wsum(ndw0dx,ndw1dx,ndw2dx, r0a,r1a,r2a);
+                    dWgdx <= wsum(ndw0dx,ndw1dx,ndw2dx, g0a,g1a,g2a);
+                    dWbdx <= wsum(ndw0dx,ndw1dx,ndw2dx, b0a,b1a,b2a);
+                    dWadx <= wsum(ndw0dx,ndw1dx,ndw2dx, a0a,a1a,a2a);
 
-                dWudy <= wsum(ndw0dy,ndw1dy,ndw2dy, vu0,u1a,u2a);
-                dWvdy <= wsum(ndw0dy,ndw1dy,ndw2dy, vv0,v1a,v2a);
-                dWrdy <= wsum(ndw0dy,ndw1dy,ndw2dy, r0a,r1a,r2a);
-                dWgdy <= wsum(ndw0dy,ndw1dy,ndw2dy, g0a,g1a,g2a);
-                dWbdy <= wsum(ndw0dy,ndw1dy,ndw2dy, b0a,b1a,b2a);
-                dWady <= wsum(ndw0dy,ndw1dy,ndw2dy, a0a,a1a,a2a);
+                    dWudy <= wsum(ndw0dy,ndw1dy,ndw2dy, vu0,u1a,u2a);
+                    dWvdy <= wsum(ndw0dy,ndw1dy,ndw2dy, vv0,v1a,v2a);
+                    dWrdy <= wsum(ndw0dy,ndw1dy,ndw2dy, r0a,r1a,r2a);
+                    dWgdy <= wsum(ndw0dy,ndw1dy,ndw2dy, g0a,g1a,g2a);
+                    dWbdy <= wsum(ndw0dy,ndw1dy,ndw2dy, b0a,b1a,b2a);
+                    dWady <= wsum(ndw0dy,ndw1dy,ndw2dy, a0a,a1a,a2a);
+
+                    if (n_degen) begin
+                        // area==0: no divide; area_recip == 2^SHIFT (den forced 1)
+                        area_recip <= (48'd1 <<< SHIFT);
+                        valid      <= 1'b1;
+                    end else begin
+                        // kick the sequential divider: q = floor(n_num / den)
+                        div_N <= n_num[DIVW-1:0];
+                        div_D <= den[63:0];
+                        div_R <= 64'd0;
+                        div_Q <= {DIVW{1'b0}};
+                        iter  <= ITERS[6:0];
+                        busy  <= 1'b1;
+                    end
+                end
+            end else begin
+                // one clock = UNROLL restoring steps (short combinational chain)
+                step_R = div_R;
+                step_N = div_N;
+                step_Q = div_Q;
+                for (u = 0; u < UNROLL; u = u + 1) begin
+                    step_R = (step_R <<< 1) | step_N[DIVW-1];
+                    step_N = step_N <<< 1;
+                    if (step_R >= div_D) begin
+                        step_R = step_R - div_D;
+                        step_Q = (step_Q <<< 1) | 1'b1;
+                    end else begin
+                        step_Q = (step_Q <<< 1);
+                    end
+                end
+                div_R <= step_R;
+                div_N <= step_N;
+                div_Q <= step_Q;
+                if (iter == 7'd1) begin
+                    area_recip <= step_Q[47:0];   // fully resolved quotient
+                    valid      <= 1'b1;
+                    busy       <= 1'b0;
+                end else begin
+                    iter <= iter - 7'd1;
+                end
             end
         end
     end
