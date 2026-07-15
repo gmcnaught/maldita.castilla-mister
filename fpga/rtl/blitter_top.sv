@@ -789,20 +789,29 @@ module blitter_top #(
                 tri_vb2<=tri_vqw[5][23:16]; tri_va2<=tri_vqw[5][31:24];
                 state<=S_TRI_SETUP;
             end
-            // Pulse blt_tri_setup.start (verts are registered/stable).
+            // Pulse blt_tri_setup.start (verts are registered/stable). Also
+            // PRE-REGISTER the bbox-max here: tri_maxx_cl/tri_maxy_cl are a
+            // combinational max->(+15)->>>4->clamp cloud off the raw verts, and
+            // the verts are stable while setup runs its ~54 cycles. Registering
+            // them now means the S_TRI_SWAIT seed compares/loads against a REGISTER
+            // instead of chaining that whole vertex->bbox cloud into the 48-bit
+            // accumulator loads (row_Wa etc.) in one cycle — that chain was the
+            // -4.5 ns worst setup path.
             S_TRI_SETUP: begin
                 tri_setup_start <= 1'b1;
+                tri_maxx <= tri_maxx_cl; tri_maxy <= tri_maxy_cl;
                 state<=S_TRI_SWAIT;
             end
             // Wait for setup valid; seed bbox + running accumulators at (ox,oy).
             // Skip degenerate or fully-off (min>max) triangles.
             S_TRI_SWAIT: if (ts_valid) begin
-                if (ts_degenerate || (ts_ox > tri_maxx_cl) || (ts_oy > tri_maxy_cl))
+                // guard against registered bbox-max (set at S_TRI_SETUP)
+                if (ts_degenerate || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
                     state<=S_TRI_NEXT;
                 else begin
                     tri_ox <= ts_ox;
                     tri_px <= ts_ox;      tri_py <= ts_oy;
-                    tri_maxx <= tri_maxx_cl; tri_maxy <= tri_maxy_cl;
+                    // tri_maxx/tri_maxy already registered at S_TRI_SETUP
                     w0<=ts_w0_0; w1<=ts_w1_0; w2<=ts_w2_0;
                     row_w0<=ts_w0_0; row_w1<=ts_w1_0; row_w2<=ts_w2_0;
                     Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
