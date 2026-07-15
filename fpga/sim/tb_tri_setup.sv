@@ -161,7 +161,7 @@ module tb_tri_setup;
 
       errs = 0; nsamp = 0;
       @(negedge clk); start<=1; @(negedge clk); start<=0;
-      wi=0; while (!valid && wi<48) begin @(negedge clk); wi=wi+1; end
+      wi=0; while (!valid && wi<80) begin @(negedge clk); wi=wi+1; end
       if (!valid) begin
         $display("RESULT: FAIL (%0s: setup never asserted valid)", case_name);
         $finish;

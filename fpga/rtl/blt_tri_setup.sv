@@ -45,9 +45,10 @@
 //  The area reciprocal is a synthesizable radix-2 restoring divider (UNROLL
 //  bits/cycle, ITERS busy cycles) kicked at S2 and running CONCURRENTLY with
 //  S3/S4; `valid` rises when it finishes (it is the long pole). Latency:
-//  non-degenerate ~18 cycles (5 S1 sub-stages P1..P5 + S2 kick + ITERS divider
-//  cycles), degenerate ~8 cycles (skips the divider, asserts valid when S4
-//  lands). Both are well inside the downstream valid-wait (tb caps at 48). The
+//  non-degenerate ~54 cycles (5 S1 sub-stages P1..P5 + S2 kick + ITERS=48
+//  divider cycles), degenerate ~8 cycles (skips the divider, asserts valid
+//  when S4 lands). Both are well inside the downstream valid-wait (tb caps at
+//  80). The
 //  extra S1 pipe depth is free — setup runs once per triangle (~10/frame). The
 //  arithmetic is UNCHANGED from
 //  the former single-cycle block — only pipeline registers were inserted — so
@@ -197,11 +198,16 @@ module blt_tri_setup #(
     //  MSB-first into a running remainder, UNROLL bits per clock. num < 2^41, so
     //  DIVW=48 dividend/quotient bits cover every quotient (leading bits are 0);
     //  den <= ~2^35 fits the 64-bit remainder path. Critical path per cycle is
-    //  UNROLL chained subtract-compares (not a 41-deep divide), so this closes
-    //  timing; it is KICKED at S2 and runs concurrently with S3/S4.
+    //  UNROLL chained subtract-compares (not a 41-deep divide). At UNROLL=1 that
+    //  is a SINGLE shift + subtract-compare + conditional-restore per clock
+    //  (~6 ns), which closes the 10.158 ns fabric clock with margin — a prior
+    //  UNROLL=4 build chained four subtract-compares (~25 ns) and missed setup by
+    //  ~15.3 ns on div_R. Spreading the SAME divide over ITERS=48 cycles instead
+    //  of 12 yields a BIT-IDENTICAL quotient. KICKED at S2, runs concurrently
+    //  with S3/S4.
     localparam integer DIVW   = 48;            // dividend / quotient width
-    localparam integer UNROLL = 4;             // quotient bits resolved per clock
-    localparam integer ITERS  = DIVW / UNROLL; // busy cycles (12)
+    localparam integer UNROLL = 1;             // quotient bits resolved per clock
+    localparam integer ITERS  = DIVW / UNROLL; // busy cycles (48)
 
     reg               busy = 1'b0;             // power-up idle (rst may be tied 0)
     reg  [6:0]        iter;                     // remaining busy cycles
