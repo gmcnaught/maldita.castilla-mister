@@ -81,6 +81,9 @@
 `define BLT_BLEND_PALPHA      8'd3
 `define BLT_BLEND_ADD         8'd4   // saturating add: out = min(src+dst, chan_max)
 `define BLT_BLEND_MULTIPLY    8'd5   // multiply:       out = round(src*dst / chan_max)
+// ── [TRILIST v1] textured-triangle opcode (Task 5). opcodes 5-9 were removed in
+// Task 2; 10 is free and matches the host ABI (blitter_ref.h BLT_OP_TRILIST).
+`define OP_TRILIST            8'd10
 `define BLT_F_COLORMOD        8'h40  // _pad bytes carry RGB888 src tint (cr,cg,cb)
 // ── [PAL8 v1] source-format constants (mirror blitter_ref.h) ─────────────────────
 `define BLT_FMT_RGB565        8'd0

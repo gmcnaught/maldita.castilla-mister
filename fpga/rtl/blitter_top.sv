@@ -151,9 +151,23 @@ module blitter_top #(
         // ---- work->scan snapshot [FB-in-BRAM double-buffer] -------------------------
         S_SNAP_WAIT=6'd42,         // frame composited: wait for vblank rising, then trigger
         S_SNAP_BUSY=6'd43,         // snapshot started: wait for busy to assert
-        S_SNAP_DRAIN=6'd44;        // wait for the work->scan copy to finish, then poll submit
+        S_SNAP_DRAIN=6'd44,        // wait for the work->scan copy to finish, then poll submit
+        // ---- BLT_OP_TRILIST textured-triangle rasterizer (Task 5) -------------------
+        S_TRI_VFETCH=6'd45,        // issue the DDR read of vertex qword 0 for this triangle
+        S_TRI_VCOLLECT=6'd46,      // collect the 6 vertex qwords (3 verts x 2 qw)
+        S_TRI_DECV=6'd47,          // unpack qwords -> the 3 vertices (x,y,u,v,rgba)
+        S_TRI_SETUP=6'd48,         // pulse blt_tri_setup.start
+        S_TRI_SWAIT=6'd49,         // wait for setup valid; seed bbox + accumulators
+        S_TRI_PIX=6'd50,           // evaluate coverage; if covered, interp + issue texel read
+        S_TRI_GOTTEX=6'd51,        // wait p0_ok; latch texel; (maybe) issue comp_fbram dst read
+        S_TRI_DSTW=6'd52,          // comp_fbram read latency cycle
+        S_TRI_DSTC=6'd53,          // capture dst lane
+        S_TRI_WR=6'd54,            // drive blt_blend; write comp_fbram on write_en
+        S_TRI_ADV=6'd55,          // step w*/attributes by per-x deltas, wrap rows by per-row deltas
+        S_TRI_NEXT=6'd56;         // triangle done: next triangle or finish the command
 
-    localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4;
+    localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
+                     OP_TRILIST=8'd10;
     // [v2 escape-elim] blend_mode now spans 0..5 (ADD=4, MULTIPLY=5). The decode just
     // forwards c_blend to comp_pipeline, which maps it onto comp_mixer modes.
     localparam [7:0] BLEND_KEY=8'd1, BLEND_ALPHA=8'd2, BLEND_PALPHA=8'd3,
@@ -326,6 +340,96 @@ module blitter_top #(
     // video control word (drop-in producer): frame_counter[31:2] | buf[1:0]
     wire [31:0] vctrl_val = ((frame_counter + 32'd1) << 2) | {31'd0, target_buf[0]};
 
+    // ════════════════════════════════════════════════════════════════════════
+    //  BLT_OP_TRILIST datapath (Task 5) — third bus owner: tri_busy
+    // ════════════════════════════════════════════════════════════════════════
+    reg          tri_busy;                 // set on OP_TRILIST decode, cleared at S_NEXT_CMD
+    reg  [15:0]  tri_count, tri_idx;        // triangle count (cmd.w) + current triangle
+    reg  [31:0]  tri_entry_qw;             // SRC_QW + (EOFF>>3) : first vertex qword (real qw addr)
+    reg  [2:0]   tri_vk;                    // vertex-qword collect index 0..5
+    reg  [63:0]  tri_vqw [0:5];             // the 6 fetched vertex qwords
+    // the 3 unpacked vertices (screen 12.4 signed; u/v 12.4 unsigned; rgba 8b/ch)
+    reg  signed [15:0] tri_vx0,tri_vy0, tri_vx1,tri_vy1, tri_vx2,tri_vy2;
+    reg         [15:0] tri_vu0,tri_vv0, tri_vu1,tri_vv1, tri_vu2,tri_vv2;
+    reg         [7:0]  tri_vr0,tri_vg0,tri_vb0,tri_va0;
+    reg         [7:0]  tri_vr1,tri_vg1,tri_vb1,tri_va1;
+    reg         [7:0]  tri_vr2,tri_vg2,tri_vb2,tri_va2;
+    reg          tri_setup_start;           // 1-cycle pulse into blt_tri_setup
+
+    // walk state
+    reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
+    reg  signed [63:0] w0, w1, w2;                     // running coverage edges (this pixel)
+    reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=ox)
+    reg  signed [63:0] Wu, Wv, Wr, Wg, Wb, Wa;         // running weighted attr sums (this pixel)
+    reg  signed [63:0] row_Wu,row_Wv,row_Wr,row_Wg,row_Wb,row_Wa; // at row start
+
+    // per-pixel latched intermediates
+    reg  [7:0]   cr_q, cg_q, cb_q, ca_q;   // interpolated colour for the blend
+    reg  [1:0]   tex_lane_q;               // 16-bit lane within the fetched texel qword
+    reg  [15:0]  texel_q, dst_q;           // fetched texel + dst pixel
+    reg  [14:0]  dst_qw_q;                 // comp_fbram qword index for this pixel
+    reg  [1:0]   dst_lane_q;               // x[1:0]
+
+    // registered bus-owner outputs (muxed onto p0_*/fb_* below when tri_busy)
+    reg          tri_p0_rd;   reg [26:0] tri_p0_addr;
+    reg          tri_fb_rd_en; reg [14:0] tri_fb_rd_qw;
+    reg          tri_fb_wr_en; reg [14:0] tri_fb_wr_qw; reg [1:0] tri_fb_wr_lane; reg [15:0] tri_fb_wr_pix;
+
+    wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
+
+    // combinational temps for the per-pixel interpolation (blocking, used in S_TRI_PIX)
+    reg  signed [95:0] mul_u, mul_v, mul_r, mul_g, mul_b, mul_a;
+    reg  signed [63:0] rnd_u, rnd_v, rnd_r, rnd_g, rnd_b, rnd_a;
+    reg  signed [31:0] itu, itv;
+    reg         [15:0] tw1r, th1r;
+    reg         [31:0] texbyte;
+
+    // blt_tri_setup registered outputs (stable from `valid` until the next start)
+    wire               ts_valid, ts_degenerate;
+    wire        [15:0] ts_ox, ts_oy;
+    wire signed [47:0] ts_area, ts_area_recip;
+    wire signed [47:0] ts_w0_0, ts_w1_0, ts_w2_0;
+    wire signed [47:0] ts_dw0dx, ts_dw1dx, ts_dw2dx, ts_dw0dy, ts_dw1dy, ts_dw2dy;
+    wire signed [47:0] ts_Wu_0, ts_Wv_0, ts_Wr_0, ts_Wg_0, ts_Wb_0, ts_Wa_0;
+    wire signed [47:0] ts_dWudx, ts_dWvdx, ts_dWrdx, ts_dWgdx, ts_dWbdx, ts_dWadx;
+    wire signed [47:0] ts_dWudy, ts_dWvdy, ts_dWrdy, ts_dWgdy, ts_dWbdy, ts_dWady;
+
+    blt_tri_setup #(.SHIFT(40)) u_tri_setup (
+        .clk(clk), .rst(rst), .start(tri_setup_start),
+        .vx0(tri_vx0), .vy0(tri_vy0), .vx1(tri_vx1), .vy1(tri_vy1), .vx2(tri_vx2), .vy2(tri_vy2),
+        .vu0(tri_vu0), .vv0(tri_vv0), .vu1(tri_vu1), .vv1(tri_vv1), .vu2(tri_vu2), .vv2(tri_vv2),
+        .vr0(tri_vr0), .vg0(tri_vg0), .vb0(tri_vb0), .va0(tri_va0),
+        .vr1(tri_vr1), .vg1(tri_vg1), .vb1(tri_vb1), .va1(tri_va1),
+        .vr2(tri_vr2), .vg2(tri_vg2), .vb2(tri_vb2), .va2(tri_va2),
+        .tex_w(c_src_x), .tex_h(c_src_y),
+        .valid(ts_valid), .degenerate(ts_degenerate), .ox(ts_ox), .oy(ts_oy),
+        .area(ts_area), .area_recip(ts_area_recip),
+        .w0_0(ts_w0_0), .w1_0(ts_w1_0), .w2_0(ts_w2_0),
+        .dw0dx(ts_dw0dx), .dw1dx(ts_dw1dx), .dw2dx(ts_dw2dx),
+        .dw0dy(ts_dw0dy), .dw1dy(ts_dw1dy), .dw2dy(ts_dw2dy),
+        .Wu_0(ts_Wu_0), .Wv_0(ts_Wv_0), .Wr_0(ts_Wr_0), .Wg_0(ts_Wg_0), .Wb_0(ts_Wb_0), .Wa_0(ts_Wa_0),
+        .dWudx(ts_dWudx), .dWvdx(ts_dWvdx), .dWrdx(ts_dWrdx), .dWgdx(ts_dWgdx), .dWbdx(ts_dWbdx), .dWadx(ts_dWadx),
+        .dWudy(ts_dWudy), .dWvdy(ts_dWvdy), .dWrdy(ts_dWrdy), .dWgdy(ts_dWgdy), .dWbdy(ts_dWbdy), .dWady(ts_dWady));
+
+    // blend core (byte-identical to blt_tri.sv:121-148), driven from the walk's latches
+    wire        tri_blend_we;
+    wire [15:0] tri_blend_pix;
+    blt_blend u_tri_blend (
+        .texel(texel_q), .dst(dst_q),
+        .cr(cr_q), .cg(cg_q), .cb(cb_q), .ca(ca_q),
+        .g_alpha(c_alpha), .blend_mode(c_blend), .colorkey(c_colorkey),
+        .write_en(tri_blend_we), .out_pix(tri_blend_pix));
+
+    // bbox-max (from raw verts, matching blt_tri.c: (hx+ONE-1)>>SUB clamp FB-1)
+    wire signed [15:0] tri_hx = (tri_vx0>tri_vx1)?((tri_vx0>tri_vx2)?tri_vx0:tri_vx2)
+                                                 :((tri_vx1>tri_vx2)?tri_vx1:tri_vx2);
+    wire signed [15:0] tri_hy = (tri_vy0>tri_vy1)?((tri_vy0>tri_vy2)?tri_vy0:tri_vy2)
+                                                 :((tri_vy1>tri_vy2)?tri_vy1:tri_vy2);
+    wire signed [31:0] tri_maxx_c = ($signed(tri_hx) + 32'sd15) >>> 4;
+    wire signed [31:0] tri_maxy_c = ($signed(tri_hy) + 32'sd15) >>> 4;
+    wire [15:0] tri_maxx_cl = (tri_maxx_c > 32'sd319) ? 16'd319 : (tri_maxx_c < 0 ? 16'd0 : tri_maxx_c[15:0]);
+    wire [15:0] tri_maxy_cl = (tri_maxy_c > 32'sd239) ? 16'd239 : (tri_maxy_c < 0 ? 16'd0 : tri_maxy_c[15:0]);
+
     always @(posedge clk) begin
         if (rst) begin
             state<=S_POLL_SUBMIT; bm_rd<=0; bm_wr<=0; bm_be<=0;
@@ -338,9 +442,15 @@ module blitter_top #(
             stage_we_burst_fsm<=1'b0; stage_din64_fsm<=64'd0;
             stage_barrier<=1'b0; barrier_seen_busy<=1'b0;
             snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
+            tri_busy<=1'b0; tri_setup_start<=1'b0;
+            tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
         end else begin
             bm_rd<=1'b0;
             pipe_start<=1'b0;     // single-cycle blit_start pulse to comp_pipeline
+            tri_setup_start<=1'b0;// single-cycle setup start pulse
+            tri_p0_rd<=1'b0;      // single-cycle P_SRC texel read pulse
+            tri_fb_rd_en<=1'b0;   // single-cycle comp_fbram dst read
+            tri_fb_wr_en<=1'b0;   // single-cycle comp_fbram composite write
             stage_barrier<=1'b0;  // single-cycle barrier request unless re-asserted in S_STAGE_BARRIER
             src_sdram_we<=1'b0;   // single-cycle write request unless re-asserted (held in S_STAGE_WR_WAIT)
             stage_we_burst_fsm<=1'b0; // single-cycle burst-write request unless re-asserted
@@ -506,6 +616,18 @@ module blitter_top #(
                     stage_byte <= 32'd0;
                     if ({c_h, c_w} == 32'd0) state<=S_NEXT_CMD;
                     else                     state<=S_STAGE_RD;
+                end
+                else if (c_opcode==OP_TRILIST) begin
+                    // BLT_OP_TRILIST: composite `w` textured triangles into comp_fbram.
+                    // Header reuse: w=tri_count, {c_dst_y,c_dst_x}=vertex byte offset (EOFF),
+                    // c_src_off/stride=tex page+row bytes, c_src_x/y=tex_w/tex_h,
+                    // c_blend/c_alpha/c_colorkey = blend params.
+                    tri_count    <= c_w;
+                    tri_idx      <= 16'd0;
+                    tri_entry_qw <= `SRC_QW + ({c_dst_y, c_dst_x} >> 3);
+                    tri_busy     <= 1'b1;
+                    if (c_w == 16'd0) begin tri_busy<=1'b0; state<=S_NEXT_CMD; end
+                    else                    state<=S_TRI_VFETCH;
                 end
                 else if (empty)             state<=S_NEXT_CMD;
                 else begin
