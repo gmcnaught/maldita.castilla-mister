@@ -152,7 +152,7 @@ module blt_tri_setup #(
     //   P5: reciprocal-numerator prep num = 2^SHIFT + den/2.       [add only]
     // g1..g4 are the P1..P4 completion pulses; e1 marks P5 done (== old "S1
     // done"), after which S2/S3/S4 below are UNCHANGED.
-    reg e1;                 // S2 completion / divider+MAC kick pulse
+    reg e1, e1b, e1c;       // S2 edge-function sub-stages (diffs / products / combine)
     reg g1, g2, g3, g4;
 
     // ── P1 registers: edgef vertex differences + origin; raw verts/attrs carry ─
@@ -234,6 +234,18 @@ module blt_tri_setup #(
     reg        [15:0] t_ox, t_oy;
     reg signed [63:0] tb0,tb1,tb2;
     reg signed [63:0] tnw0,tnw1,tnw2, tdx0,tdx1,tdx2, tdy0,tdy1,tdy2;
+    // ── S2 edge-function PIPELINE registers (edgef diff->mult->sub split) ───────
+    //  edgef(a,b,c) = (bx-ax)(cy-ay) - (by-ay)(cx-ax). Done in one cycle it was a
+    //  diff -> DSP multiply -> subtract chain (s1_x2 -> w1_0, the -4.3 ns worst
+    //  setup path). Split into S2a (diffs) / S2b (products) / S2c (subtract+bias),
+    //  mirroring the S1 P1..P5 split. Setup is divider-bound (~48 cyc), so the two
+    //  extra cycles are free; arithmetic is identical -> bit-exact.
+    reg signed [18:0] dbx0,dcy0,dby0,dcx0;   // edgef diffs, narrowed to 19b as edgef() does
+    reg signed [18:0] dbx1,dcy1,dby1,dcx1;
+    reg signed [18:0] dbx2,dcy2,dby2,dcx2;
+    reg signed [63:0] sb0,sb1,sb2;           // registered top-left biases
+    reg signed [63:0] sdx0,sdy0,sdx1,sdy1,sdx2,sdy2;  // registered per-x/per-row deltas
+    reg signed [63:0] pr0a,pr0b,pr1a,pr1b,pr2a,pr2b;  // the two edgef products per edge
     integer a, k;
     // Stage-3 MAC blocking temporaries (accumulate stage: add only)
     reg signed [63:0] sum0, sumx, sumy;
@@ -271,12 +283,12 @@ module blt_tri_setup #(
     always @(posedge clk) begin
         if (rst) begin
             valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
-            e1 <= 1'b0;
+            e1 <= 1'b0; e1b <= 1'b0; e1c <= 1'b0;
             g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
             mac_busy <= 1'b0; s_vld <= 1'b0; p_vld <= 1'b0;
         end else begin
             valid <= 1'b0;                      // one-cycle pulse; default low
-            e1 <= 1'b0;                         // S2 kick pulse default low
+            e1 <= 1'b0; e1b <= 1'b0; e1c <= 1'b0; // S2 sub-stage pulses default low
             g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
             s_vld <= 1'b0;                       // MAC operand-valid default low
             p_vld <= 1'b0;                       // MAC product-valid default low
@@ -287,7 +299,7 @@ module blt_tri_setup #(
             // DIFFERENCES here (no multiply). The bbox-min origin is swap-
             // invariant (the CCW swap only exchanges verts 1<->2), so compute it
             // from the RAW verts now. Carry raw verts+attrs to the P4 swap point.
-            if (start && !busy && !mac_busy && !e1 && !g1 && !g2 && !g3 && !g4) begin
+            if (start && !busy && !mac_busy && !e1 && !e1b && !e1c && !g1 && !g2 && !g3 && !g4) begin
                 p1_dbx <= vx1 - vx0;   p1_dcy <= vy2 - vy0;   // bx-ax , cy-ay
                 p1_dby <= vy1 - vy0;   p1_dcx <= vx2 - vx0;   // by-ay , cx-ax
 
@@ -403,33 +415,33 @@ module blt_tri_setup #(
                 e1 <= 1'b1;
             end
 
-            // ============ Stage 2: edge functions + deltas + kick divider =======
+            // ============ Stage 2a: edgef coord differences + biases + deltas ===
+            // edgef(a,b,c) = (bx-ax)(cy-ay) - (by-ay)(cx-ax). Register the four
+            // DIFFERENCES per edge here (narrowed to 19b exactly as edgef() does),
+            // so the products next cycle are NOT chained onto the subtract. Also
+            // the (comparison-only) top-left biases and the (shift-only) per-x/
+            // per-row deltas, and carry the attrs. Kick the reciprocal divider now
+            // (it only needs s1_num/s1_den and is the ~48-cycle long pole).
             if (e1) begin
-                // top-left biases (identical edge pairing to blt_tri.sv:95-97)
-                tb0 = tlbias(s1_x1,s1_y1, s1_x2,s1_y2);   // edge b->c, opposite a
-                tb1 = tlbias(s1_x2,s1_y2, s1_x0,s1_y0);   // edge c->a, opposite b
-                tb2 = tlbias(s1_x0,s1_y0, s1_x1,s1_y1);   // edge a->b, opposite c
+                // edge 0 = edgef(v1,v2,sample):  a=(x1,y1) b=(x2,y2) c=(sx0,sy0)
+                dbx0 <= s1_x2 - s1_x1;  dcy0 <= s1_sy0 - s1_y1;
+                dby0 <= s1_y2 - s1_y1;  dcx0 <= s1_sx0 - s1_x1;
+                // edge 1 = edgef(v2,v0,sample):  a=(x2,y2) b=(x0,y0) c=(sx0,sy0)
+                dbx1 <= s1_x0 - s1_x2;  dcy1 <= s1_sy0 - s1_y2;
+                dby1 <= s1_y0 - s1_y2;  dcx1 <= s1_sx0 - s1_x2;
+                // edge 2 = edgef(v0,v1,sample):  a=(x0,y0) b=(x1,y1) c=(sx0,sy0)
+                dbx2 <= s1_x1 - s1_x0;  dcy2 <= s1_sy0 - s1_y0;
+                dby2 <= s1_y1 - s1_y0;  dcx2 <= s1_sx0 - s1_x0;
 
-                // edge functions at the origin sample (single multiply depth: the
-                // two products inside edgef are parallel, then one subtract)
-                tnw0 = edgef(s1_x1,s1_y1, s1_x2,s1_y2, s1_sx0,s1_sy0) + tb0;
-                tnw1 = edgef(s1_x2,s1_y2, s1_x0,s1_y0, s1_sx0,s1_sy0) + tb1;
-                tnw2 = edgef(s1_x0,s1_y0, s1_x1,s1_y1, s1_sx0,s1_sy0) + tb2;
+                // top-left biases (comparisons only; identical edge pairing)
+                sb0 <= tlbias(s1_x1,s1_y1, s1_x2,s1_y2);
+                sb1 <= tlbias(s1_x2,s1_y2, s1_x0,s1_y0);
+                sb2 <= tlbias(s1_x0,s1_y0, s1_x1,s1_y1);
 
                 // constant per-x / per-row edge deltas (shifts only; no multiply)
-                tdx0 = 64'sd16 * (s1_y1 - s1_y2);  tdy0 = 64'sd16 * (s1_x2 - s1_x1);
-                tdx1 = 64'sd16 * (s1_y2 - s1_y0);  tdy1 = 64'sd16 * (s1_x0 - s1_x2);
-                tdx2 = 64'sd16 * (s1_y0 - s1_y1);  tdy2 = 64'sd16 * (s1_x1 - s1_x0);
-
-                // full-precision carriers for the S3 products
-                s2_nw[0] <= tnw0; s2_nw[1] <= tnw1; s2_nw[2] <= tnw2;
-                s2_ndwdx[0] <= tdx0; s2_ndwdx[1] <= tdx1; s2_ndwdx[2] <= tdx2;
-                s2_ndwdy[0] <= tdy0; s2_ndwdy[1] <= tdy1; s2_ndwdy[2] <= tdy2;
-
-                // registered module outputs (truncate to 48b exactly as before)
-                w0_0 <= tnw0[47:0]; w1_0 <= tnw1[47:0]; w2_0 <= tnw2[47:0];
-                dw0dx <= tdx0[47:0]; dw1dx <= tdx1[47:0]; dw2dx <= tdx2[47:0];
-                dw0dy <= tdy0[47:0]; dw1dy <= tdy1[47:0]; dw2dy <= tdy2[47:0];
+                sdx0 <= 64'sd16 * (s1_y1 - s1_y2);  sdy0 <= 64'sd16 * (s1_x2 - s1_x1);
+                sdx1 <= 64'sd16 * (s1_y2 - s1_y0);  sdy1 <= 64'sd16 * (s1_x0 - s1_x2);
+                sdx2 <= 64'sd16 * (s1_y0 - s1_y1);  sdy2 <= 64'sd16 * (s1_x1 - s1_x0);
 
                 // carry attrs forward for the sequential MAC
                 for (a = 0; a < 6; a = a + 1) begin
@@ -450,12 +462,41 @@ module blt_tri_setup #(
                     iter  <= ITERS[6:0];
                     busy  <= 1'b1;
                 end
+                mac_degen <= s1_degen;   // latch for the MAC valid at S2c kick
 
-                // kick the sequential Stage-3 MAC (runs concurrently with the
-                // divider; drains well before it, so latency is divider-bound)
-                mac_busy  <= 1'b1;
-                mac_idx   <= 6'd0;
-                mac_degen <= s1_degen;
+                e1b <= 1'b1;
+            end
+
+            // ============ Stage 2b: the two edgef products per edge ==============
+            // From the registered 19b differences -> one DSP each, no subtract in
+            // this cycle. (This is the split that fixed the s1_x2 -> w1_0 path.)
+            if (e1b) begin
+                pr0a <= dbx0 * dcy0;  pr0b <= dby0 * dcx0;
+                pr1a <= dbx1 * dcy1;  pr1b <= dby1 * dcx1;
+                pr2a <= dbx2 * dcy2;  pr2b <= dby2 * dcx2;
+                e1c <= 1'b1;
+            end
+
+            // ============ Stage 2c: subtract + bias -> edge functions; kick MAC ==
+            if (e1c) begin
+                tnw0 = pr0a - pr0b + sb0;   // == edgef(v1,v2,sample) + tb0
+                tnw1 = pr1a - pr1b + sb1;
+                tnw2 = pr2a - pr2b + sb2;
+
+                // full-precision carriers for the MAC
+                s2_nw[0] <= tnw0; s2_nw[1] <= tnw1; s2_nw[2] <= tnw2;
+                s2_ndwdx[0] <= sdx0; s2_ndwdx[1] <= sdx1; s2_ndwdx[2] <= sdx2;
+                s2_ndwdy[0] <= sdy0; s2_ndwdy[1] <= sdy1; s2_ndwdy[2] <= sdy2;
+
+                // registered module outputs (truncate to 48b exactly as before)
+                w0_0 <= tnw0[47:0]; w1_0 <= tnw1[47:0]; w2_0 <= tnw2[47:0];
+                dw0dx <= sdx0[47:0]; dw1dx <= sdx1[47:0]; dw2dx <= sdx2[47:0];
+                dw0dy <= sdy0[47:0]; dw1dy <= sdy1[47:0]; dw2dy <= sdy2[47:0];
+
+                // kick the sequential Stage-3 MAC now that s2_nw/ndw* are valid
+                // (still concurrent with the divider, which drains later).
+                mac_busy <= 1'b1;
+                mac_idx  <= 6'd0;
             end
 
             // ============ Stage 3 MAC — SEL: operand mux (one step / cycle) ======
