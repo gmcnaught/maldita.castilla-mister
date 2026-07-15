@@ -22,12 +22,20 @@
 //  ── PIPELINED setup (timing closure) ───────────────────────────────────────
 //  Registered on `clk`: pulse `start` with the vertices. The setup math is now
 //  split into REGISTERED PIPELINE STAGES so no single clock cycle chains more
-//  than one multiplier (the former one-cycle combinational block chained the
-//  edge-function product INTO the weighted-sum product, which failed Quartus
-//  setup timing at ~98 MHz on the fabric clock). The stages are:
-//    S1 (on start): signed area (edgef) + CCW-normalize (select the possibly-
-//        swapped vertex coords/attrs into registers); origin (ox,oy) + sample
-//        (sx0,sy0); degenerate/den/reciprocal-numerator. [multiplier depth 1]
+//  than one multiplier NOR a multiply into a wide (60-bit) add/normalize. (An
+//  earlier build still had the whole edgef area — two products chained into a
+//  subtract, abs and CCW-normalize, all combinational from the raw input
+//  vertices into the 60-bit s1_den — as ONE cycle, and it was the last path to
+//  miss Quartus setup timing at ~98 MHz on the fabric clock.) The stages are:
+//    S1, split into five sub-stages so the area/den/num path fits one cycle:
+//        P1 (on start): edgef vertex DIFFERENCES (x1-x0,y2-y0,y1-y0,x2-x0) +
+//            origin (ox,oy,sx0,sy0 — bbox-min is swap-invariant, so from the raw
+//            verts); carry raw verts/attrs forward.            [no multiply]
+//        P2: the two edgef PRODUCTS.                           [multiplier depth 1]
+//        P3: the SUBTRACT -> signed area.                      [add only]
+//        P4: CCW-normalize (|area|, degenerate, den) + swap-select the verts/
+//            attrs into the s1_* registers; emit area/ox/oy/degenerate.
+//        P5: reciprocal-numerator prep num = 2^SHIFT + den/2.  [add only]
 //    S2: the three edge functions w{k}_0 at the origin sample (+top-left bias),
 //        and the small per-x/per-row edge deltas dw{k}dx=16*(yi-yj),
 //        dw{k}dy=16*(xj-xi); KICK the sequential area reciprocal. [mult depth 1]
@@ -37,9 +45,11 @@
 //  The area reciprocal is a synthesizable radix-2 restoring divider (UNROLL
 //  bits/cycle, ITERS busy cycles) kicked at S2 and running CONCURRENTLY with
 //  S3/S4; `valid` rises when it finishes (it is the long pole). Latency:
-//  non-degenerate ~13 cycles (1 latch + S2 kick + ITERS divider cycles),
-//  degenerate ~4 cycles (skips the divider, asserts valid when S4 lands). Both
-//  are well inside the downstream valid-wait. The arithmetic is UNCHANGED from
+//  non-degenerate ~18 cycles (5 S1 sub-stages P1..P5 + S2 kick + ITERS divider
+//  cycles), degenerate ~8 cycles (skips the divider, asserts valid when S4
+//  lands). Both are well inside the downstream valid-wait (tb caps at 48). The
+//  extra S1 pipe depth is free — setup runs once per triangle (~10/frame). The
+//  arithmetic is UNCHANGED from
 //  the former single-cycle block — only pipeline registers were inserted — so
 //  every output stays bit-exact-or-±1 vs. the golden (tb_tri_setup).
 //  The OUTPUT interface below is what Task 5 consumes and is unchanged.
@@ -110,8 +120,45 @@ module blt_tri_setup #(
         tlbias = (((ay==by) && (bx<ax)) || (by>ay)) ? 64'sd0 : -64'sd1;
     endfunction
 
-    // ── pipeline stage-valid pulses (one-hot progression S1->S2->S3->S4) ───────
+    // ── pipeline stage-valid pulses ───────────────────────────────────────────
+    // The former one-cycle S1 (edgef = two products chained into a 60-bit
+    // subtract/abs/normalize, straight from the raw input vertices) failed
+    // Quartus setup timing on the fabric clock. It is now split across FIVE
+    // registered sub-stages P1..P5 so no cycle chains a multiply into a wide
+    // add/normalize, then feeds the SAME s1_* registers the old S1 produced:
+    //   P1 (on start): vertex DIFFERENCES for edgef (x1-x0, y2-y0, y1-y0,
+    //       x2-x0) + origin (bbox-min is swap-invariant, so computed from raw
+    //       verts here); carry raw verts/attrs forward.            [no multiply]
+    //   P2: the two edgef PRODUCTS (dbx*dcy, dby*dcx).             [mult depth 1]
+    //   P3: the SUBTRACT -> signed area (n_area).                  [add only]
+    //   P4: CCW-normalize: swap-select verts/attrs on n_area<0, |area|, degen,
+    //       den; register the swapped s1_* verts/attrs + area/ox/oy outputs.
+    //   P5: reciprocal-numerator prep num = 2^SHIFT + den/2.       [add only]
+    // g1..g4 are the P1..P4 completion pulses; e1 marks P5 done (== old "S1
+    // done"), after which S2/S3/S4 below are UNCHANGED.
     reg e1, e2, e3;
+    reg g1, g2, g3, g4;
+
+    // ── P1 registers: edgef vertex differences + origin; raw verts/attrs carry ─
+    reg signed [63:0] p1_dbx, p1_dcy, p1_dby, p1_dcx;          // edgef diffs
+    reg signed [63:0] p1_vx0,p1_vy0, p1_vx1,p1_vy1, p1_vx2,p1_vy2;
+    reg signed [63:0] p1_attr [0:5][0:2];                      // raw {u,v,r,g,b,a}x{v0,v1,v2}
+    reg        [15:0] p1_ox, p1_oy;
+    reg signed [63:0] p1_sx0, p1_sy0;
+
+    // ── P2 registers: the two edgef products; raw verts/attrs + origin carry ───
+    reg signed [63:0] p2_prod1, p2_prod2;
+    reg signed [63:0] p2_vx0,p2_vy0, p2_vx1,p2_vy1, p2_vx2,p2_vy2;
+    reg signed [63:0] p2_attr [0:5][0:2];
+    reg        [15:0] p2_ox, p2_oy;
+    reg signed [63:0] p2_sx0, p2_sy0;
+
+    // ── P3 registers: signed area (subtract); raw verts/attrs + origin carry ───
+    reg signed [63:0] p3_narea;
+    reg signed [63:0] p3_vx0,p3_vy0, p3_vx1,p3_vy1, p3_vx2,p3_vy2;
+    reg signed [63:0] p3_attr [0:5][0:2];
+    reg        [15:0] p3_ox, p3_oy;
+    reg signed [63:0] p3_sx0, p3_sy0;
 
     // ── Stage-1 registers (CCW-normalized verts/attrs + origin + recip inputs) ─
     // attrs held as signed 64-bit (values are small & non-negative) so the later
@@ -136,9 +183,8 @@ module blt_tri_setup #(
     reg signed [63:0] pdy [0:5][0:2];    // dw{k}dy * A{k}
 
     // combinational temporaries (blocking, per-stage)
-    reg signed [63:0] t_narea, t_area, t_den;
+    reg signed [63:0] t_area, t_den;
     reg               t_swap, t_degen;
-    reg signed [63:0] tx0,ty0, tx1,ty1, tx2,ty2;
     reg signed [63:0] t_minx, t_miny, t_sx0, t_sy0;
     reg        [15:0] t_ox, t_oy;
     reg signed [63:0] tb0,tb1,tb2;
@@ -173,66 +219,129 @@ module blt_tri_setup #(
         if (rst) begin
             valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
             e1 <= 1'b0; e2 <= 1'b0; e3 <= 1'b0;
+            g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
         end else begin
             valid <= 1'b0;                      // one-cycle pulse; default low
             e1 <= 1'b0; e2 <= 1'b0; e3 <= 1'b0; // stage pulses default low
+            g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
 
-            // ============ Stage 1: latch verts, area + CCW-normalize ============
-            // Accept a new triangle only when the pipeline AND divider are idle.
-            if (start && !busy && !e1 && !e2 && !e3) begin
-                t_narea = edgef(vx0,vy0, vx1,vy1, vx2,vy2);
-                t_swap  = (t_narea < 0);
-                t_area  = t_swap ? -t_narea : t_narea;
-                t_degen = (t_area == 0);
-                t_den   = t_degen ? 64'sd1 : t_area;
+            // ============ P1: edgef vertex diffs + origin; latch raw =============
+            // Accept a new triangle only when the whole pipeline AND divider are
+            // idle. edgef(a,b,c)=(bx-ax)(cy-ay)-(by-ay)(cx-ax); register its four
+            // DIFFERENCES here (no multiply). The bbox-min origin is swap-
+            // invariant (the CCW swap only exchanges verts 1<->2), so compute it
+            // from the RAW verts now. Carry raw verts+attrs to the P4 swap point.
+            if (start && !busy && !e1 && !e2 && !e3 && !g1 && !g2 && !g3 && !g4) begin
+                p1_dbx <= vx1 - vx0;   p1_dcy <= vy2 - vy0;   // bx-ax , cy-ay
+                p1_dby <= vy1 - vy0;   p1_dcx <= vx2 - vx0;   // by-ay , cx-ax
 
-                tx0 = vx0; ty0 = vy0;
-                if (t_swap) begin
-                    tx1 = vx2; ty1 = vy2; tx2 = vx1; ty2 = vy1;
-                end else begin
-                    tx1 = vx1; ty1 = vy1; tx2 = vx2; ty2 = vy2;
-                end
+                p1_vx0 <= vx0; p1_vy0 <= vy0;
+                p1_vx1 <= vx1; p1_vy1 <= vy1;
+                p1_vx2 <= vx2; p1_vy2 <= vy2;
 
-                // bbox-min pixel = interpolation origin (clamp >=0, matches golden lx>>4)
-                t_minx = (tx0 < tx1) ? ((tx0 < tx2) ? tx0 : tx2) : ((tx1 < tx2) ? tx1 : tx2);
-                t_miny = (ty0 < ty1) ? ((ty0 < ty2) ? ty0 : ty2) : ((ty1 < ty2) ? ty1 : ty2);
+                // raw (un-swapped) attrs, attr order {u,v,r,g,b,a}
+                p1_attr[0][0] <= vu0; p1_attr[1][0] <= vv0; p1_attr[2][0] <= vr0;
+                p1_attr[3][0] <= vg0; p1_attr[4][0] <= vb0; p1_attr[5][0] <= va0;
+                p1_attr[0][1] <= vu1; p1_attr[1][1] <= vv1; p1_attr[2][1] <= vr1;
+                p1_attr[3][1] <= vg1; p1_attr[4][1] <= vb1; p1_attr[5][1] <= va1;
+                p1_attr[0][2] <= vu2; p1_attr[1][2] <= vv2; p1_attr[2][2] <= vr2;
+                p1_attr[3][2] <= vg2; p1_attr[4][2] <= vb2; p1_attr[5][2] <= va2;
+
+                // bbox-min pixel = interpolation origin (clamp >=0, golden lx>>4)
+                t_minx = (vx0 < vx1) ? ((vx0 < vx2) ? vx0 : vx2) : ((vx1 < vx2) ? vx1 : vx2);
+                t_miny = (vy0 < vy1) ? ((vy0 < vy2) ? vy0 : vy2) : ((vy1 < vy2) ? vy1 : vy2);
                 if (t_minx < 0) t_minx = 0;
                 if (t_miny < 0) t_miny = 0;
                 t_ox = (t_minx >>> 4);
                 t_oy = (t_miny >>> 4);
                 t_sx0 = (t_ox <<< 4) | 64'sd8;   // pixel-center sample at origin, 12.4
                 t_sy0 = (t_oy <<< 4) | 64'sd8;
+                p1_ox <= t_ox; p1_oy <= t_oy;
+                p1_sx0 <= t_sx0; p1_sy0 <= t_sy0;
 
-                // latch stage-1 datapath
-                s1_x0 <= tx0; s1_y0 <= ty0;
-                s1_x1 <= tx1; s1_y1 <= ty1;
-                s1_x2 <= tx2; s1_y2 <= ty2;
-                s1_sx0 <= t_sx0; s1_sy0 <= t_sy0;
-                s1_den <= t_den;
-                // reciprocal round-numerator: num = 2^SHIFT + area/2 (== round(2^SHIFT/area))
-                s1_num <= (64'sd1 <<< SHIFT) + (t_den >>> 1);
-                s1_degen <= t_degen;
+                g1 <= 1'b1;
+            end
 
-                // attributes: attr order {u,v,r,g,b,a}; vert0 is never swapped
-                s1_A[0][0] <= vu0; s1_A[1][0] <= vv0; s1_A[2][0] <= vr0;
-                s1_A[3][0] <= vg0; s1_A[4][0] <= vb0; s1_A[5][0] <= va0;
+            // ============ P2: the two edgef products ============================
+            if (g1) begin
+                p2_prod1 <= p1_dbx * p1_dcy;    // (bx-ax)*(cy-ay)
+                p2_prod2 <= p1_dby * p1_dcx;    // (by-ay)*(cx-ax)
+
+                p2_vx0 <= p1_vx0; p2_vy0 <= p1_vy0;
+                p2_vx1 <= p1_vx1; p2_vy1 <= p1_vy1;
+                p2_vx2 <= p1_vx2; p2_vy2 <= p1_vy2;
+                for (a = 0; a < 6; a = a + 1) begin
+                    p2_attr[a][0] <= p1_attr[a][0];
+                    p2_attr[a][1] <= p1_attr[a][1];
+                    p2_attr[a][2] <= p1_attr[a][2];
+                end
+                p2_ox <= p1_ox; p2_oy <= p1_oy;
+                p2_sx0 <= p1_sx0; p2_sy0 <= p1_sy0;
+
+                g2 <= 1'b1;
+            end
+
+            // ============ P3: subtract -> signed area ============================
+            if (g2) begin
+                p3_narea <= p2_prod1 - p2_prod2;   // == edgef(a,b,c), signed area x2
+
+                p3_vx0 <= p2_vx0; p3_vy0 <= p2_vy0;
+                p3_vx1 <= p2_vx1; p3_vy1 <= p2_vy1;
+                p3_vx2 <= p2_vx2; p3_vy2 <= p2_vy2;
+                for (a = 0; a < 6; a = a + 1) begin
+                    p3_attr[a][0] <= p2_attr[a][0];
+                    p3_attr[a][1] <= p2_attr[a][1];
+                    p3_attr[a][2] <= p2_attr[a][2];
+                end
+                p3_ox <= p2_ox; p3_oy <= p2_oy;
+                p3_sx0 <= p2_sx0; p3_sy0 <= p2_sy0;
+
+                g3 <= 1'b1;
+            end
+
+            // ============ P4: CCW-normalize (abs + swap-select) + den ============
+            if (g3) begin
+                t_swap  = (p3_narea < 0);
+                t_area  = t_swap ? -p3_narea : p3_narea;
+                t_degen = (t_area == 0);
+                t_den   = t_degen ? 64'sd1 : t_area;
+
+                // swapped coords (vert0 never swapped; swap exchanges 1<->2)
+                s1_x0 <= p3_vx0; s1_y0 <= p3_vy0;
                 if (t_swap) begin
-                    s1_A[0][1] <= vu2; s1_A[1][1] <= vv2; s1_A[2][1] <= vr2;
-                    s1_A[3][1] <= vg2; s1_A[4][1] <= vb2; s1_A[5][1] <= va2;
-                    s1_A[0][2] <= vu1; s1_A[1][2] <= vv1; s1_A[2][2] <= vr1;
-                    s1_A[3][2] <= vg1; s1_A[4][2] <= vb1; s1_A[5][2] <= va1;
+                    s1_x1 <= p3_vx2; s1_y1 <= p3_vy2; s1_x2 <= p3_vx1; s1_y2 <= p3_vy1;
                 end else begin
-                    s1_A[0][1] <= vu1; s1_A[1][1] <= vv1; s1_A[2][1] <= vr1;
-                    s1_A[3][1] <= vg1; s1_A[4][1] <= vb1; s1_A[5][1] <= va1;
-                    s1_A[0][2] <= vu2; s1_A[1][2] <= vv2; s1_A[2][2] <= vr2;
-                    s1_A[3][2] <= vg2; s1_A[4][2] <= vb2; s1_A[5][2] <= va2;
+                    s1_x1 <= p3_vx1; s1_y1 <= p3_vy1; s1_x2 <= p3_vx2; s1_y2 <= p3_vy2;
                 end
 
-                // outputs that are final at S1
+                // swapped attrs, matching the coord swap
+                for (a = 0; a < 6; a = a + 1) begin
+                    s1_A[a][0] <= p3_attr[a][0];
+                    if (t_swap) begin
+                        s1_A[a][1] <= p3_attr[a][2];
+                        s1_A[a][2] <= p3_attr[a][1];
+                    end else begin
+                        s1_A[a][1] <= p3_attr[a][1];
+                        s1_A[a][2] <= p3_attr[a][2];
+                    end
+                end
+
+                s1_sx0 <= p3_sx0; s1_sy0 <= p3_sy0;
+                s1_den <= t_den;
+                s1_degen <= t_degen;
+
+                // outputs final at this stage (valid does not rise until later)
                 degenerate <= t_degen;
-                ox <= t_ox; oy <= t_oy;
+                ox <= p3_ox; oy <= p3_oy;
                 area <= t_area[47:0];
 
+                g4 <= 1'b1;
+            end
+
+            // ============ P5: reciprocal-numerator prep (== old "S1 done") =======
+            if (g4) begin
+                // num = 2^SHIFT + area/2 (== round(2^SHIFT/area)); den registered at P4
+                s1_num <= (64'sd1 <<< SHIFT) + (s1_den >>> 1);
                 e1 <= 1'b1;
             end
 
