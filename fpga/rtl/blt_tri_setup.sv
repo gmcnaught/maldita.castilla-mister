@@ -19,15 +19,29 @@
 //  reciprocal-quantization error at any pixel is <= |W_*|*0.5/2^SHIFT, which for
 //  attribute magnitudes (|W_*/area| <= 255) is ~1e-4 — far inside ±1 LSB.
 //
-//  Registered on `clk`: pulse `start` with the vertices; all setup outputs
-//  except area_recip latch immediately, and `valid` rises once the SEQUENTIAL
-//  area reciprocal finishes. The reciprocal is a synthesizable radix-2 restoring
-//  divider unrolled to UNROLL bits/cycle (see the divider below): it computes the
-//  SAME value area_recip = round(2^SHIFT/area) as a single 2^SHIFT/area divide,
-//  but over ITERS cycles with only a short (UNROLL-deep) subtract chain per cycle,
-//  so it closes timing at any reasonable Fmax instead of as one 41-deep divide.
-//  The degenerate (area==0) case skips the divider and asserts `valid` promptly.
-//  All downstream results stay bit-exact-or-±1 vs. the golden (tb_tri_setup).
+//  ── PIPELINED setup (timing closure) ───────────────────────────────────────
+//  Registered on `clk`: pulse `start` with the vertices. The setup math is now
+//  split into REGISTERED PIPELINE STAGES so no single clock cycle chains more
+//  than one multiplier (the former one-cycle combinational block chained the
+//  edge-function product INTO the weighted-sum product, which failed Quartus
+//  setup timing at ~98 MHz on the fabric clock). The stages are:
+//    S1 (on start): signed area (edgef) + CCW-normalize (select the possibly-
+//        swapped vertex coords/attrs into registers); origin (ox,oy) + sample
+//        (sx0,sy0); degenerate/den/reciprocal-numerator. [multiplier depth 1]
+//    S2: the three edge functions w{k}_0 at the origin sample (+top-left bias),
+//        and the small per-x/per-row edge deltas dw{k}dx=16*(yi-yj),
+//        dw{k}dy=16*(xj-xi); KICK the sequential area reciprocal. [mult depth 1]
+//    S3: the 54 partial products w{k}_0*A{k}, dw{k}dx*A{k}, dw{k}dy*A{k}
+//        (k over the 3 verts, A over u,v,r,g,b,a). [mult depth 1]
+//    S4: sum the 3 partials per attribute -> W{}_0, dW{}dx, dW{}dy. [adders only]
+//  The area reciprocal is a synthesizable radix-2 restoring divider (UNROLL
+//  bits/cycle, ITERS busy cycles) kicked at S2 and running CONCURRENTLY with
+//  S3/S4; `valid` rises when it finishes (it is the long pole). Latency:
+//  non-degenerate ~13 cycles (1 latch + S2 kick + ITERS divider cycles),
+//  degenerate ~4 cycles (skips the divider, asserts valid when S4 lands). Both
+//  are well inside the downstream valid-wait. The arithmetic is UNCHANGED from
+//  the former single-cycle block — only pipeline registers were inserted — so
+//  every output stays bit-exact-or-±1 vs. the golden (tb_tri_setup).
 //  The OUTPUT interface below is what Task 5 consumes and is unchanged.
 //
 //  Validated operating envelope (tb_tri_setup.sv "envelope_worst_case", passes
@@ -96,85 +110,49 @@ module blt_tri_setup #(
         tlbias = (((ay==by) && (bx<ax)) || (by>ay)) ? 64'sd0 : -64'sd1;
     endfunction
 
-    // combinational "next" values
-    reg  signed [63:0] x0,y0, x1n,y1n, x2n,y2n, n_area, den;
-    reg  signed [63:0] u1a,v1a,u2a,v2a;
-    reg  signed [63:0] r0a,g0a,b0a,a0a, r1a,g1a,b1a,a1a, r2a,g2a,b2a,a2a;
-    reg  signed [63:0] b0,b1,b2, sx0,sy0, nw0,nw1,nw2;
-    reg  signed [63:0] ndw0dx,ndw1dx,ndw2dx, ndw0dy,ndw1dy,ndw2dy;
-    reg  signed [63:0] n_num;                 // dividend = round-numerator of 2^SHIFT/area
-    reg  signed [63:0] minx,miny;
-    reg         [15:0] n_ox,n_oy;
-    reg                n_degen;
+    // ── pipeline stage-valid pulses (one-hot progression S1->S2->S3->S4) ───────
+    reg e1, e2, e3;
 
-    // weighted-sum helper: W = w0*A0 + w1*A1 + w2*A2 (all longint)
-    function automatic longint wsum(input longint k0,k1,k2, A0,A1,A2);
-        wsum = k0*A0 + k1*A1 + k2*A2;
-    endfunction
+    // ── Stage-1 registers (CCW-normalized verts/attrs + origin + recip inputs) ─
+    // attrs held as signed 64-bit (values are small & non-negative) so the later
+    // products are unambiguously SIGNED (a signed*unsigned mix would flip context).
+    reg signed [63:0] s1_x0,s1_y0, s1_x1,s1_y1, s1_x2,s1_y2;   // swapped coords
+    reg signed [63:0] s1_sx0, s1_sy0;                           // origin sample (12.4)
+    reg signed [63:0] s1_den, s1_num;                           // divider divisor / dividend
+    reg               s1_degen;
+    reg signed [63:0] s1_A [0:5][0:2];   // [attr u,v,r,g,b,a][vert 0,1,2], swapped
 
-    always @* begin
-        // --- CCW-normalize by swapping verts b,c when signed area < 0 (== golden) ---
-        x0 = vx0; y0 = vy0;
-        n_area = edgef(vx0,vy0, vx1,vy1, vx2,vy2);
-        if (n_area < 0) begin
-            x1n=vx2; y1n=vy2; x2n=vx1; y2n=vy1;
-            u1a=vu2; v1a=vv2; u2a=vu1; v2a=vv1;
-            r1a=vr2; g1a=vg2; b1a=vb2; a1a=va2;
-            r2a=vr1; g2a=vg1; b2a=vb1; a2a=va1;
-            n_area = -n_area;
-        end else begin
-            x1n=vx1; y1n=vy1; x2n=vx2; y2n=vy2;
-            u1a=vu1; v1a=vv1; u2a=vu2; v2a=vv2;
-            r1a=vr1; g1a=vg1; b1a=vb1; a1a=va1;
-            r2a=vr2; g2a=vg2; b2a=vb2; a2a=va2;
-        end
-        r0a=vr0; g0a=vg0; b0a=vb0; a0a=va0;
+    // ── Stage-2 registers (edge functions + deltas, carried attrs) ─────────────
+    reg               s2_degen;
+    reg signed [63:0] s2_nw    [0:2];    // edge-function value at origin (incl. bias)
+    reg signed [63:0] s2_ndwdx [0:2];    // 16*(y diff)
+    reg signed [63:0] s2_ndwdy [0:2];    // 16*(x diff)
+    reg signed [63:0] s2_A [0:5][0:2];
 
-        n_degen = (n_area == 0);
-        den     = n_degen ? 64'sd1 : n_area;
+    // ── Stage-3 registers (partial products, 3 per attribute) ──────────────────
+    reg               s3_degen;
+    reg signed [63:0] p0  [0:5][0:2];    // w{k}_0  * A{k}
+    reg signed [63:0] pdx [0:5][0:2];    // dw{k}dx * A{k}
+    reg signed [63:0] pdy [0:5][0:2];    // dw{k}dy * A{k}
 
-        // --- bbox-min pixel = interpolation origin (clamp >=0, matches golden lx>>4) ---
-        minx = (x0 < x1n) ? ((x0 < x2n) ? x0 : x2n) : ((x1n < x2n) ? x1n : x2n);
-        miny = (y0 < y1n) ? ((y0 < y2n) ? y0 : y2n) : ((y1n < y2n) ? y1n : y2n);
-        if (minx < 0) minx = 0;
-        if (miny < 0) miny = 0;
-        n_ox = (minx >>> 4);
-        n_oy = (miny >>> 4);
-        sx0  = (n_ox <<< 4) | 64'sd8;   // pixel-center sample at origin, 12.4
-        sy0  = (n_oy <<< 4) | 64'sd8;
-
-        // --- top-left biases (identical edge pairing to blt_tri.sv:95-97) ---
-        b0 = tlbias(x1n,y1n, x2n,y2n);   // edge b->c, opposite a
-        b1 = tlbias(x2n,y2n, x0,y0);     // edge c->a, opposite b
-        b2 = tlbias(x0,y0,   x1n,y1n);   // edge a->b, opposite c
-
-        // --- edge functions at the origin sample ---
-        nw0 = edgef(x1n,y1n, x2n,y2n, sx0,sy0) + b0;
-        nw1 = edgef(x2n,y2n, x0,y0,   sx0,sy0) + b1;
-        nw2 = edgef(x0,y0,   x1n,y1n, sx0,sy0) + b2;
-
-        // --- constant per-x / per-row edge deltas. d(edge)/d(sample) is linear;
-        //     one pixel step == +16 in 12.4. dw_k/dx = 16*(y diff), dw_k/dy = 16*(x diff). ---
-        ndw0dx = 64'sd16 * (y1n - y2n);  ndw0dy = 64'sd16 * (x2n - x1n);
-        ndw1dx = 64'sd16 * (y2n - y0 );  ndw1dy = 64'sd16 * (x0  - x2n);
-        ndw2dx = 64'sd16 * (y0  - y1n);  ndw2dy = 64'sd16 * (x1n - x0 );
-
-        // --- fixed-point reciprocal of the (positive) area, round-to-nearest.
-        //     area_recip = round(2^SHIFT/area) = floor(num/den) with
-        //     num = 2^SHIFT + area/2. The floor(num/den) is done SEQUENTIALLY by
-        //     the restoring divider below (num<2^41, so it fits DIVW bits). ---
-        n_num = (64'sd1 <<< SHIFT) + (den >>> 1);
-    end
+    // combinational temporaries (blocking, per-stage)
+    reg signed [63:0] t_narea, t_area, t_den;
+    reg               t_swap, t_degen;
+    reg signed [63:0] tx0,ty0, tx1,ty1, tx2,ty2;
+    reg signed [63:0] t_minx, t_miny, t_sx0, t_sy0;
+    reg        [15:0] t_ox, t_oy;
+    reg signed [63:0] tb0,tb1,tb2;
+    reg signed [63:0] tnw0,tnw1,tnw2, tdx0,tdx1,tdx2, tdy0,tdy1,tdy2;
+    integer a, k;
 
     // ── SEQUENTIAL area reciprocal (radix-2 restoring divide, unrolled) ────────
-    //  Computes q = floor(num/den) == round(2^SHIFT/area), identical to the
-    //  former single-cycle `num/den`, but iteratively: standard long division
-    //  shifting the dividend MSB-first into a running remainder, UNROLL bits per
-    //  clock. num < 2^41, so DIVW=48 dividend/quotient bits cover every quotient
-    //  (leading bits are simply 0); den <= ~2^35 fits the 64-bit remainder path.
-    //  Critical path per cycle is UNROLL chained subtract-compares (not a 41-deep
-    //  divide), so this closes timing; latency is 1 (latch) + ITERS busy cycles,
-    //  well inside the downstream valid-wait. degenerate skips the divide.
+    //  Computes q = floor(num/den) == round(2^SHIFT/area), identical to a single
+    //  `num/den`, but iteratively: standard long division shifting the dividend
+    //  MSB-first into a running remainder, UNROLL bits per clock. num < 2^41, so
+    //  DIVW=48 dividend/quotient bits cover every quotient (leading bits are 0);
+    //  den <= ~2^35 fits the 64-bit remainder path. Critical path per cycle is
+    //  UNROLL chained subtract-compares (not a 41-deep divide), so this closes
+    //  timing; it is KICKED at S2 and runs concurrently with S3/S4.
     localparam integer DIVW   = 48;            // dividend / quotient width
     localparam integer UNROLL = 4;             // quotient bits resolved per clock
     localparam integer ITERS  = DIVW / UNROLL; // busy cycles (12)
@@ -194,57 +172,165 @@ module blt_tri_setup #(
     always @(posedge clk) begin
         if (rst) begin
             valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
+            e1 <= 1'b0; e2 <= 1'b0; e3 <= 1'b0;
         end else begin
             valid <= 1'b0;                      // one-cycle pulse; default low
-            if (!busy) begin
-                if (start) begin
-                    // latch every setup output except area_recip immediately
-                    degenerate <= n_degen;
-                    ox <= n_ox; oy <= n_oy;
-                    area <= n_area[47:0];
+            e1 <= 1'b0; e2 <= 1'b0; e3 <= 1'b0; // stage pulses default low
 
-                    w0_0 <= nw0[47:0]; w1_0 <= nw1[47:0]; w2_0 <= nw2[47:0];
-                    dw0dx<=ndw0dx[47:0]; dw1dx<=ndw1dx[47:0]; dw2dx<=ndw2dx[47:0];
-                    dw0dy<=ndw0dy[47:0]; dw1dy<=ndw1dy[47:0]; dw2dy<=ndw2dy[47:0];
+            // ============ Stage 1: latch verts, area + CCW-normalize ============
+            // Accept a new triangle only when the pipeline AND divider are idle.
+            if (start && !busy && !e1 && !e2 && !e3) begin
+                t_narea = edgef(vx0,vy0, vx1,vy1, vx2,vy2);
+                t_swap  = (t_narea < 0);
+                t_area  = t_swap ? -t_narea : t_narea;
+                t_degen = (t_area == 0);
+                t_den   = t_degen ? 64'sd1 : t_area;
 
-                    // origin weighted sums (attr0 uses the un-swapped v0 texel/colour)
-                    Wu_0 <= wsum(nw0,nw1,nw2, vu0,u1a,u2a);
-                    Wv_0 <= wsum(nw0,nw1,nw2, vv0,v1a,v2a);
-                    Wr_0 <= wsum(nw0,nw1,nw2, r0a,r1a,r2a);
-                    Wg_0 <= wsum(nw0,nw1,nw2, g0a,g1a,g2a);
-                    Wb_0 <= wsum(nw0,nw1,nw2, b0a,b1a,b2a);
-                    Wa_0 <= wsum(nw0,nw1,nw2, a0a,a1a,a2a);
+                tx0 = vx0; ty0 = vy0;
+                if (t_swap) begin
+                    tx1 = vx2; ty1 = vy2; tx2 = vx1; ty2 = vy1;
+                end else begin
+                    tx1 = vx1; ty1 = vy1; tx2 = vx2; ty2 = vy2;
+                end
 
-                    // weighted-sum deltas: dW_A/dx = sum_k dw_k/dx * A_k  (affine)
-                    dWudx <= wsum(ndw0dx,ndw1dx,ndw2dx, vu0,u1a,u2a);
-                    dWvdx <= wsum(ndw0dx,ndw1dx,ndw2dx, vv0,v1a,v2a);
-                    dWrdx <= wsum(ndw0dx,ndw1dx,ndw2dx, r0a,r1a,r2a);
-                    dWgdx <= wsum(ndw0dx,ndw1dx,ndw2dx, g0a,g1a,g2a);
-                    dWbdx <= wsum(ndw0dx,ndw1dx,ndw2dx, b0a,b1a,b2a);
-                    dWadx <= wsum(ndw0dx,ndw1dx,ndw2dx, a0a,a1a,a2a);
+                // bbox-min pixel = interpolation origin (clamp >=0, matches golden lx>>4)
+                t_minx = (tx0 < tx1) ? ((tx0 < tx2) ? tx0 : tx2) : ((tx1 < tx2) ? tx1 : tx2);
+                t_miny = (ty0 < ty1) ? ((ty0 < ty2) ? ty0 : ty2) : ((ty1 < ty2) ? ty1 : ty2);
+                if (t_minx < 0) t_minx = 0;
+                if (t_miny < 0) t_miny = 0;
+                t_ox = (t_minx >>> 4);
+                t_oy = (t_miny >>> 4);
+                t_sx0 = (t_ox <<< 4) | 64'sd8;   // pixel-center sample at origin, 12.4
+                t_sy0 = (t_oy <<< 4) | 64'sd8;
 
-                    dWudy <= wsum(ndw0dy,ndw1dy,ndw2dy, vu0,u1a,u2a);
-                    dWvdy <= wsum(ndw0dy,ndw1dy,ndw2dy, vv0,v1a,v2a);
-                    dWrdy <= wsum(ndw0dy,ndw1dy,ndw2dy, r0a,r1a,r2a);
-                    dWgdy <= wsum(ndw0dy,ndw1dy,ndw2dy, g0a,g1a,g2a);
-                    dWbdy <= wsum(ndw0dy,ndw1dy,ndw2dy, b0a,b1a,b2a);
-                    dWady <= wsum(ndw0dy,ndw1dy,ndw2dy, a0a,a1a,a2a);
+                // latch stage-1 datapath
+                s1_x0 <= tx0; s1_y0 <= ty0;
+                s1_x1 <= tx1; s1_y1 <= ty1;
+                s1_x2 <= tx2; s1_y2 <= ty2;
+                s1_sx0 <= t_sx0; s1_sy0 <= t_sy0;
+                s1_den <= t_den;
+                // reciprocal round-numerator: num = 2^SHIFT + area/2 (== round(2^SHIFT/area))
+                s1_num <= (64'sd1 <<< SHIFT) + (t_den >>> 1);
+                s1_degen <= t_degen;
 
-                    if (n_degen) begin
-                        // area==0: no divide; area_recip == 2^SHIFT (den forced 1)
-                        area_recip <= (48'd1 <<< SHIFT);
-                        valid      <= 1'b1;
-                    end else begin
-                        // kick the sequential divider: q = floor(n_num / den)
-                        div_N <= n_num[DIVW-1:0];
-                        div_D <= den[63:0];
-                        div_R <= 64'd0;
-                        div_Q <= {DIVW{1'b0}};
-                        iter  <= ITERS[6:0];
-                        busy  <= 1'b1;
+                // attributes: attr order {u,v,r,g,b,a}; vert0 is never swapped
+                s1_A[0][0] <= vu0; s1_A[1][0] <= vv0; s1_A[2][0] <= vr0;
+                s1_A[3][0] <= vg0; s1_A[4][0] <= vb0; s1_A[5][0] <= va0;
+                if (t_swap) begin
+                    s1_A[0][1] <= vu2; s1_A[1][1] <= vv2; s1_A[2][1] <= vr2;
+                    s1_A[3][1] <= vg2; s1_A[4][1] <= vb2; s1_A[5][1] <= va2;
+                    s1_A[0][2] <= vu1; s1_A[1][2] <= vv1; s1_A[2][2] <= vr1;
+                    s1_A[3][2] <= vg1; s1_A[4][2] <= vb1; s1_A[5][2] <= va1;
+                end else begin
+                    s1_A[0][1] <= vu1; s1_A[1][1] <= vv1; s1_A[2][1] <= vr1;
+                    s1_A[3][1] <= vg1; s1_A[4][1] <= vb1; s1_A[5][1] <= va1;
+                    s1_A[0][2] <= vu2; s1_A[1][2] <= vv2; s1_A[2][2] <= vr2;
+                    s1_A[3][2] <= vg2; s1_A[4][2] <= vb2; s1_A[5][2] <= va2;
+                end
+
+                // outputs that are final at S1
+                degenerate <= t_degen;
+                ox <= t_ox; oy <= t_oy;
+                area <= t_area[47:0];
+
+                e1 <= 1'b1;
+            end
+
+            // ============ Stage 2: edge functions + deltas + kick divider =======
+            if (e1) begin
+                // top-left biases (identical edge pairing to blt_tri.sv:95-97)
+                tb0 = tlbias(s1_x1,s1_y1, s1_x2,s1_y2);   // edge b->c, opposite a
+                tb1 = tlbias(s1_x2,s1_y2, s1_x0,s1_y0);   // edge c->a, opposite b
+                tb2 = tlbias(s1_x0,s1_y0, s1_x1,s1_y1);   // edge a->b, opposite c
+
+                // edge functions at the origin sample (single multiply depth: the
+                // two products inside edgef are parallel, then one subtract)
+                tnw0 = edgef(s1_x1,s1_y1, s1_x2,s1_y2, s1_sx0,s1_sy0) + tb0;
+                tnw1 = edgef(s1_x2,s1_y2, s1_x0,s1_y0, s1_sx0,s1_sy0) + tb1;
+                tnw2 = edgef(s1_x0,s1_y0, s1_x1,s1_y1, s1_sx0,s1_sy0) + tb2;
+
+                // constant per-x / per-row edge deltas (shifts only; no multiply)
+                tdx0 = 64'sd16 * (s1_y1 - s1_y2);  tdy0 = 64'sd16 * (s1_x2 - s1_x1);
+                tdx1 = 64'sd16 * (s1_y2 - s1_y0);  tdy1 = 64'sd16 * (s1_x0 - s1_x2);
+                tdx2 = 64'sd16 * (s1_y0 - s1_y1);  tdy2 = 64'sd16 * (s1_x1 - s1_x0);
+
+                // full-precision carriers for the S3 products
+                s2_nw[0] <= tnw0; s2_nw[1] <= tnw1; s2_nw[2] <= tnw2;
+                s2_ndwdx[0] <= tdx0; s2_ndwdx[1] <= tdx1; s2_ndwdx[2] <= tdx2;
+                s2_ndwdy[0] <= tdy0; s2_ndwdy[1] <= tdy1; s2_ndwdy[2] <= tdy2;
+
+                // registered module outputs (truncate to 48b exactly as before)
+                w0_0 <= tnw0[47:0]; w1_0 <= tnw1[47:0]; w2_0 <= tnw2[47:0];
+                dw0dx <= tdx0[47:0]; dw1dx <= tdx1[47:0]; dw2dx <= tdx2[47:0];
+                dw0dy <= tdy0[47:0]; dw1dy <= tdy1[47:0]; dw2dy <= tdy2[47:0];
+
+                // carry attrs + degen forward
+                for (a = 0; a < 6; a = a + 1) begin
+                    s2_A[a][0] <= s1_A[a][0];
+                    s2_A[a][1] <= s1_A[a][1];
+                    s2_A[a][2] <= s1_A[a][2];
+                end
+                s2_degen <= s1_degen;
+
+                // kick the sequential reciprocal (or take the degenerate fast path)
+                if (s1_degen) begin
+                    // area==0: no divide; area_recip == 2^SHIFT (den forced 1)
+                    area_recip <= (48'd1 <<< SHIFT);
+                end else begin
+                    div_N <= s1_num[DIVW-1:0];
+                    div_D <= s1_den[63:0];
+                    div_R <= 64'd0;
+                    div_Q <= {DIVW{1'b0}};
+                    iter  <= ITERS[6:0];
+                    busy  <= 1'b1;
+                end
+
+                e2 <= 1'b1;
+            end
+
+            // ============ Stage 3: partial products w{k}*A{k} etc ===============
+            if (e2) begin
+                for (a = 0; a < 6; a = a + 1) begin
+                    for (k = 0; k < 3; k = k + 1) begin
+                        p0 [a][k] <= s2_nw[k]    * s2_A[a][k];
+                        pdx[a][k] <= s2_ndwdx[k] * s2_A[a][k];
+                        pdy[a][k] <= s2_ndwdy[k] * s2_A[a][k];
                     end
                 end
-            end else begin
+                s3_degen <= s2_degen;
+                e3 <= 1'b1;
+            end
+
+            // ============ Stage 4: sum the 3 partials per attribute =============
+            if (e3) begin
+                Wu_0 <= p0[0][0] + p0[0][1] + p0[0][2];
+                Wv_0 <= p0[1][0] + p0[1][1] + p0[1][2];
+                Wr_0 <= p0[2][0] + p0[2][1] + p0[2][2];
+                Wg_0 <= p0[3][0] + p0[3][1] + p0[3][2];
+                Wb_0 <= p0[4][0] + p0[4][1] + p0[4][2];
+                Wa_0 <= p0[5][0] + p0[5][1] + p0[5][2];
+
+                dWudx <= pdx[0][0] + pdx[0][1] + pdx[0][2];
+                dWvdx <= pdx[1][0] + pdx[1][1] + pdx[1][2];
+                dWrdx <= pdx[2][0] + pdx[2][1] + pdx[2][2];
+                dWgdx <= pdx[3][0] + pdx[3][1] + pdx[3][2];
+                dWbdx <= pdx[4][0] + pdx[4][1] + pdx[4][2];
+                dWadx <= pdx[5][0] + pdx[5][1] + pdx[5][2];
+
+                dWudy <= pdy[0][0] + pdy[0][1] + pdy[0][2];
+                dWvdy <= pdy[1][0] + pdy[1][1] + pdy[1][2];
+                dWrdy <= pdy[2][0] + pdy[2][1] + pdy[2][2];
+                dWgdy <= pdy[3][0] + pdy[3][1] + pdy[3][2];
+                dWbdy <= pdy[4][0] + pdy[4][1] + pdy[4][2];
+                dWady <= pdy[5][0] + pdy[5][1] + pdy[5][2];
+
+                // degenerate triangles skip the divider; their W outputs are moot
+                // (the walk drops the triangle) — assert valid as soon as S4 lands.
+                if (s3_degen) valid <= 1'b1;
+            end
+
+            // ============ concurrent sequential reciprocal ======================
+            if (busy) begin
                 // one clock = UNROLL restoring steps (short combinational chain)
                 step_R = div_R;
                 step_N = div_N;
@@ -264,7 +350,7 @@ module blt_tri_setup #(
                 div_Q <= step_Q;
                 if (iter == 7'd1) begin
                     area_recip <= step_Q[47:0];   // fully resolved quotient
-                    valid      <= 1'b1;
+                    valid      <= 1'b1;           // non-degenerate: valid on divide done
                     busy       <= 1'b0;
                 end else begin
                     iter <= iter - 7'd1;
