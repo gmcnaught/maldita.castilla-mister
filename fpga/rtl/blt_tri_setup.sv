@@ -199,17 +199,29 @@ module blt_tri_setup #(
     //  multiply into LUT soft-multipliers, blowing the mul_v->tri_p0_addr walk
     //  path). It is now a 3-multiplier MAC engine (nw / dwdx / dwdy lanes, all
     //  sharing the SAME A[a][k] operand each step) that walks the 18 (attr,vert)
-    //  pairs over 18 steps. Multiply and accumulate live in SEPARATE pipeline
-    //  cycles (registered product pr* -> add), so no multiply->add chain is
-    //  created. It is kicked at the S2->divider point and runs CONCURRENTLY with
-    //  the 48-cycle reciprocal divider; it drains in ~19 cycles (< 48), so setup
-    //  latency is unchanged and the divider stays the long pole. The same three
-    //  integer terms are summed in the same k=0,1,2 order as before -> outputs
-    //  are BIT-IDENTICAL (guarded by tb_tri_setup).
+    //  pairs over 18 steps. The engine is a THREE-STAGE pipeline so that no cycle
+    //  chains the operand array-mux INTO the multiply and no cycle chains the
+    //  multiply INTO the accumulate:
+    //    SEL: use mac_idx (a=idx/3, k=idx%3) to mux the narrow operands out of
+    //         s2_nw/s2_ndwdx/s2_ndwdy/s2_A into fixed sel_* registers. [mux only]
+    //    MUL: the three products from the fixed sel_* registers -> pr*. [DSP only,
+    //         no mux ahead of it — that mux-into-DSP chain was a -4.8 ns path.]
+    //    ACC: add pr* into the running per-attribute accumulators. [add only]
+    //  Kicked at the S2->divider point, running CONCURRENTLY with the 48-cycle
+    //  reciprocal divider; it drains in ~20 cycles (< 48), so setup latency is
+    //  unchanged and the divider stays the long pole. Same three integer terms
+    //  summed in the same k=0,1,2 order as before -> BIT-IDENTICAL (tb_tri_setup).
     reg               mac_busy = 1'b0;   // engine running (power-up idle; rst may be tied 0)
+    reg               s_vld    = 1'b0;   // SEL produced operands for the MUL stage
     reg               p_vld    = 1'b0;   // a product is in pr* to accumulate
     reg               mac_degen;         // area==0: outputs moot, but drive valid
-    reg        [5:0]  mac_idx;           // multiply step 0..17 (a=idx/3, k=idx%3)
+    reg        [5:0]  mac_idx;           // SEL step 0..17 (a=idx/3, k=idx%3)
+    // SEL-stage registered operands (fixed location -> no mux ahead of the DSP)
+    reg signed [26:0] sel_w0;            // s2_nw[k]    slice
+    reg signed [23:0] sel_wx, sel_wy;    // s2_ndwdx[k] / s2_ndwdy[k] slices
+    reg signed [17:0] sel_a;             // s2_A[a][k]  slice (shared operand)
+    reg        [2:0]  s_a;               // attribute tag through SEL
+    reg        [1:0]  s_k;               // vert tag through SEL
     reg signed [63:0] pr0, prx, pry;     // registered products (nw / dwdx / dwdy)
     reg        [2:0]  p_a;               // attribute of the product in pr*
     reg        [1:0]  p_k;               // vert (0,1,2) of the product in pr*
@@ -261,11 +273,12 @@ module blt_tri_setup #(
             valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
             e1 <= 1'b0;
             g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
-            mac_busy <= 1'b0; p_vld <= 1'b0;
+            mac_busy <= 1'b0; s_vld <= 1'b0; p_vld <= 1'b0;
         end else begin
             valid <= 1'b0;                      // one-cycle pulse; default low
             e1 <= 1'b0;                         // S2 kick pulse default low
             g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
+            s_vld <= 1'b0;                       // MAC operand-valid default low
             p_vld <= 1'b0;                       // MAC product-valid default low
 
             // ============ P1: edgef vertex diffs + origin; latch raw =============
@@ -445,22 +458,37 @@ module blt_tri_setup #(
                 mac_degen <= s1_degen;
             end
 
-            // ============ Stage 3 MAC — multiply stage (one step / cycle) =======
-            // Product for step mac_idx: a = idx/3 (attribute), k = idx%3 (vert).
-            // Same NARROWED operands as the former parallel Stage-3 (nw edge
-            // functions ~26b -> 27, deltas ~24b, attrs u/v<=32768,rgba<=255 -> 18b)
-            // so each lane is ONE DSP; the three lanes share A[a][k]. Value is
-            // unchanged in-envelope (guarded by tb_tri_setup).
+            // ============ Stage 3 MAC — SEL: operand mux (one step / cycle) ======
+            // Step mac_idx: a = idx/3 (attribute), k = idx%3 (vert). Mux the
+            // NARROWED operands (same slices as the former parallel Stage-3: nw
+            // edge functions ~26b -> 27, deltas ~24b, attrs u/v<=32768,rgba<=255
+            // -> 18b; value unchanged in-envelope, guarded by tb_tri_setup) into
+            // FIXED sel_* registers. Keeping this array-mux OUT of the multiply
+            // cycle is the point: mac_idx->mux->DSP in one cycle was a -4.8 ns
+            // path. The three lanes share the same attribute operand sel_a.
             if (mac_busy && mac_idx < 6'd18) begin
                 ma = mac_idx / 3;
                 mk = mac_idx % 3;
-                pr0 <= $signed(s2_nw[mk][26:0])    * $signed(s2_A[ma][mk][17:0]);
-                prx <= $signed(s2_ndwdx[mk][23:0]) * $signed(s2_A[ma][mk][17:0]);
-                pry <= $signed(s2_ndwdy[mk][23:0]) * $signed(s2_A[ma][mk][17:0]);
-                p_a   <= ma[2:0];
-                p_k   <= mk[1:0];
-                p_vld <= 1'b1;
+                sel_w0 <= s2_nw[mk][26:0];
+                sel_wx <= s2_ndwdx[mk][23:0];
+                sel_wy <= s2_ndwdy[mk][23:0];
+                sel_a  <= s2_A[ma][mk][17:0];
+                s_a    <= ma[2:0];
+                s_k    <= mk[1:0];
+                s_vld  <= 1'b1;
                 mac_idx <= mac_idx + 6'd1;
+            end
+
+            // ============ Stage 3 MAC — MUL: products from fixed registers =======
+            // Reads only the sel_* registers (no mux ahead of the DSP), so each
+            // lane is a clean 27x18 / 24x18 multiply.
+            if (s_vld) begin
+                pr0 <= $signed(sel_w0) * $signed(sel_a);
+                prx <= $signed(sel_wx) * $signed(sel_a);
+                pry <= $signed(sel_wy) * $signed(sel_a);
+                p_a   <= s_a;
+                p_k   <= s_k;
+                p_vld <= 1'b1;
             end
 
             // ============ Stage 3 MAC — accumulate stage (add only) =============
