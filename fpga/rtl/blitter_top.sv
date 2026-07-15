@@ -158,13 +158,14 @@ module blitter_top #(
         S_TRI_DECV=6'd47,          // unpack qwords -> the 3 vertices (x,y,u,v,rgba)
         S_TRI_SETUP=6'd48,         // pulse blt_tri_setup.start
         S_TRI_SWAIT=6'd49,         // wait for setup valid; seed bbox + accumulators
-        S_TRI_PIX=6'd50,           // evaluate coverage; if covered, interp + issue texel read
+        S_TRI_PIX=6'd50,           // evaluate coverage; if covered, register the W*area_recip products
         S_TRI_GOTTEX=6'd51,        // wait p0_ok; latch texel; (maybe) issue comp_fbram dst read
         S_TRI_DSTW=6'd52,          // comp_fbram read latency cycle
         S_TRI_DSTC=6'd53,          // capture dst lane
         S_TRI_WR=6'd54,            // drive blt_blend; write comp_fbram on write_en
         S_TRI_ADV=6'd55,          // step w*/attributes by per-x deltas, wrap rows by per-row deltas
-        S_TRI_NEXT=6'd56;         // triangle done: next triangle or finish the command
+        S_TRI_NEXT=6'd56,         // triangle done: next triangle or finish the command
+        S_TRI_MUL=6'd57;          // round the W*recip products, clamp texel, issue P_SRC read
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
                      OP_TRILIST=8'd10;
@@ -381,7 +382,9 @@ module blitter_top #(
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
 
-    // combinational temps for the per-pixel interpolation (blocking, used in S_TRI_PIX)
+    // per-pixel interpolation: mul_* are a REGISTERED pipeline stage (the W*area_recip
+    // products, latched in S_TRI_PIX, consumed in S_TRI_MUL); rnd_*/itu/itv/texbyte are
+    // combinational temps (blocking) used within S_TRI_MUL.
     reg  signed [95:0] mul_u, mul_v, mul_r, mul_g, mul_b, mul_a;
     reg  signed [63:0] rnd_u, rnd_v, rnd_r, rnd_g, rnd_b, rnd_a;
     reg  signed [31:0] itu, itv;
@@ -771,38 +774,51 @@ module blitter_top #(
             // coord, and issue the P_SRC texel read.
             S_TRI_PIX: begin
                 if ((w0>=0) && (w1>=0) && (w2>=0)) begin
-                    // texel coords (u12.4) then nearest-texel with clamp
-                    mul_u = Wu * $signed(ts_area_recip);
-                    mul_v = Wv * $signed(ts_area_recip);
-                    rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
-                    rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
-                    itu   = (rnd_u + 64'sd8) >>> 4;
-                    itv   = (rnd_v + 64'sd8) >>> 4;
-                    tw1r  = c_src_x - 16'd1;
-                    th1r  = c_src_y - 16'd1;
-                    if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
-                    if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
-                    // per-vertex colour
-                    mul_r = Wr * $signed(ts_area_recip);
-                    mul_g = Wg * $signed(ts_area_recip);
-                    mul_b = Wb * $signed(ts_area_recip);
-                    mul_a = Wa * $signed(ts_area_recip);
-                    rnd_r = (mul_r + (96'sd1<<<39)) >>> 40;
-                    rnd_g = (mul_g + (96'sd1<<<39)) >>> 40;
-                    rnd_b = (mul_b + (96'sd1<<<39)) >>> 40;
-                    rnd_a = (mul_a + (96'sd1<<<39)) >>> 40;
-                    cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
-                    cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
-                    // texel byte address + P_SRC read (8-byte aligned; lane = byte[2:1])
-                    texbyte = c_src_off + itv*$signed({16'd0,c_src_stride}) + (itu<<<1);
-                    tri_p0_addr <= texbyte[26:0] & ~27'h7;
-                    tri_p0_rd   <= 1'b1;
-                    tex_lane_q  <= texbyte[2:1];
-                    // comp_fbram destination qword/lane for this pixel
-                    dst_qw_q   <= tri_py*16'd80 + (tri_px>>2);
-                    dst_lane_q <= tri_px[1:0];
-                    state<=S_TRI_GOTTEX;
+                    // Interpolation stage 1: the six W*area_recip products.
+                    // REGISTERED here and consumed next cycle in S_TRI_MUL so the
+                    // 64x48 multiply is not chained with the texel-address multiply
+                    // (itv*stride) in one combinational register-to-register path —
+                    // that single-cycle two-multiply chain was a latent timing
+                    // violator (same class as the blt_tri_setup fix). Wu..Wa and
+                    // tri_px/tri_py are stable until S_TRI_ADV, so the split is exact.
+                    mul_u <= Wu * $signed(ts_area_recip);
+                    mul_v <= Wv * $signed(ts_area_recip);
+                    mul_r <= Wr * $signed(ts_area_recip);
+                    mul_g <= Wg * $signed(ts_area_recip);
+                    mul_b <= Wb * $signed(ts_area_recip);
+                    mul_a <= Wa * $signed(ts_area_recip);
+                    state<=S_TRI_MUL;
                 end else state<=S_TRI_ADV;
+            end
+            // Interpolation stage 2: round the products, nearest-texel clamp, and
+            // issue the P_SRC texel read (address multiply lives here, one cycle
+            // after the W*recip multiply above).
+            S_TRI_MUL: begin
+                // texel coords (u12.4) then nearest-texel with clamp
+                rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
+                rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
+                itu   = (rnd_u + 64'sd8) >>> 4;
+                itv   = (rnd_v + 64'sd8) >>> 4;
+                tw1r  = c_src_x - 16'd1;
+                th1r  = c_src_y - 16'd1;
+                if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
+                if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
+                // per-vertex colour
+                rnd_r = (mul_r + (96'sd1<<<39)) >>> 40;
+                rnd_g = (mul_g + (96'sd1<<<39)) >>> 40;
+                rnd_b = (mul_b + (96'sd1<<<39)) >>> 40;
+                rnd_a = (mul_a + (96'sd1<<<39)) >>> 40;
+                cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
+                cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
+                // texel byte address + P_SRC read (8-byte aligned; lane = byte[2:1])
+                texbyte = c_src_off + itv*$signed({16'd0,c_src_stride}) + (itu<<<1);
+                tri_p0_addr <= texbyte[26:0] & ~27'h7;
+                tri_p0_rd   <= 1'b1;
+                tex_lane_q  <= texbyte[2:1];
+                // comp_fbram destination qword/lane for this pixel
+                dst_qw_q   <= tri_py*16'd80 + (tri_px>>2);
+                dst_lane_q <= tri_px[1:0];
+                state<=S_TRI_GOTTEX;
             end
             // Wait for the texel; latch it. COPY/COLORKEY need no dst read;
             // CONST_ALPHA/ADD/MULTIPLY read the destination pixel first.
