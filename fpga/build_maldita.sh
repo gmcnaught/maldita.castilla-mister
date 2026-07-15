@@ -48,7 +48,7 @@ echo "\`define BUILD_DATE \"$(date +%y%m%d)\"" > build_id.v
 
 # Compile
 echo ">>> Running quartus_sh --flow compile $PROJECT ..."
-"$QUARTUS_SH" --flow compile "$PROJECT" 2>&1 | tee "build_${DATE}.log"
+"$QUARTUS_SH" --flow compile "$PROJECT" --set=GLOBAL_ASSIGNMENT=NUM_PARALLEL_PROCESSORS=ALL 2>&1 | tee "build_${DATE}.log"
 
 # --- Resource utilization report (always; runs even if the Fitter can't fit) -
 # Surfaces WHERE the logic/LABs go so a fit failure (Error 11802 / 170012) is
