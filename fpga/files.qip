@@ -8,6 +8,10 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/openbor_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/openbor_video_reader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddr_blitter_arb.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/blitter_top.sv
+# [TRILIST v1] fabric triangle rasterizer (Task 5): blt_tri_setup (reciprocal-area
+# + gradients), blt_blend (RGB565 blend core), (blt_tri.sv is the sim-only golden, NOT synthesized).
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/blt_tri_setup.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/blt_blend.sv
 # VRAM demux: routes the blitter mem_* master by address (FB0/FB1 -> SDRAM P_DST,
 # else DDR). Instantiated in Maldita.sv; list explicitly (don't rely on SEARCH_PATH).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/vram_demux.sv
