@@ -171,7 +171,8 @@ module blitter_top #(
         // pack) is split into three register stages A/B/C.
         S_TRI_WR2=6'd58,          // stage B: per-channel MAC/add/mul intermediate
         S_TRI_WR3=6'd59,          // stage C: /255,/31,/63 reduce + RGB565 pack + fb write
-        S_TRI_ADDR=6'd60;         // texel-address multiply (itv*stride), split from S_TRI_MUL
+        S_TRI_ADDR=6'd60,         // texel-address multiply (itv*stride), split from S_TRI_MUL
+        S_TRI_MUL0=6'd61;         // pipelined W*area_recip multiply (operands latched in S_TRI_PIX)
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
                      OP_TRILIST=8'd10;
@@ -371,8 +372,13 @@ module blitter_top #(
     reg  [31:0]  tri_vbase;                            // this triangle's first vertex-qword addr
     reg  signed [63:0] w0, w1, w2;                     // running coverage edges (this pixel)
     reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=ox)
-    reg  signed [63:0] Wu, Wv, Wr, Wg, Wb, Wa;         // running weighted attr sums (this pixel)
-    reg  signed [63:0] row_Wu,row_Wv,row_Wr,row_Wg,row_Wb,row_Wa; // at row start
+    // [timing/DSP] weighted attr sums are 48-bit in the setup (ts_W*_0 / ts_dW*)
+    // and stay within that envelope over the bbox walk (see blt_tri_setup header),
+    // so hold them in 48-bit — not 64 — to keep the per-pixel W*area_recip
+    // multiply a 48x48 (fewer DSP tiles, shallower) instead of 64x48. The stored
+    // values never used bits [63:48] (sign extension only), so this is bit-exact.
+    reg  signed [47:0] Wu, Wv, Wr, Wg, Wb, Wa;         // running weighted attr sums (this pixel)
+    reg  signed [47:0] row_Wu,row_Wv,row_Wr,row_Wg,row_Wb,row_Wa; // at row start
 
     // per-pixel latched intermediates
     reg  [7:0]   cr_q, cg_q, cb_q, ca_q;   // interpolated colour for the blend
@@ -388,9 +394,15 @@ module blitter_top #(
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
 
-    // per-pixel interpolation: mul_* are a REGISTERED pipeline stage (the W*area_recip
-    // products, latched in S_TRI_PIX, consumed in S_TRI_MUL); rnd_*/itu/itv/texbyte are
-    // combinational temps (blocking) used within S_TRI_MUL.
+    // per-pixel interpolation. The six W*area_recip products are PIPELINED across
+    // a dedicated register layer: S_TRI_PIX latches the operands into single-fanout
+    // regs (w*_q + recip_q), S_TRI_MUL0 does the multiply (mul_*), S_TRI_MUL rounds.
+    // The dedicated input regs let Quartus pack the multiply as a pipelined DSP
+    // (input reg + output reg) — Wu..Wa themselves have too much fanout (accumulate
+    // + compare + multiply) to be absorbed as the DSP input register, which left the
+    // 48x48 multiply combinational in one cycle and unable to close ~98 MHz.
+    reg  signed [47:0] wu_q, wv_q, wr_q, wg_q, wb_q, wa_q;   // multiply operand A (single fanout)
+    reg  signed [47:0] recip_q;                              // multiply operand B (shared)
     reg  signed [95:0] mul_u, mul_v, mul_r, mul_g, mul_b, mul_a;
     reg  signed [63:0] rnd_u, rnd_v, rnd_r, rnd_g, rnd_b, rnd_a;
     reg  signed [31:0] itu, itv;
@@ -804,21 +816,30 @@ module blitter_top #(
             // coord, and issue the P_SRC texel read.
             S_TRI_PIX: begin
                 if ((w0>=0) && (w1>=0) && (w2>=0)) begin
-                    // Interpolation stage 1: the six W*area_recip products.
-                    // REGISTERED here and consumed next cycle in S_TRI_MUL so the
-                    // 64x48 multiply is not chained with the texel-address multiply
-                    // (itv*stride) in one combinational register-to-register path —
-                    // that single-cycle two-multiply chain was a latent timing
-                    // violator (same class as the blt_tri_setup fix). Wu..Wa and
-                    // tri_px/tri_py are stable until S_TRI_ADV, so the split is exact.
-                    mul_u <= Wu * $signed(ts_area_recip);
-                    mul_v <= Wv * $signed(ts_area_recip);
-                    mul_r <= Wr * $signed(ts_area_recip);
-                    mul_g <= Wg * $signed(ts_area_recip);
-                    mul_b <= Wb * $signed(ts_area_recip);
-                    mul_a <= Wa * $signed(ts_area_recip);
-                    state<=S_TRI_MUL;
+                    // Interpolation stage 1: LATCH the multiply operands into
+                    // single-fanout registers. The actual six W*area_recip products
+                    // happen next cycle (S_TRI_MUL0) so the multiply sits between two
+                    // dedicated register layers (w*_q/recip_q -> mul_*) and Quartus
+                    // maps it to a PIPELINED DSP. Doing the multiply straight off
+                    // Wu..Wa (which also feed the accumulate + coverage compares) left
+                    // it combinational and unable to close ~98 MHz. Wu..Wa and
+                    // tri_px/tri_py are stable until S_TRI_ADV, so this is exact.
+                    wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
+                    wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
+                    recip_q <= $signed(ts_area_recip);
+                    state<=S_TRI_MUL0;
                 end else state<=S_TRI_ADV;
+            end
+            // Interpolation stage 1b: the six products, from the dedicated operand
+            // registers (single fanout -> pipelined DSP).
+            S_TRI_MUL0: begin
+                mul_u <= wu_q * recip_q;
+                mul_v <= wv_q * recip_q;
+                mul_r <= wr_q * recip_q;
+                mul_g <= wg_q * recip_q;
+                mul_b <= wb_q * recip_q;
+                mul_a <= wa_q * recip_q;
+                state<=S_TRI_MUL;
             end
             // Interpolation stage 2: round the products and do the nearest-texel
             // clamp; register the clamped coords. The texel-ADDRESS multiply
