@@ -172,8 +172,9 @@ module blitter_top #(
         S_TRI_WR2=6'd58,          // stage B: per-channel MAC/add/mul intermediate
         S_TRI_WR3=6'd59,          // stage C: /255,/31,/63 reduce + RGB565 pack + fb write
         S_TRI_ADDR=6'd60,         // registered texel-row multiply (itv*stride)
-        S_TRI_MUL0=6'd61,         // pipelined W*area_recip multiply (operands latched in S_TRI_PIX)
-        S_TRI_ADDR2=6'd62;        // texel byte address add + P_SRC read (split from S_TRI_ADDR)
+        S_TRI_MUL0=6'd61,         // W*area_recip partial products (operands latched in S_TRI_PIX)
+        S_TRI_ADDR2=6'd62,        // texel byte address add + P_SRC read (split from S_TRI_ADDR)
+        S_TRI_MUL1=6'd63;         // sum the W*area_recip partial products -> mul_*
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
                      OP_TRILIST=8'd10;
@@ -404,6 +405,14 @@ module blitter_top #(
     // 48x48 multiply combinational in one cycle and unable to close ~98 MHz.
     reg  signed [47:0] wu_q, wv_q, wr_q, wg_q, wb_q, wa_q;   // multiply operand A (single fanout)
     reg  signed [47:0] recip_q;                              // multiply operand B (shared)
+    // W*area_recip as a two-stage split: a 48x48 done in one cycle was an ~8.9 ns
+    // 4-tile combinational DSP (wv_q -> mul_v was -0.221 ns). Both operands are
+    // >= 0 (W on covered pixels; recip < 2^41), so split recip into 24-bit halves,
+    // register two 48x24 partial products, and sum them one cycle later -> each
+    // lane is a shallower pipelined multiply + a registered add. Bit-exact:
+    // wq*recip = wq*recip[23:0] + (wq*recip[47:24])<<24.
+    reg         [71:0] pp_u_lo,pp_u_hi, pp_v_lo,pp_v_hi, pp_r_lo,pp_r_hi;
+    reg         [71:0] pp_g_lo,pp_g_hi, pp_b_lo,pp_b_hi, pp_a_lo,pp_a_hi;
     reg  signed [95:0] mul_u, mul_v, mul_r, mul_g, mul_b, mul_a;
     reg  signed [63:0] rnd_u, rnd_v, rnd_r, rnd_g, rnd_b, rnd_a;
     reg  signed [31:0] itu, itv;
@@ -841,15 +850,28 @@ module blitter_top #(
                     state<=S_TRI_MUL0;
                 end else state<=S_TRI_ADV;
             end
-            // Interpolation stage 1b: the six products, from the dedicated operand
-            // registers (single fanout -> pipelined DSP).
+            // Interpolation stage 1b: two 48x24 partial products per lane, split on
+            // recip's 24-bit halves (operands >= 0 -> unsigned). Registered -> each
+            // is a shallow pipelined multiply; the tile-adder tree of a full 48x48
+            // is broken up and finished in S_TRI_MUL1.
             S_TRI_MUL0: begin
-                mul_u <= wu_q * recip_q;
-                mul_v <= wv_q * recip_q;
-                mul_r <= wr_q * recip_q;
-                mul_g <= wg_q * recip_q;
-                mul_b <= wb_q * recip_q;
-                mul_a <= wa_q * recip_q;
+                pp_u_lo <= $unsigned(wu_q) * recip_q[23:0];  pp_u_hi <= $unsigned(wu_q) * recip_q[47:24];
+                pp_v_lo <= $unsigned(wv_q) * recip_q[23:0];  pp_v_hi <= $unsigned(wv_q) * recip_q[47:24];
+                pp_r_lo <= $unsigned(wr_q) * recip_q[23:0];  pp_r_hi <= $unsigned(wr_q) * recip_q[47:24];
+                pp_g_lo <= $unsigned(wg_q) * recip_q[23:0];  pp_g_hi <= $unsigned(wg_q) * recip_q[47:24];
+                pp_b_lo <= $unsigned(wb_q) * recip_q[23:0];  pp_b_hi <= $unsigned(wb_q) * recip_q[47:24];
+                pp_a_lo <= $unsigned(wa_q) * recip_q[23:0];  pp_a_hi <= $unsigned(wa_q) * recip_q[47:24];
+                state<=S_TRI_MUL1;
+            end
+            // Interpolation stage 1c: recombine the partial products (adds only).
+            // mul_X = pp_lo + (pp_hi << 24) == wX_q * recip_q (bit-exact).
+            S_TRI_MUL1: begin
+                mul_u <= {24'd0,pp_u_lo} + {pp_u_hi,24'd0};
+                mul_v <= {24'd0,pp_v_lo} + {pp_v_hi,24'd0};
+                mul_r <= {24'd0,pp_r_lo} + {pp_r_hi,24'd0};
+                mul_g <= {24'd0,pp_g_lo} + {pp_g_hi,24'd0};
+                mul_b <= {24'd0,pp_b_lo} + {pp_b_hi,24'd0};
+                mul_a <= {24'd0,pp_a_lo} + {pp_a_hi,24'd0};
                 state<=S_TRI_MUL;
             end
             // Interpolation stage 2: round the products and do the nearest-texel
