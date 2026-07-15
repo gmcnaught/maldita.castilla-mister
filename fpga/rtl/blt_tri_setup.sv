@@ -39,20 +39,26 @@
 //    S2: the three edge functions w{k}_0 at the origin sample (+top-left bias),
 //        and the small per-x/per-row edge deltas dw{k}dx=16*(yi-yj),
 //        dw{k}dy=16*(xj-xi); KICK the sequential area reciprocal. [mult depth 1]
-//    S3: the 54 partial products w{k}_0*A{k}, dw{k}dx*A{k}, dw{k}dy*A{k}
-//        (k over the 3 verts, A over u,v,r,g,b,a). [mult depth 1]
-//    S4: sum the 3 partials per attribute -> W{}_0, dW{}dx, dW{}dy. [adders only]
+//    S3 (MAC): the 54 partial products w{k}_0*A{k}, dw{k}dx*A{k}, dw{k}dy*A{k}
+//        (k over the 3 verts, A over u,v,r,g,b,a) summed per attribute into
+//        W{}_0, dW{}dx, dW{}dy. This used to be 54 PARALLEL multiplies in one
+//        cycle (S3) + a per-attribute adder tree (S4) — ~54 DSP blocks for a
+//        per-triangle (~10/frame) computation, the design's dominant DSP
+//        consumer. It is now a SEQUENTIAL multiply-accumulate: 3 multipliers
+//        (the nw/dwdx/dwdy lanes, all sharing the same A[a][k] operand each
+//        step) walk the 18 (attr,vert) pairs over 18 steps, with multiply and
+//        accumulate in separate pipeline cycles (no mult->add chain). Frees
+//        ~50 DSP blocks. [3 DSPs, ~19 cycles, concurrent with the divider]
 //  The area reciprocal is a synthesizable radix-2 restoring divider (UNROLL
 //  bits/cycle, ITERS busy cycles) kicked at S2 and running CONCURRENTLY with
-//  S3/S4; `valid` rises when it finishes (it is the long pole). Latency:
-//  non-degenerate ~54 cycles (5 S1 sub-stages P1..P5 + S2 kick + ITERS=48
-//  divider cycles), degenerate ~8 cycles (skips the divider, asserts valid
-//  when S4 lands). Both are well inside the downstream valid-wait (tb caps at
-//  80). The
-//  extra S1 pipe depth is free — setup runs once per triangle (~10/frame). The
-//  arithmetic is UNCHANGED from
-//  the former single-cycle block — only pipeline registers were inserted — so
-//  every output stays bit-exact-or-±1 vs. the golden (tb_tri_setup).
+//  the S3 MAC; `valid` rises when it finishes (it is the long pole — 48 cycles
+//  vs. the MAC's ~19). Latency: non-degenerate ~54 cycles (5 S1 sub-stages
+//  P1..P5 + S2 kick + ITERS=48 divider cycles), degenerate ~24 cycles (skips
+//  the divider, asserts valid when the MAC drains). Both are well inside the
+//  downstream valid-wait (tb caps at 80). The extra pipe depth is free — setup
+//  runs once per triangle. The arithmetic is UNCHANGED (same three integer
+//  terms summed in the same k=0,1,2 order) — only the multiply was serialized —
+//  so every output stays bit-exact-or-±1 vs. the golden (tb_tri_setup).
 //  The OUTPUT interface below is what Task 5 consumes and is unchanged.
 //
 //  Validated operating envelope (tb_tri_setup.sv "envelope_worst_case", passes
@@ -146,7 +152,7 @@ module blt_tri_setup #(
     //   P5: reciprocal-numerator prep num = 2^SHIFT + den/2.       [add only]
     // g1..g4 are the P1..P4 completion pulses; e1 marks P5 done (== old "S1
     // done"), after which S2/S3/S4 below are UNCHANGED.
-    reg e1, e2, e3;
+    reg e1;                 // S2 completion / divider+MAC kick pulse
     reg g1, g2, g3, g4;
 
     // ── P1 registers: edgef vertex differences + origin; raw verts/attrs carry ─
@@ -180,17 +186,34 @@ module blt_tri_setup #(
     reg signed [63:0] s1_A [0:5][0:2];   // [attr u,v,r,g,b,a][vert 0,1,2], swapped
 
     // ── Stage-2 registers (edge functions + deltas, carried attrs) ─────────────
-    reg               s2_degen;
     reg signed [63:0] s2_nw    [0:2];    // edge-function value at origin (incl. bias)
     reg signed [63:0] s2_ndwdx [0:2];    // 16*(y diff)
     reg signed [63:0] s2_ndwdy [0:2];    // 16*(x diff)
     reg signed [63:0] s2_A [0:5][0:2];
 
-    // ── Stage-3 registers (partial products, 3 per attribute) ──────────────────
-    reg               s3_degen;
-    reg signed [63:0] p0  [0:5][0:2];    // w{k}_0  * A{k}
-    reg signed [63:0] pdx [0:5][0:2];    // dw{k}dx * A{k}
-    reg signed [63:0] pdy [0:5][0:2];    // dw{k}dy * A{k}
+    // ── Stage-3 as a SEQUENTIAL multiply-accumulate (DSP time-multiplex) ────────
+    //  The former Stage-3 fired all 54 partial products (6 attrs x 3 verts x 3
+    //  lanes p0/pdx/pdy) in ONE cycle -> ~54 DSP blocks for a per-triangle
+    //  (~10/frame) computation, the dominant consumer that starved the rest of
+    //  the design of DSPs (the fitter then spilled the per-pixel itv*stride
+    //  multiply into LUT soft-multipliers, blowing the mul_v->tri_p0_addr walk
+    //  path). It is now a 3-multiplier MAC engine (nw / dwdx / dwdy lanes, all
+    //  sharing the SAME A[a][k] operand each step) that walks the 18 (attr,vert)
+    //  pairs over 18 steps. Multiply and accumulate live in SEPARATE pipeline
+    //  cycles (registered product pr* -> add), so no multiply->add chain is
+    //  created. It is kicked at the S2->divider point and runs CONCURRENTLY with
+    //  the 48-cycle reciprocal divider; it drains in ~19 cycles (< 48), so setup
+    //  latency is unchanged and the divider stays the long pole. The same three
+    //  integer terms are summed in the same k=0,1,2 order as before -> outputs
+    //  are BIT-IDENTICAL (guarded by tb_tri_setup).
+    reg               mac_busy = 1'b0;   // engine running (power-up idle; rst may be tied 0)
+    reg               p_vld    = 1'b0;   // a product is in pr* to accumulate
+    reg               mac_degen;         // area==0: outputs moot, but drive valid
+    reg        [5:0]  mac_idx;           // multiply step 0..17 (a=idx/3, k=idx%3)
+    reg signed [63:0] pr0, prx, pry;     // registered products (nw / dwdx / dwdy)
+    reg        [2:0]  p_a;               // attribute of the product in pr*
+    reg        [1:0]  p_k;               // vert (0,1,2) of the product in pr*
+    reg signed [63:0] acc0, accx, accy;  // running per-attribute accumulators
 
     // combinational temporaries (blocking, per-stage)
     reg signed [63:0] t_area, t_den;
@@ -200,6 +223,9 @@ module blt_tri_setup #(
     reg signed [63:0] tb0,tb1,tb2;
     reg signed [63:0] tnw0,tnw1,tnw2, tdx0,tdx1,tdx2, tdy0,tdy1,tdy2;
     integer a, k;
+    // Stage-3 MAC blocking temporaries (accumulate stage: add only)
+    reg signed [63:0] sum0, sumx, sumy;
+    integer ma, mk;
 
     // ── SEQUENTIAL area reciprocal (radix-2 restoring divide, unrolled) ────────
     //  Computes q = floor(num/den) == round(2^SHIFT/area), identical to a single
@@ -233,12 +259,14 @@ module blt_tri_setup #(
     always @(posedge clk) begin
         if (rst) begin
             valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
-            e1 <= 1'b0; e2 <= 1'b0; e3 <= 1'b0;
+            e1 <= 1'b0;
             g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
+            mac_busy <= 1'b0; p_vld <= 1'b0;
         end else begin
             valid <= 1'b0;                      // one-cycle pulse; default low
-            e1 <= 1'b0; e2 <= 1'b0; e3 <= 1'b0; // stage pulses default low
+            e1 <= 1'b0;                         // S2 kick pulse default low
             g1 <= 1'b0; g2 <= 1'b0; g3 <= 1'b0; g4 <= 1'b0;
+            p_vld <= 1'b0;                       // MAC product-valid default low
 
             // ============ P1: edgef vertex diffs + origin; latch raw =============
             // Accept a new triangle only when the whole pipeline AND divider are
@@ -246,7 +274,7 @@ module blt_tri_setup #(
             // DIFFERENCES here (no multiply). The bbox-min origin is swap-
             // invariant (the CCW swap only exchanges verts 1<->2), so compute it
             // from the RAW verts now. Carry raw verts+attrs to the P4 swap point.
-            if (start && !busy && !e1 && !e2 && !e3 && !g1 && !g2 && !g3 && !g4) begin
+            if (start && !busy && !mac_busy && !e1 && !g1 && !g2 && !g3 && !g4) begin
                 p1_dbx <= vx1 - vx0;   p1_dcy <= vy2 - vy0;   // bx-ax , cy-ay
                 p1_dby <= vy1 - vy0;   p1_dcx <= vx2 - vx0;   // by-ay , cx-ax
 
@@ -390,13 +418,12 @@ module blt_tri_setup #(
                 dw0dx <= tdx0[47:0]; dw1dx <= tdx1[47:0]; dw2dx <= tdx2[47:0];
                 dw0dy <= tdy0[47:0]; dw1dy <= tdy1[47:0]; dw2dy <= tdy2[47:0];
 
-                // carry attrs + degen forward
+                // carry attrs forward for the sequential MAC
                 for (a = 0; a < 6; a = a + 1) begin
                     s2_A[a][0] <= s1_A[a][0];
                     s2_A[a][1] <= s1_A[a][1];
                     s2_A[a][2] <= s1_A[a][2];
                 end
-                s2_degen <= s1_degen;
 
                 // kick the sequential reciprocal (or take the degenerate fast path)
                 if (s1_degen) begin
@@ -411,53 +438,60 @@ module blt_tri_setup #(
                     busy  <= 1'b1;
                 end
 
-                e2 <= 1'b1;
+                // kick the sequential Stage-3 MAC (runs concurrently with the
+                // divider; drains well before it, so latency is divider-bound)
+                mac_busy  <= 1'b1;
+                mac_idx   <= 6'd0;
+                mac_degen <= s1_degen;
             end
 
-            // ============ Stage 3: partial products w{k}*A{k} etc ===============
-            if (e2) begin
-                for (a = 0; a < 6; a = a + 1) begin
-                    for (k = 0; k < 3; k = k + 1) begin
-                        // [timing/DSP] narrow the multiply operands to their real
-                        // envelope so each is ONE DSP (27x18) not a 64x64 longint
-                        // multiply (~4-6 DSPs): w{k} edge functions are ~26-bit
-                        // (screen coords), deltas ~24-bit, attrs (u/v<=32768, rgba<=255)
-                        // ~18-bit. Value unchanged in-envelope (guarded by tb_tri_setup).
-                        p0 [a][k] <= $signed(s2_nw[k][26:0])    * $signed(s2_A[a][k][17:0]);
-                        pdx[a][k] <= $signed(s2_ndwdx[k][23:0]) * $signed(s2_A[a][k][17:0]);
-                        pdy[a][k] <= $signed(s2_ndwdy[k][23:0]) * $signed(s2_A[a][k][17:0]);
+            // ============ Stage 3 MAC — multiply stage (one step / cycle) =======
+            // Product for step mac_idx: a = idx/3 (attribute), k = idx%3 (vert).
+            // Same NARROWED operands as the former parallel Stage-3 (nw edge
+            // functions ~26b -> 27, deltas ~24b, attrs u/v<=32768,rgba<=255 -> 18b)
+            // so each lane is ONE DSP; the three lanes share A[a][k]. Value is
+            // unchanged in-envelope (guarded by tb_tri_setup).
+            if (mac_busy && mac_idx < 6'd18) begin
+                ma = mac_idx / 3;
+                mk = mac_idx % 3;
+                pr0 <= $signed(s2_nw[mk][26:0])    * $signed(s2_A[ma][mk][17:0]);
+                prx <= $signed(s2_ndwdx[mk][23:0]) * $signed(s2_A[ma][mk][17:0]);
+                pry <= $signed(s2_ndwdy[mk][23:0]) * $signed(s2_A[ma][mk][17:0]);
+                p_a   <= ma[2:0];
+                p_k   <= mk[1:0];
+                p_vld <= 1'b1;
+                mac_idx <= mac_idx + 6'd1;
+            end
+
+            // ============ Stage 3 MAC — accumulate stage (add only) =============
+            // Consumes the product registered LAST cycle. Verts arrive k=0,1,2
+            // per attribute, so start on k==0, add on k==1, and on k==2 latch the
+            // completed W/dW outputs for attribute p_a (truncate to 48b exactly as
+            // the former Stage-4 did). Only a 64-bit add is in this path — the
+            // multiply->add chain of the old single-cycle Stage-3/-4 is gone.
+            if (p_vld) begin
+                sum0 = acc0 + pr0;  sumx = accx + prx;  sumy = accy + pry;
+                if (p_k == 2'd0) begin
+                    acc0 <= pr0;  accx <= prx;  accy <= pry;
+                end else if (p_k == 2'd1) begin
+                    acc0 <= sum0; accx <= sumx; accy <= sumy;
+                end else begin
+                    case (p_a)
+                      3'd0: begin Wu_0<=sum0[47:0]; dWudx<=sumx[47:0]; dWudy<=sumy[47:0]; end
+                      3'd1: begin Wv_0<=sum0[47:0]; dWvdx<=sumx[47:0]; dWvdy<=sumy[47:0]; end
+                      3'd2: begin Wr_0<=sum0[47:0]; dWrdx<=sumx[47:0]; dWrdy<=sumy[47:0]; end
+                      3'd3: begin Wg_0<=sum0[47:0]; dWgdx<=sumx[47:0]; dWgdy<=sumy[47:0]; end
+                      3'd4: begin Wb_0<=sum0[47:0]; dWbdx<=sumx[47:0]; dWbdy<=sumy[47:0]; end
+                      3'd5: begin Wa_0<=sum0[47:0]; dWadx<=sumx[47:0]; dWady<=sumy[47:0]; end
+                    endcase
+                    if (p_a == 3'd5) begin
+                        // last attribute drained. Non-degenerate triangles assert
+                        // valid on divider-done (still running, the long pole);
+                        // degenerate ones skipped the divider, so valid here.
+                        mac_busy <= 1'b0;
+                        if (mac_degen) valid <= 1'b1;
                     end
                 end
-                s3_degen <= s2_degen;
-                e3 <= 1'b1;
-            end
-
-            // ============ Stage 4: sum the 3 partials per attribute =============
-            if (e3) begin
-                Wu_0 <= p0[0][0] + p0[0][1] + p0[0][2];
-                Wv_0 <= p0[1][0] + p0[1][1] + p0[1][2];
-                Wr_0 <= p0[2][0] + p0[2][1] + p0[2][2];
-                Wg_0 <= p0[3][0] + p0[3][1] + p0[3][2];
-                Wb_0 <= p0[4][0] + p0[4][1] + p0[4][2];
-                Wa_0 <= p0[5][0] + p0[5][1] + p0[5][2];
-
-                dWudx <= pdx[0][0] + pdx[0][1] + pdx[0][2];
-                dWvdx <= pdx[1][0] + pdx[1][1] + pdx[1][2];
-                dWrdx <= pdx[2][0] + pdx[2][1] + pdx[2][2];
-                dWgdx <= pdx[3][0] + pdx[3][1] + pdx[3][2];
-                dWbdx <= pdx[4][0] + pdx[4][1] + pdx[4][2];
-                dWadx <= pdx[5][0] + pdx[5][1] + pdx[5][2];
-
-                dWudy <= pdy[0][0] + pdy[0][1] + pdy[0][2];
-                dWvdy <= pdy[1][0] + pdy[1][1] + pdy[1][2];
-                dWrdy <= pdy[2][0] + pdy[2][1] + pdy[2][2];
-                dWgdy <= pdy[3][0] + pdy[3][1] + pdy[3][2];
-                dWbdy <= pdy[4][0] + pdy[4][1] + pdy[4][2];
-                dWady <= pdy[5][0] + pdy[5][1] + pdy[5][2];
-
-                // degenerate triangles skip the divider; their W outputs are moot
-                // (the walk drops the triangle) — assert valid as soon as S4 lands.
-                if (s3_degen) valid <= 1'b1;
             end
 
             // ============ concurrent sequential reciprocal ======================

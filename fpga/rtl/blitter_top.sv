@@ -170,7 +170,8 @@ module blitter_top #(
         // timing closure: the old single-cycle S_TRI_WR (tint+alpha-combine+MAC+/255+
         // pack) is split into three register stages A/B/C.
         S_TRI_WR2=6'd58,          // stage B: per-channel MAC/add/mul intermediate
-        S_TRI_WR3=6'd59;          // stage C: /255,/31,/63 reduce + RGB565 pack + fb write
+        S_TRI_WR3=6'd59,          // stage C: /255,/31,/63 reduce + RGB565 pack + fb write
+        S_TRI_ADDR=6'd60;         // texel-address multiply (itv*stride), split from S_TRI_MUL
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
                      OP_TRILIST=8'd10;
@@ -393,6 +394,7 @@ module blitter_top #(
     reg  signed [95:0] mul_u, mul_v, mul_r, mul_g, mul_b, mul_a;
     reg  signed [63:0] rnd_u, rnd_v, rnd_r, rnd_g, rnd_b, rnd_a;
     reg  signed [31:0] itu, itv;
+    reg  signed [31:0] itu_q, itv_q;   // clamped texel coords, registered for S_TRI_ADDR
     reg         [15:0] tw1r, th1r;
     reg         [31:0] texbyte;
 
@@ -818,9 +820,11 @@ module blitter_top #(
                     state<=S_TRI_MUL;
                 end else state<=S_TRI_ADV;
             end
-            // Interpolation stage 2: round the products, nearest-texel clamp, and
-            // issue the P_SRC texel read (address multiply lives here, one cycle
-            // after the W*recip multiply above).
+            // Interpolation stage 2: round the products and do the nearest-texel
+            // clamp; register the clamped coords. The texel-ADDRESS multiply
+            // (itv*stride) is deferred to S_TRI_ADDR so it is NOT chained with the
+            // wide 96-bit W*recip rounding here in one cycle — that chain was the
+            // reported worst path (mul_v[40] -> tri_p0_addr, -5.576 ns).
             S_TRI_MUL: begin
                 // texel coords (u12.4) then nearest-texel with clamp
                 rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
@@ -831,6 +835,7 @@ module blitter_top #(
                 th1r  = c_src_y - 16'd1;
                 if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
                 if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
+                itu_q <= itu; itv_q <= itv;   // registered for the S_TRI_ADDR multiply
                 // per-vertex colour
                 rnd_r = (mul_r + (96'sd1<<<39)) >>> 40;
                 rnd_g = (mul_g + (96'sd1<<<39)) >>> 40;
@@ -838,14 +843,21 @@ module blitter_top #(
                 rnd_a = (mul_a + (96'sd1<<<39)) >>> 40;
                 cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
                 cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
-                // texel byte address + P_SRC read (8-byte aligned; lane = byte[2:1])
-                texbyte = c_src_off + itv*$signed({16'd0,c_src_stride}) + (itu<<<1);
+                // comp_fbram destination qword/lane for this pixel (independent of
+                // the texel-address multiply, so it stays here)
+                dst_qw_q   <= tri_py*16'd80 + (tri_px>>2);
+                dst_lane_q <= tri_px[1:0];
+                state<=S_TRI_ADDR;
+            end
+            // Interpolation stage 3: texel byte address + P_SRC read. Split from
+            // S_TRI_MUL so the itv*stride multiply gets its own cycle (one extra
+            // cycle per covered pixel, negligible vs. the SDRAM texel-read wait).
+            S_TRI_ADDR: begin
+                // texel byte address (8-byte aligned; lane = byte[2:1])
+                texbyte = c_src_off + itv_q*$signed({16'd0,c_src_stride}) + (itu_q<<<1);
                 tri_p0_addr <= texbyte[26:0] & ~27'h7;
                 tri_p0_rd   <= 1'b1;
                 tex_lane_q  <= texbyte[2:1];
-                // comp_fbram destination qword/lane for this pixel
-                dst_qw_q   <= tri_py*16'd80 + (tri_px>>2);
-                dst_lane_q <= tri_px[1:0];
                 state<=S_TRI_GOTTEX;
             end
             // Wait for the texel; latch it. COPY/COLORKEY need no dst read;
