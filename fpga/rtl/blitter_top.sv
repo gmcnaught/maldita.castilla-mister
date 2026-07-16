@@ -136,6 +136,7 @@ module blitter_top #(
         S_CLR_FILL=6'd12,   S_CLR_FILL_WAIT=6'd13,
         S_FRAME_VCTRL=6'd20, S_WR_DONE=6'd21, S_WR_STATUS=6'd22,
         S_RD_WAIT=6'd23,    S_WR_WAIT=6'd24,
+        S_WR_PERF=6'd25,    // [profiling] publish perf_tri_cyc to C_SRCSEL.hi (spare qw7 high)
         S_GOT_SRCSEL=6'd30, // control-fetch: latch C_SRCSEL after C_FLAGS
         // ---- BLT_OP_STAGE DDR3->SDRAM copy FSM (issue #19) ----
         S_STAGE_RD=6'd32,     // issue the DDR3 read of beat i (SRC_QW + off + i*8)
@@ -253,6 +254,13 @@ module blitter_top #(
     // reads them via devmem at C_DONE+4 / C_STATUS+4. fabric_busy/pipe_busy vs the
     // vsync interval (0x3A070000) tells you whether the A9 or the fabric is the limit.
     reg  [31:0] perf_frame_cyc, perf_pipe_cyc;
+    // [profiling] TRILIST per-state attribution to locate the ~46 cyc/px cost:
+    //   perf_tri_cyc     = cycles in any S_TRI_* state (published to C_SRCSEL.hi)
+    //   perf_texwait_cyc = cycles blocked in S_TRI_GOTTEX waiting on p0_ok (texel
+    //                      fetch) — published to C_STATUS.hi (replaces perf_pipe_cyc,
+    //                      whose value is already known ~2.45ms). frame - tri = ring/
+    //                      clear/setup overhead; tri - texwait = rasterizer datapath.
+    reg  [31:0] perf_tri_cyc, perf_texwait_cyc;
     reg  [1:0]  target_buf;   // 0/1 = framebuffer; 2 = off-screen bg-cache (no flip)
     // [collapse-single-source] The per-blit source read is ALWAYS from SDRAM now
     // (single source pipeline). The old C_SRCSEL bit0 (DDR3-vs-SDRAM source mux,
@@ -496,6 +504,7 @@ module blitter_top #(
             bm_addr<=0; bm_din<=0; idle<=1; frame_counter<=0;
             cmd_idx<=0; fetch_k<=0; submit_reg<=0; done_reg<=0; rd_issued<=0;
             perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;
+            perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;
             throttle_cnt<=8'd0; throttle_cfg<=8'd0;
             pipe_start<=1'b0;
             src_sdram_we<=1'b0; src_sdram_din<=16'd0; stage_waddr_fsm<=27'd0;
@@ -522,6 +531,10 @@ module blitter_top #(
             if (!idle) begin
                 perf_frame_cyc <= perf_frame_cyc + 32'd1;
                 if (pipe_busy) perf_pipe_cyc <= perf_pipe_cyc + 32'd1;
+                // [profiling] all TRILIST states are 45..63 (highest state values)
+                if (state >= S_TRI_VFETCH) perf_tri_cyc <= perf_tri_cyc + 32'd1;
+                // cycles stalled waiting on the per-pixel texel fetch (S_TRI_GOTTEX/p0_ok)
+                if (state == S_TRI_GOTTEX && !p0_ok) perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
             case (state)
@@ -541,6 +554,7 @@ module blitter_top #(
                     idle<=0; bm_rd<=1; bm_addr<=`BLTCTRL_QW+`C_CMDCOUNT;
                     rd_ret<=S_GOT_CMDCNT; state<=S_RD_WAIT;
                     perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;   // frame start: reset perf
+                    perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;   // [profiling] reset per-frame
                 end
             end
             S_GOT_CMDCNT: begin
@@ -1092,8 +1106,19 @@ module blitter_top #(
                 // trigger — see the latch above; bit1=osd_fps_on, a genuine persistent
                 // level so it's read raw); high32 = compositor-busy (pipe_busy) cyc this
                 // frame — unchanged.
+                // [profiling] high32 repurposed perf_pipe_cyc -> perf_texwait_cyc (the
+                // per-pixel texel-fetch stall). perf_pipe_cyc (~2.45ms) is already known.
                 bm_wr<=1; bm_be<=8'hFF; bm_addr<=`BLTCTRL_QW+`C_STATUS;
-                bm_din<={perf_pipe_cyc, 30'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={perf_texwait_cyc, 30'd0, osd_fps_on, osd_restart_pending};
+                wr_ret<=S_WR_PERF;
+                state<=S_WR_WAIT;
+            end
+            S_WR_PERF: begin
+                // [profiling] publish perf_tri_cyc to the SPARE high 32 of C_SRCSEL (qw7);
+                // low 32 (throttle_cfg[15:8]) preserved via byte-enable. Host reads at
+                // C_SRCSEL+4. Then proceed to the vblank work->scan snapshot as before.
+                bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_SRCSEL;
+                bm_din<={perf_tri_cyc, 32'd0};
                 // [FB-in-BRAM double-buffer] after the frame, snapshot the completed work
                 // buffer into the scan buffer (during vblank). C_DONE was already written
                 // (S_WR_DONE), so the engine's handshake completes and its next-frame prep
