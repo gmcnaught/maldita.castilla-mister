@@ -411,34 +411,39 @@ module blitter_top #(
     // address-gen + texel fetch (A):
     //   pa (address-gen): walk coverage -> W*recip mul -> texel addr -> issue P_SRC read
     //   pb (consume+blend): wait texel -> dst read -> 3-stage blend -> comp_fbram write
-    // They rendezvous through a SINGLE-DEEP texel handoff (h_full + h_* snapshot),
-    // matching the single-outstanding P_SRC channel. Because A computes pixel N+1
-    // (clobbering the live cr_q/dst_qw_q/... regs) while B is still blending pixel N,
-    // B must consume the handoff SNAPSHOT h_* rather than the live regs. Triangle
+    // They rendezvous through a depth-TEXFIFO_D payload FIFO (pf_mem), so A can run up
+    // to TEXFIFO_D pixels ahead of B. Because A computes pixel N+1 (clobbering the live
+    // cr_q/dst_qw_q/... regs) while B is still blending pixel N, B consumes the payload
+    // popped from the FIFO (b_* regs) rather than the live regs. Triangle
     // constants (c_blend/c_alpha/c_src_*) are stable while pixels are in flight (the
     // pipe drains before the next triangle's setup), so they need no snapshot.
     localparam [2:0] A_PIX=3'd0, A_MUL0=3'd1, A_MUL1=3'd2, A_MUL=3'd3,
                      A_ADDR=3'd4, A_ADDR2=3'd5, A_ISSUE=3'd6, A_DONE=3'd7;
-    localparam [2:0] B_IDLE=3'd0, B_GOT=3'd1, B_DSTW=3'd2, B_DSTC=3'd3,
+    localparam [2:0] B_IDLE=3'd0, B_DSTW=3'd2, B_DSTC=3'd3,
                      B_WR=3'd4, B_WR2=3'd5, B_WR3=3'd6, B_FILL=3'd7;
     reg  [2:0]   pa, pb;                   // the two concurrent sub-FSM states
-    reg          h_full;                   // texel handoff occupied (single-outstanding)
-    reg  [7:0]   h_cr, h_cg, h_cb, h_ca;   // handoff: interpolated colour
-    reg  [14:0]  h_dst_qw;                 // handoff: comp_fbram qword index
-    reg  [1:0]   h_dst_lane;               // handoff: x[1:0]
-    reg  [1:0]   h_tex_lane;               // handoff: texel qword lane
-    reg  [23:0]  h_qtag;                   // handoff: texel qword tag (byte_addr[26:3])
+    // [Task 2] depth-D payload FIFO decouples pa from pb: pa pushes each pixel's
+    // payload as it finishes address-gen and races ahead up to TEXFIFO_D pixels; pb
+    // pops the head and resolves/blends. Replaces the old single-deep h_full handoff.
+    // Payload = {ca,cb,cg,cr[8b each]=32, dst_qw[15], dst_lane[2], qtag[24], texlane[2]}
+    // = 75 bits. Pointer-with-extra-MSB scheme gives full/empty disambiguation.
+    localparam integer TEXFIFO_D  = 16;
+    localparam integer TEXFIFO_AW = 4;      // $clog2(TEXFIFO_D)
+    localparam integer PW = 32+15+2+24+2;   // payload width = 75
+    reg  [PW-1:0] pf_mem [0:TEXFIFO_D-1];
+    reg  [TEXFIFO_AW:0] pf_wr, pf_rd;       // extra MSB for full/empty disambiguation
+    wire pf_empty = (pf_wr == pf_rd);
+    wire pf_full  = (pf_wr[TEXFIFO_AW-1:0]==pf_rd[TEXFIFO_AW-1:0]) && (pf_wr[TEXFIFO_AW]!=pf_rd[TEXFIFO_AW]);
+    wire [PW-1:0] pf_head = pf_mem[pf_rd[TEXFIFO_AW-1:0]];
     // [pipeline fix] p0_ok is a 1-cycle strobe and the P_SRC channel is single-
     // outstanding, so the texel for the ONE in-flight read must be caught the cycle it
-    // arrives — regardless of where the blend FSM (pb) happens to be. Latching it in
-    // B_GOT (only) missed the strobe whenever variable memory latency landed p0_ok while
-    // pb was still finishing the previous pixel, hanging the fabric on the device (sim's
-    // fixed low latency happened to align, hiding it). This always-listening catcher
-    // holds the texel until pb consumes it (via the local qword BRAM in B_FILL).
-    // B-local copies of the handoff payload, snapshotted at B_GOT. B FREES the handoff
-    // (h_full<=0) at B_GOT so A can issue the next texel read, but B keeps using the
-    // payload through B_WR3 — so it must read these private copies, not the live h_*
-    // (which A may already have overwritten for the next pixel).
+    // arrives — regardless of where the blend FSM (pb) happens to be. This always-
+    // listening catcher (top of S_TRI_PIX) fills the BRAM slot and clears fill_busy the
+    // cycle p0_ok returns, so the strobe is never missed and pb resolves via the local
+    // qword BRAM in B_FILL.
+    // B-local copies of the popped FIFO payload. pb unpacks pf_head into these at B_IDLE
+    // (then pops), and uses them through B_WR3 — pa may already be filling later FIFO
+    // slots with the next pixels' payloads, so pb must read these private copies.
     reg  [7:0]   b_cr, b_cg, b_cb, b_ca;
     reg  [14:0]  b_dst_qw;
     reg  [1:0]   b_dst_lane;
@@ -611,7 +616,7 @@ module blitter_top #(
             snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
-            pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
+            pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
             fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}};
         end else begin
             bm_rd<=1'b0;
@@ -634,7 +639,7 @@ module blitter_top #(
                 // [profiling] all TRILIST states are 45..63 (highest state values)
                 if (state >= S_TRI_VFETCH) perf_tri_cyc <= perf_tri_cyc + 32'd1;
                 // cycles the consume sub-FSM (pb) stalls waiting on the per-pixel texel
-                // fetch (B_GOT/p0_ok). With the A||B overlap these are cycles where A may
+                // fetch in B_FILL. With the A||B overlap these are cycles where A may
                 // still be doing productive address-gen work, so dpath=(tri-texwait) is a
                 // conservative proxy; tri_cyc/covered is the true wall-clock throughput.
                 if ((state==S_TRI_PIX) && (pb==B_FILL) && !tq_hit(b_qtag))
@@ -953,7 +958,7 @@ module blitter_top #(
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
                     // (the qword cache persists across triangles in a command; it is
                     // dropped only at the per-command STAGE barrier, not here.)
-                    pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
+                    pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
                     state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
@@ -1063,19 +1068,17 @@ module blitter_top #(
             // the SDRAM texel-read wait.
             A_ADDR2: begin
                 // texel byte address (8-byte aligned; lane = byte[2:1]). The P_SRC
-                // read itself is NOT issued here — it is deferred to A_ISSUE so the
-                // single-outstanding channel is only driven once the previous texel
-                // has been consumed by B (h_full cleared).
+                // fill is kicked in A_ISSUE (guarded by !fill_busy), not here — keeping
+                // the single-outstanding channel driven by one site per pa pass.
                 texbyte = c_src_off + tex_row + (itu_q<<<1);
                 tri_p0_addr <= texbyte[26:0] & ~27'h7;
                 tex_lane_q  <= texbyte[2:1];
                 pa<=A_ISSUE;
             end
-            // Issue the texel read into the single-deep handoff. Stall until B has
-            // consumed the previous one (h_full==0). Snapshot the per-pixel payload
-            // (colour, dst qword/lane, texel lane) so A can immediately race ahead on
-            // the next pixel while B blends this one off the h_* snapshot.
-            A_ISSUE: if (!h_full) begin
+            // Push this pixel's payload into the depth-D FIFO. Stall only when the FIFO
+            // is full (pa may run up to TEXFIFO_D pixels ahead of pb). Payload packing
+            // MUST match pb's B_IDLE unpack exactly.
+            A_ISSUE: if (!pf_full) begin
                 // Speculatively start a fill for this pixel's qword if it is not
                 // resident and the single-outstanding arbiter is idle. tri_p0_addr was
                 // computed 8-byte-aligned in A_ADDR2; hold it as the fill address.
@@ -1086,11 +1089,9 @@ module blitter_top #(
                     fill_slot  <= tri_p0_addr[3+:TEXQ_AW];
                     fill_tag   <= tri_p0_addr[3+TEXQ_AW +: 16];
                 end
-                h_cr <= cr_q; h_cg <= cg_q; h_cb <= cb_q; h_ca <= ca_q;
-                h_dst_qw <= dst_qw_q; h_dst_lane <= dst_lane_q;
-                h_tex_lane <= tex_lane_q;
-                h_qtag <= tri_p0_addr[26:3];                 // qword tag handed to pb
-                h_full <= 1'b1;
+                pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
+                    {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q, tri_p0_addr[26:3], tex_lane_q};
+                pf_wr <= pf_wr + 1'b1;
                 pa<=A_PIX;
             end
             // Address-gen drained (cursor exhausted). Idle until B finishes.
@@ -1100,18 +1101,11 @@ module blitter_top #(
 
             // ==== sub-FSM B: wait texel -> dst read -> 3-stage blend -> comp_fbram write ====
             case (pb)
-            // Wait for a handed-off pixel, then for its texel.
-            B_IDLE: if (h_full) pb<=B_GOT;
-            // Latch the texel and FREE the handoff (single-outstanding read consumed, so
-            // A may issue the next). COPY/COLORKEY need no dst read; CONST_ALPHA/ADD/
-            // MULTIPLY read the destination pixel first.
-            B_GOT: if (h_full) begin
-                // snapshot the handoff payload into B-local regs, THEN free the handoff
-                // so A may issue the next read while B resolves/blends off these copies.
-                b_cr <= h_cr; b_cg <= h_cg; b_cb <= h_cb; b_ca <= h_ca;
-                b_dst_qw <= h_dst_qw; b_dst_lane <= h_dst_lane;
-                b_qtag <= h_qtag; b_tex_lane <= h_tex_lane;
-                h_full <= 1'b0;
+            // Wait for a queued pixel; unpack the FIFO head into B-local regs and pop.
+            // Packing order MUST match pa's A_ISSUE push exactly.
+            B_IDLE: if (!pf_empty) begin
+                {b_ca, b_cb, b_cg, b_cr, b_dst_qw, b_dst_lane, b_qtag, b_tex_lane} <= pf_head;
+                pf_rd <= pf_rd + 1'b1;
                 pb <= B_FILL;
             end
             // Resolve the texel from the local qword BRAM. HIT -> latch texel_q and go
@@ -1234,7 +1228,7 @@ module blitter_top #(
 
             // Triangle drained when address-gen is done, the blend pipe is empty, and
             // no texel is outstanding -> advance to the next triangle / finish.
-            if ((pa==A_DONE) && (pb==B_IDLE) && !h_full)
+            if ((pa==A_DONE) && (pb==B_IDLE) && pf_empty && !fill_busy)
                 state<=S_TRI_NEXT;
             end
             // Triangle done: advance to the next triangle, else finish the command.
