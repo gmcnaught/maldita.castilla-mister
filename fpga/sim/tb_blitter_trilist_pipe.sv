@@ -87,7 +87,7 @@ module tb_blitter_trilist_pipe;
   // ── golden framebuffer (76800 RGB565 pixels, index = y*320+x) ────────────────
   reg [15:0] exp [0:320*240-1];
 
-  integer x,y,idx,bad;
+  integer x,y,idx,bad,ncov;
   reg [15:0] got, e;
   // ±1 LSB per RGB565 channel
   function integer chan_ok(input [15:0] a, input [15:0] b);
@@ -114,6 +114,16 @@ module tb_blitter_trilist_pipe;
     while (mem[32'h200005][31:0] !== mem[32'h200000][31:0] && to<4000000) begin @(posedge clk); to=to+1; end
     repeat(10) @(posedge clk);
     $display("=== done_seq=%0d submit=%0d (to=%0d) ===", mem[32'h200005][31:0], mem[32'h200000][31:0], to);
+
+    // [profiling] datapath cyc/px from the S_TRI_* perf counters (this frame). The sim
+    // stub gives P_SRC a fixed low latency, so texwait is small here; the DATAPATH cyc/px
+    // (tri - texwait) is memory-independent and should track the device's ~41 cyc/px. Use
+    // this as the iteration metric while pipelining the rasterizer toward 1 px/cyc.
+    ncov=0;
+    for (y=0;y<240;y=y+1) for (x=0;x<320;x=x+1) if (exp[y*320+x]!==exp[0]) ncov=ncov+1;
+    $display("=== PERF tri=%0d texwait=%0d dpath=%0d covered_px=%0d | dpath_cyc/px=%0d ===",
+             blt.perf_tri_cyc, blt.perf_texwait_cyc, blt.perf_tri_cyc-blt.perf_texwait_cyc,
+             ncov, (ncov>0)?((blt.perf_tri_cyc-blt.perf_texwait_cyc)/ncov):0);
 
     bad=0;
     for (y=0;y<240;y=y+1) for (x=0;x<320;x=x+1) begin
