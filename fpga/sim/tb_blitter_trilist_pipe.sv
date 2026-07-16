@@ -37,27 +37,43 @@ module tb_blitter_trilist_pipe;
   reg         s_lat_v    [0:P_SRC_LAT-1];
   integer     sli;
   always @(posedge clk) s_rd_d <= s_src_rd;
-  // SINGLE-OUTSTANDING model with a deterministic ADDRESS-DEPENDENT (varying) latency,
-  // faithful to the real jtframe P_SRC channel (one request in flight; hit=P_SRC_LAT,
-  // periodic longer "miss"). The varying latency is deliberate: it lands the 1-cycle
-  // p0_ok strobe at different phases relative to the consumer FSM, so a rasterizer that
-  // only samples p0_ok in one FSM state (rather than latching it whenever it arrives)
-  // will MISS the strobe and hang here — reproducing the on-device fabric timeout that a
-  // fixed-latency pipelined stub silently hid. so_busy enforces single-outstanding.
+  // SINGLE-OUTSTANDING faithful line-cache model: hit=HIT_LAT, cold line-fill=MISS_LAT,
+  // NLINES resident with LRU (rline[0]=MRU). Keyed by line = addr>>LINE_LOG2. Reproduces
+  // the real jtframe ch5 behaviour (2 tiny lines the row-order texel walk thrashes) so a
+  // prefetcher that issues reads AHEAD overlaps the miss latency and drops pb's stall
+  // (texwait). Still single-outstanding + address-dependent variable phase, so it keeps
+  // catching the p0_ok strobe-miss hang.
+  localparam LINE_LOG2 = 8;    // 256-byte lines (tune with NLINES so texwait is ~30% of tri)
+  localparam NLINES    = 2;    // faithful jtframe ch5 = 2 lines
+  localparam HIT_LAT   = 4;
+  localparam MISS_LAT  = 140;
   reg        so_busy = 1'b0;
   integer    so_cnt  = 0;
   reg [26:0] so_addr = 27'd0;
+  reg [26:0] rline   [0:NLINES-1];   // resident line addrs, [0]=MRU
+  reg        rline_v [0:NLINES-1];
+  integer    li, hitpos;
+  initial for (li=0; li<NLINES; li=li+1) begin rline[li]=27'h7FFFFFF; rline_v[li]=1'b0; end
   always @(posedge clk) begin
     s_src_ok <= 1'b0;
     if ((s_src_rd & ~s_rd_d) && !so_busy) begin
       so_busy <= 1'b1;
       so_addr <= s_src_addr;
-      // hit = P_SRC_LAT(=4); ~30% of reads take a longer "miss" (4..28 cyc). $random is
-      // deterministic under iverilog's fixed default seed, so this is reproducible (NOT
-      // flaky) — and this exact phase pattern makes p0_ok land while the blend FSM is mid-
-      // pixel, so a rasterizer that samples p0_ok in only one state hangs here. (Verified:
-      // hung on the pre-fix RTL, passes with the always-listening texel catcher.)
-      so_cnt  <= (($random % 10) < 3) ? (4 + ($random % 25)) : 4;
+      // LRU lookup on the accepted address' line.
+      hitpos = -1;
+      for (li=0; li<NLINES; li=li+1)
+        if (rline_v[li] && (rline[li] == (s_src_addr >> LINE_LOG2))) hitpos = li;
+      if (hitpos >= 0) begin
+        so_cnt <= HIT_LAT;
+        // promote to MRU
+        for (li=0; li<NLINES; li=li+1) if (li <= hitpos && li>0) rline[li] <= rline[li-1];
+        rline[0] <= (s_src_addr >> LINE_LOG2); rline_v[0] <= 1'b1;
+      end else begin
+        so_cnt <= MISS_LAT;
+        // insert new line at MRU, shift others down, evict LRU
+        for (li=NLINES-1; li>0; li=li-1) begin rline[li] <= rline[li-1]; rline_v[li] <= rline_v[li-1]; end
+        rline[0] <= (s_src_addr >> LINE_LOG2); rline_v[0] <= 1'b1;
+      end
     end
     if (so_busy) begin
       if (so_cnt <= 1) begin
