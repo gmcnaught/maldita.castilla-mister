@@ -198,8 +198,13 @@ def main():
                   "ls -la /media/fat/_Other/MalditaCastilla_*.rbf 2>/dev/null")
     print(r.stdout)
 
-    print("Done. Load the Maldita Castilla core from the MiSTer menu, then run the engine:\n"
-          f"  ssh {USER}@{host} 'cd {GAMEDIR} && GMLOADER_RASTER=mfgpu \\\n"
+    print("Done. Load the Maldita Castilla core from the MiSTer menu, then run the engine.\n"
+          "IMPORTANT: the fabric path needs BOTH env vars — GMLOADER_BLITTER=2 turns the\n"
+          "blitter/RasterBackend on (level 2 = blitter owns rendering), GMLOADER_RASTER=mfgpu\n"
+          "selects the fabric backend. With BLITTER unset the engine paints the dead 0x3A DDR\n"
+          "buffer this core no longer scans out (black). Verify with `busybox devmem 0x3B000000`\n"
+          "climbing while it runs:\n"
+          f"  ssh {USER}@{host} 'cd {GAMEDIR} && GMLOADER_BLITTER=2 GMLOADER_RASTER=mfgpu \\\n"
           f"    LD_LIBRARY_PATH={GAMEDIR}/mesa:{GAMEDIR} ./gmloader -c gmloader.json'")
 
 
