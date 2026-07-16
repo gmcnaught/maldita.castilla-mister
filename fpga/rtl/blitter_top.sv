@@ -427,6 +427,16 @@ module blitter_top #(
     reg  [14:0]  h_dst_qw;                 // handoff: comp_fbram qword index
     reg  [1:0]   h_dst_lane;               // handoff: x[1:0]
     reg  [1:0]   h_tex_lane;               // handoff: texel qword lane
+    // [pipeline fix] p0_ok is a 1-cycle strobe and the P_SRC channel is single-
+    // outstanding, so the texel for the ONE in-flight read must be caught the cycle it
+    // arrives — regardless of where the blend FSM (pb) happens to be. Latching it in
+    // B_GOT (only) missed the strobe whenever variable memory latency landed p0_ok while
+    // pb was still finishing the previous pixel, hanging the fabric on the device (sim's
+    // fixed low latency happened to align, hiding it). This always-listening catcher
+    // holds the texel until pb consumes it; tex_pend gates it to the outstanding read.
+    reg          tex_pend;                 // a texel read is outstanding, not yet caught
+    reg          tex_rdy;                  // caught texel available for pb
+    reg  [15:0]  tex_hold;                 // the caught texel
     // B-local copies of the handoff payload, snapshotted at B_GOT. B FREES the handoff
     // (h_full<=0) at B_GOT so A can issue the next texel read, but B keeps using the
     // payload through B_WR3 — so it must read these private copies, not the live h_*
@@ -582,7 +592,7 @@ module blitter_top #(
             snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
-            pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
+            pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0; tex_pend<=1'b0; tex_rdy<=1'b0;
         end else begin
             bm_rd<=1'b0;
             pipe_start<=1'b0;     // single-cycle blit_start pulse to comp_pipeline
@@ -607,7 +617,7 @@ module blitter_top #(
                 // fetch (B_GOT/p0_ok). With the A||B overlap these are cycles where A may
                 // still be doing productive address-gen work, so dpath=(tri-texwait) is a
                 // conservative proxy; tri_cyc/covered is the true wall-clock throughput.
-                if ((state==S_TRI_PIX) && (pb==B_GOT) && !p0_ok)
+                if ((state==S_TRI_PIX) && (pb==B_GOT) && !tex_rdy)
                     perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
@@ -918,7 +928,7 @@ module blitter_top #(
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
-                    pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
+                    pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0; tex_pend<=1'b0; tex_rdy<=1'b0;
                     state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
@@ -927,6 +937,15 @@ module blitter_top #(
             // coverage walk is fully drained, overlapping pixel N's blend/write (pb)
             // with pixel N+1's mul/addr/texel-fetch (pa).
             S_TRI_PIX: begin
+                // Always-listening texel catcher: the single outstanding P_SRC read's
+                // p0_ok can strobe in ANY cycle after A_ISSUE (variable memory latency),
+                // possibly while pb is still blending the previous pixel. Latch it here,
+                // independent of pb's state, so the 1-cycle strobe is never missed.
+                if (tex_pend && p0_ok) begin
+                    tex_hold <= p0_dout[h_tex_lane*16 +: 16];
+                    tex_rdy  <= 1'b1;
+                    tex_pend <= 1'b0;
+                end
                 // ==== sub-FSM A: coverage walk -> W*recip mul -> texel addr -> issue P_SRC ====
                 case (pa)
                 // Evaluate coverage at (tri_px,tri_py). If covered, LATCH the multiply
@@ -1030,6 +1049,7 @@ module blitter_top #(
             // the next pixel while B blends this one off the h_* snapshot.
             A_ISSUE: if (!h_full) begin
                 tri_p0_rd  <= 1'b1;   // pulse P_SRC read for tri_p0_addr (set in A_ADDR2)
+                tex_pend   <= 1'b1;   // arm the always-listening texel catcher for this read
                 h_cr <= cr_q; h_cg <= cg_q; h_cb <= cb_q; h_ca <= ca_q;
                 h_dst_qw <= dst_qw_q; h_dst_lane <= dst_lane_q; h_tex_lane <= tex_lane_q;
                 h_full <= 1'b1;
@@ -1047,8 +1067,9 @@ module blitter_top #(
             // Latch the texel and FREE the handoff (single-outstanding read consumed, so
             // A may issue the next). COPY/COLORKEY need no dst read; CONST_ALPHA/ADD/
             // MULTIPLY read the destination pixel first.
-            B_GOT: if (p0_ok) begin
-                texel_q <= p0_dout[h_tex_lane*16 +: 16];
+            B_GOT: if (tex_rdy) begin
+                texel_q <= tex_hold;   // texel already caught by the always-listening latch
+                tex_rdy <= 1'b0;
                 // snapshot the handoff payload into B-local regs, THEN free the handoff
                 // so A may issue the next read while B blends off these private copies.
                 b_cr <= h_cr; b_cg <= h_cg; b_cb <= h_cb; b_ca <= h_ca;

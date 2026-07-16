@@ -37,17 +37,34 @@ module tb_blitter_trilist_pipe;
   reg         s_lat_v    [0:P_SRC_LAT-1];
   integer     sli;
   always @(posedge clk) s_rd_d <= s_src_rd;
+  // SINGLE-OUTSTANDING model with a deterministic ADDRESS-DEPENDENT (varying) latency,
+  // faithful to the real jtframe P_SRC channel (one request in flight; hit=P_SRC_LAT,
+  // periodic longer "miss"). The varying latency is deliberate: it lands the 1-cycle
+  // p0_ok strobe at different phases relative to the consumer FSM, so a rasterizer that
+  // only samples p0_ok in one FSM state (rather than latching it whenever it arrives)
+  // will MISS the strobe and hang here — reproducing the on-device fabric timeout that a
+  // fixed-latency pipelined stub silently hid. so_busy enforces single-outstanding.
+  reg        so_busy = 1'b0;
+  integer    so_cnt  = 0;
+  reg [26:0] so_addr = 27'd0;
   always @(posedge clk) begin
     s_src_ok <= 1'b0;
-    s_lat_v   [0] <= s_src_rd & ~s_rd_d;
-    s_lat_addr[0] <= s_src_addr;
-    for (sli = 1; sli < P_SRC_LAT; sli = sli + 1) begin
-      s_lat_v   [sli] <= s_lat_v   [sli-1];
-      s_lat_addr[sli] <= s_lat_addr[sli-1];
+    if ((s_src_rd & ~s_rd_d) && !so_busy) begin
+      so_busy <= 1'b1;
+      so_addr <= s_src_addr;
+      // hit = P_SRC_LAT(=4); ~30% of reads take a longer "miss" (4..28 cyc). $random is
+      // deterministic under iverilog's fixed default seed, so this is reproducible (NOT
+      // flaky) — and this exact phase pattern makes p0_ok land while the blend FSM is mid-
+      // pixel, so a rasterizer that samples p0_ok in only one state hangs here. (Verified:
+      // hung on the pre-fix RTL, passes with the always-listening texel catcher.)
+      so_cnt  <= (($random % 10) < 3) ? (4 + ($random % 25)) : 4;
     end
-    if (s_lat_v[P_SRC_LAT-1]) begin
-      s_src_dout <= mem[SRC_WIN + (s_lat_addr[P_SRC_LAT-1] >> 3)];
-      s_src_ok   <= 1'b1;
+    if (so_busy) begin
+      if (so_cnt <= 1) begin
+        s_src_dout <= mem[SRC_WIN + (so_addr >> 3)];
+        s_src_ok   <= 1'b1;
+        so_busy    <= 1'b0;
+      end else so_cnt <= so_cnt - 1;
     end
   end
 
