@@ -464,13 +464,13 @@ module blitter_top #(
     localparam integer TEXQ_AW    = 8;      // $clog2(TEXQ_N)
     reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
     reg  [15:0] tq_tag   [0:TEXQ_N-1];      // qtag[23:TEXQ_AW]
-    reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid (packed for 1-cyc barrier clear)
+    reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid; packed for a 1-cycle SYNCHRONOUS clear on the per-command barrier
     // P_SRC fill arbiter: sole owner of tri_p0_rd/tri_p0_addr, single-outstanding.
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
     reg  [15:0] fill_tag;                   // tag the in-flight fill will stamp
     // combinational hit test for a qtag against the current cache contents.
-    function automatic tq_hit(input [23:0] qt);
+    function automatic logic tq_hit(input logic [23:0] qt);
         tq_hit = tq_valid[qt[TEXQ_AW-1:0]] && (tq_tag[qt[TEXQ_AW-1:0]] == qt[23:TEXQ_AW]);
     endfunction
 
@@ -1067,32 +1067,30 @@ module blitter_top #(
             // only; no multiply). One extra cycle per covered pixel, negligible vs.
             // the SDRAM texel-read wait.
             A_ADDR2: begin
-                // texel byte address (8-byte aligned; lane = byte[2:1]). Lever 1:
-                // best-effort prefetch — kick the P_SRC fill AS SOON AS texbyte is
-                // known (this cycle) so fills stream ahead of pb's consumption across
-                // the FIFO window, instead of waiting for A_ISSUE. This is ADDITIVE on
-                // the demand backbone: if the fill isn't kicked (fill_busy set) or
-                // hasn't landed, pb's B_FILL demand path fetches it exactly as before.
-                // CRITICAL: residency/slot/tag derive from the BLOCKING temp `texbyte`,
-                // NOT from tri_p0_addr (which is only NBA-assigned this cycle and is
-                // still stale). Single-outstanding guard: !fill_busy.
+                // texel byte address (8-byte aligned; lane = byte[2:1]). Only the
+                // adds + register writes live here; the prefetch fill-kick moved to
+                // A_ISSUE so tq_hit's tag lookup is not chained behind texbyte's adder.
                 texbyte = c_src_off + tex_row + (itu_q<<<1);
                 tri_p0_addr <= texbyte[26:0] & ~27'h7;
                 tex_lane_q  <= texbyte[2:1];
-                if (!tq_hit(texbyte[26:3]) && !fill_busy) begin
-                    tri_p0_rd  <= 1'b1;
-                    fill_busy  <= 1'b1;
-                    fill_slot  <= texbyte[3+:TEXQ_AW];
-                    fill_tag   <= texbyte[3+TEXQ_AW +: 16];
-                end
                 pa<=A_ISSUE;
             end
             // Push this pixel's payload into the depth-D FIFO. Stall only when the FIFO
             // is full (pa may run up to TEXFIFO_D pixels ahead of pb). Payload packing
-            // MUST match pb's B_IDLE unpack exactly. The fill was already kicked at
-            // A_ADDR2 (or is still in flight); pb's B_FILL demand path is the safety net.
-            // tri_p0_addr is now updated (texbyte&~7), so its [26:3] qtag is correct.
+            // MUST match pb's B_IDLE unpack exactly. tri_p0_addr is now updated
+            // (texbyte&~7), so its [26:3] qtag is correct.
             A_ISSUE: if (!pf_full) begin
+                // best-effort prefetch: kick a fill for this qword if not resident and the
+                // arbiter is idle. Uses the REGISTERED tri_p0_addr (no combinational add in
+                // the path) so tq_hit's 256-entry tag lookup is not chained behind texbyte's
+                // adder — keeps the fabric-clock path short. Prefetch is best-effort; pb's
+                // B_FILL demand-fetch is the correctness backbone (bit-exact either way).
+                if (!tq_hit(tri_p0_addr[26:3]) && !fill_busy) begin
+                    tri_p0_rd  <= 1'b1;
+                    fill_busy  <= 1'b1;
+                    fill_slot  <= tri_p0_addr[3+:TEXQ_AW];
+                    fill_tag   <= tri_p0_addr[3+TEXQ_AW +: 16];
+                end
                 pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
                     {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q, tri_p0_addr[26:3], tex_lane_q};
                 pf_wr <= pf_wr + 1'b1;
