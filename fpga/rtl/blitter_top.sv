@@ -1067,28 +1067,32 @@ module blitter_top #(
             // only; no multiply). One extra cycle per covered pixel, negligible vs.
             // the SDRAM texel-read wait.
             A_ADDR2: begin
-                // texel byte address (8-byte aligned; lane = byte[2:1]). The P_SRC
-                // fill is kicked in A_ISSUE (guarded by !fill_busy), not here — keeping
-                // the single-outstanding channel driven by one site per pa pass.
+                // texel byte address (8-byte aligned; lane = byte[2:1]). Lever 1:
+                // best-effort prefetch — kick the P_SRC fill AS SOON AS texbyte is
+                // known (this cycle) so fills stream ahead of pb's consumption across
+                // the FIFO window, instead of waiting for A_ISSUE. This is ADDITIVE on
+                // the demand backbone: if the fill isn't kicked (fill_busy set) or
+                // hasn't landed, pb's B_FILL demand path fetches it exactly as before.
+                // CRITICAL: residency/slot/tag derive from the BLOCKING temp `texbyte`,
+                // NOT from tri_p0_addr (which is only NBA-assigned this cycle and is
+                // still stale). Single-outstanding guard: !fill_busy.
                 texbyte = c_src_off + tex_row + (itu_q<<<1);
                 tri_p0_addr <= texbyte[26:0] & ~27'h7;
                 tex_lane_q  <= texbyte[2:1];
+                if (!tq_hit(texbyte[26:3]) && !fill_busy) begin
+                    tri_p0_rd  <= 1'b1;
+                    fill_busy  <= 1'b1;
+                    fill_slot  <= texbyte[3+:TEXQ_AW];
+                    fill_tag   <= texbyte[3+TEXQ_AW +: 16];
+                end
                 pa<=A_ISSUE;
             end
             // Push this pixel's payload into the depth-D FIFO. Stall only when the FIFO
             // is full (pa may run up to TEXFIFO_D pixels ahead of pb). Payload packing
-            // MUST match pb's B_IDLE unpack exactly.
+            // MUST match pb's B_IDLE unpack exactly. The fill was already kicked at
+            // A_ADDR2 (or is still in flight); pb's B_FILL demand path is the safety net.
+            // tri_p0_addr is now updated (texbyte&~7), so its [26:3] qtag is correct.
             A_ISSUE: if (!pf_full) begin
-                // Speculatively start a fill for this pixel's qword if it is not
-                // resident and the single-outstanding arbiter is idle. tri_p0_addr was
-                // computed 8-byte-aligned in A_ADDR2; hold it as the fill address.
-                if (!tq_hit(tri_p0_addr[26:3]) && !fill_busy) begin
-                    tri_p0_rd  <= 1'b1;
-                    tri_p0_addr<= tri_p0_addr;               // (already aligned in A_ADDR2)
-                    fill_busy  <= 1'b1;
-                    fill_slot  <= tri_p0_addr[3+:TEXQ_AW];
-                    fill_tag   <= tri_p0_addr[3+TEXQ_AW +: 16];
-                end
                 pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
                     {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q, tri_p0_addr[26:3], tex_lane_q};
                 pf_wr <= pf_wr + 1'b1;
