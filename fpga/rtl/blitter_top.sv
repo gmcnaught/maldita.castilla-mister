@@ -379,6 +379,14 @@ module blitter_top #(
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
     reg  [15:0]  tri_ox;                               // bbox-min x (row-wrap target)
+    // [pipeline stage 1] The (px,py)+accumulator "cursor" is now advanced at the
+    // moment a pixel is DISPATCHED from S_TRI_PIX (not 12 cycles later at the tail),
+    // decoupling coverage/attr generation from the datapath depth so the walk can
+    // eventually issue 1 px/cyc. tri_cv marks the cursor as still inside the bbox;
+    // the covered pixel's (px,py) is snapshotted into pxs/pys so the datapath keeps
+    // using this pixel's coords while the cursor moves on.
+    reg          tri_cv;                               // cursor still within bbox
+    reg  [15:0]  pxs, pys;                             // dispatched pixel's (px,py) snapshot
     reg  [31:0]  tri_vbase;                            // this triangle's first vertex-qword addr
     reg  signed [63:0] w0, w1, w2;                     // running coverage edges (this pixel)
     reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=ox)
@@ -497,6 +505,37 @@ module blitter_top #(
     wire signed [31:0] tri_maxy_c = ($signed(tri_hy) + 32'sd15) >>> 4;
     wire [15:0] tri_maxx_cl = (tri_maxx_c > 32'sd319) ? 16'd319 : (tri_maxx_c < 0 ? 16'd0 : tri_maxx_c[15:0]);
     wire [15:0] tri_maxy_cl = (tri_maxy_c > 32'sd239) ? 16'd239 : (tri_maxy_c < 0 ? 16'd0 : tri_maxy_c[15:0]);
+
+    // [pipeline stage 1] advance the walk cursor one pixel: within a row step the
+    // running edge/attr accumulators by their per-x deltas; at row end wrap x to the
+    // bbox-min and step the row-start latches by the per-y deltas; past the last row
+    // clear tri_cv (cursor exhausted). Bit-identical to the former S_TRI_ADV tail,
+    // but now invoked at DISPATCH time so the cursor is decoupled from datapath depth.
+    // The <= assignments schedule on the calling always block's clock edge.
+    task automatic advance_cursor;
+        begin
+            if (tri_px < tri_maxx) begin
+                tri_px <= tri_px + 16'd1;
+                w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
+                Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
+                Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
+            end else if (tri_py < tri_maxy) begin
+                tri_py <= tri_py + 16'd1;
+                tri_px <= tri_ox;
+                row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
+                row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
+                row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
+                row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
+                row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
+                row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
+                row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
+                row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
+                row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
+            end else begin
+                tri_cv <= 1'b0;
+            end
+        end
+    endtask
 
     always @(posedge clk) begin
         if (rst) begin
@@ -836,6 +875,7 @@ module blitter_top #(
                 else begin
                     tri_ox <= ts_ox;
                     tri_px <= ts_ox;      tri_py <= ts_oy;
+                    tri_cv <= 1'b1;        // cursor starts inside the bbox
                     // tri_maxx/tri_maxy already registered at S_TRI_SETUP
                     w0<=ts_w0_0; w1<=ts_w1_0; w2<=ts_w2_0;
                     row_w0<=ts_w0_0; row_w1<=ts_w1_0; row_w2<=ts_w2_0;
@@ -849,20 +889,32 @@ module blitter_top #(
             // attributes (A = round(W * area_recip / 2^40)), clamp the texel
             // coord, and issue the P_SRC texel read.
             S_TRI_PIX: begin
-                if ((w0>=0) && (w1>=0) && (w2>=0)) begin
+                if (!tri_cv) begin
+                    // cursor walked past the last bbox pixel -> triangle done
+                    state<=S_TRI_NEXT;
+                end else if ((w0>=0) && (w1>=0) && (w2>=0)) begin
                     // Interpolation stage 1: LATCH the multiply operands into
                     // single-fanout registers. The actual six W*area_recip products
                     // happen next cycle (S_TRI_MUL0) so the multiply sits between two
                     // dedicated register layers (w*_q/recip_q -> mul_*) and Quartus
                     // maps it to a PIPELINED DSP. Doing the multiply straight off
                     // Wu..Wa (which also feed the accumulate + coverage compares) left
-                    // it combinational and unable to close ~98 MHz. Wu..Wa and
-                    // tri_px/tri_py are stable until S_TRI_ADV, so this is exact.
+                    // it combinational and unable to close ~98 MHz.
+                    // [pipeline stage 1] snapshot this pixel's (px,py) into pxs/pys and
+                    // advance the cursor NOW, so the datapath (which reads pxs/pys and
+                    // the *_q operand regs) is decoupled from the walk accumulators.
+                    pxs <= tri_px; pys <= tri_py;
                     wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
                     wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
                     recip_q <= $signed(ts_area_recip);
+                    advance_cursor;
                     state<=S_TRI_MUL0;
-                end else state<=S_TRI_ADV;
+                end else begin
+                    // non-covered: advance the cursor and re-evaluate next cycle
+                    // (folds the former PIX->ADV->PIX 2-cyc skip into 1 cyc).
+                    advance_cursor;
+                    state<=S_TRI_PIX;
+                end
             end
             // Interpolation stage 1b: two 48x24 partial products per lane, split on
             // recip's 24-bit halves (operands >= 0 -> unsigned). Registered -> each
@@ -912,9 +964,10 @@ module blitter_top #(
                 cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
                 cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
                 // comp_fbram destination qword/lane for this pixel (independent of
-                // the texel-address multiply, so it stays here)
-                dst_qw_q   <= tri_py*16'd80 + (tri_px>>2);
-                dst_lane_q <= tri_px[1:0];
+                // the texel-address multiply, so it stays here). Uses the dispatched
+                // pixel's snapshot (pxs/pys), since the walk cursor has already moved on.
+                dst_qw_q   <= pys*16'd80 + (pxs>>2);
+                dst_lane_q <= pxs[1:0];
                 state<=S_TRI_ADDR;
             end
             // Interpolation stage 3a: the texel-row multiply itv*stride, REGISTERED
@@ -1042,32 +1095,14 @@ module blitter_top #(
                     tri_fb_wr_lane <= dst_lane_q;
                     tri_fb_wr_pix  <= { bl_or[4:0], bl_og[5:0], bl_ob[4:0] };
                 end
-                state<=S_TRI_ADV;
+                // [pipeline stage 1] the cursor was already advanced at dispatch
+                // (S_TRI_PIX); return straight to the walk for the next pixel.
+                state<=S_TRI_PIX;
             end
-            // Advance: within a row step by dx deltas; at row end wrap x to the
-            // bbox min and step the row-start latches by dy deltas.
-            S_TRI_ADV: begin
-                if (tri_px < tri_maxx) begin
-                    tri_px <= tri_px + 16'd1;
-                    w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
-                    Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
-                    Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
-                    state<=S_TRI_PIX;
-                end else if (tri_py < tri_maxy) begin
-                    tri_py <= tri_py + 16'd1;
-                    tri_px <= tri_ox;
-                    row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
-                    row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
-                    row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
-                    row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
-                    row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
-                    row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
-                    row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
-                    row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
-                    row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
-                    state<=S_TRI_PIX;
-                end else state<=S_TRI_NEXT;
-            end
+            // [pipeline stage 1] S_TRI_ADV retired: the per-pixel advance moved into
+            // advance_cursor() invoked at dispatch time in S_TRI_PIX. Kept as an
+            // unreachable safety arm (should never be entered).
+            S_TRI_ADV: state<=S_TRI_PIX;
             // Triangle done: advance to the next triangle, else finish the command.
             S_TRI_NEXT: begin
                 if (tri_idx + 16'd1 < tri_count) begin
