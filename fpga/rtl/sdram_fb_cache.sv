@@ -53,6 +53,12 @@ module sdram_fb_cache #(
     parameter integer DST_BLKSIZE = 1024,
     parameter integer RO_BLOCKS   = 2,
     parameter integer RO_BLKSIZE  = 256,
+    // ch5 (P_SRC) gets its own, larger line count: the TRILIST per-pixel texel
+    // GATHER thrashes a 2-line cache (~30% miss @ ~140-cyc fills → ~46 cyc/px on
+    // device). A full 320-wide textured span = ~2.5 lines, so 2 lines miss within
+    // one row. 8 lines (≈1024 texels ≈ 3 rows) holds a span's working set → the
+    // miss rate collapses. ch5-only so the dead/unused RO channels don't grow BRAM.
+    parameter integer SRC_BLOCKS  = 8,
     // ---- Channel SDRAM offsets (16-bit-word units) ----
     // #2 fix: these are ADDED to the client's SDRAM word address. ch0 (P_DST,
     // compositor) and ch4 (P_SCAN, scanout) address the SAME framebuffer via the
@@ -425,7 +431,7 @@ jtframe_cache_mux #(
     .AW4      ( CH_AW       ), .FULL4 ( CH_FULL ), .BLOCKS4 ( RO_BLOCKS ), .BLKSIZE4 ( RO_BLKSIZE ), .DW4 ( 64 ),
     .OFFSET4  ( SCAN_OFFSET_W ),
     // ch5 = P_SRC (read-only) — FULL in XL
-    .AW5      ( CH_AW       ), .FULL5 ( CH_FULL ), .BLOCKS5 ( RO_BLOCKS ), .BLKSIZE5 ( RO_BLKSIZE ), .DW5 ( 64 ),
+    .AW5      ( CH_AW       ), .FULL5 ( CH_FULL ), .BLOCKS5 ( SRC_BLOCKS ), .BLKSIZE5 ( RO_BLKSIZE ), .DW5 ( 64 ),
     .OFFSET5  ( SRC_OFFSET_W ),
     // ch6,7 unused
     .AW6      ( SDRAM_AW    ), .BLOCKS6 ( RO_BLOCKS ), .BLKSIZE6 ( RO_BLKSIZE ), .DW6 ( 64 ),

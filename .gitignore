@@ -7,3 +7,7 @@ deploy/libs/
 *.rpt
 db/
 incremental_db/
+
+# Icarus sim build artifacts (fpga/sim/run_sims.sh)
+fpga/sim/.simbuild/
+.serena/
