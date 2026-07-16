@@ -420,23 +420,21 @@ module blitter_top #(
     localparam [2:0] A_PIX=3'd0, A_MUL0=3'd1, A_MUL1=3'd2, A_MUL=3'd3,
                      A_ADDR=3'd4, A_ADDR2=3'd5, A_ISSUE=3'd6, A_DONE=3'd7;
     localparam [2:0] B_IDLE=3'd0, B_GOT=3'd1, B_DSTW=3'd2, B_DSTC=3'd3,
-                     B_WR=3'd4, B_WR2=3'd5, B_WR3=3'd6;
+                     B_WR=3'd4, B_WR2=3'd5, B_WR3=3'd6, B_FILL=3'd7;
     reg  [2:0]   pa, pb;                   // the two concurrent sub-FSM states
     reg          h_full;                   // texel handoff occupied (single-outstanding)
     reg  [7:0]   h_cr, h_cg, h_cb, h_ca;   // handoff: interpolated colour
     reg  [14:0]  h_dst_qw;                 // handoff: comp_fbram qword index
     reg  [1:0]   h_dst_lane;               // handoff: x[1:0]
     reg  [1:0]   h_tex_lane;               // handoff: texel qword lane
+    reg  [23:0]  h_qtag;                   // handoff: texel qword tag (byte_addr[26:3])
     // [pipeline fix] p0_ok is a 1-cycle strobe and the P_SRC channel is single-
     // outstanding, so the texel for the ONE in-flight read must be caught the cycle it
     // arrives — regardless of where the blend FSM (pb) happens to be. Latching it in
     // B_GOT (only) missed the strobe whenever variable memory latency landed p0_ok while
     // pb was still finishing the previous pixel, hanging the fabric on the device (sim's
     // fixed low latency happened to align, hiding it). This always-listening catcher
-    // holds the texel until pb consumes it; tex_pend gates it to the outstanding read.
-    reg          tex_pend;                 // a texel read is outstanding, not yet caught
-    reg          tex_rdy;                  // caught texel available for pb
-    reg  [15:0]  tex_hold;                 // the caught texel
+    // holds the texel until pb consumes it (via the local qword BRAM in B_FILL).
     // B-local copies of the handoff payload, snapshotted at B_GOT. B FREES the handoff
     // (h_full<=0) at B_GOT so A can issue the next texel read, but B keeps using the
     // payload through B_WR3 — so it must read these private copies, not the live h_*
@@ -444,11 +442,32 @@ module blitter_top #(
     reg  [7:0]   b_cr, b_cg, b_cb, b_ca;
     reg  [14:0]  b_dst_qw;
     reg  [1:0]   b_dst_lane;
+    reg  [23:0]  b_qtag;                   // B-local: this pixel's texel qword tag
+    reg  [1:0]   b_tex_lane;               // B-local: texel lane within the qword
 
     // registered bus-owner outputs (muxed onto p0_*/fb_* below when tri_busy)
     reg          tri_p0_rd;   reg [26:0] tri_p0_addr;
     reg          tri_fb_rd_en; reg [14:0] tri_fb_rd_qw;
     reg          tri_fb_wr_en; reg [14:0] tri_fb_wr_qw; reg [1:0] tri_fb_wr_lane; reg [15:0] tri_fb_wr_pix;
+
+    // ── Lever 1: blitter-local prefetching qword texel cache ────────────────
+    // Direct-mapped BRAM of TEXQ_N qwords; slot = qtag[TEXQ_AW-1:0]; a single
+    // P_SRC read fills one slot. Decouples the rasterizer's texel read (1-cyc
+    // BRAM hit) from the single-outstanding P_SRC latency. Bit-exact: same
+    // texel bytes, fetched earlier. See docs .../2026-07-16-trilist-lever1-*.
+    localparam integer TEXQ_N     = 256;
+    localparam integer TEXQ_AW    = 8;      // $clog2(TEXQ_N)
+    reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
+    reg  [15:0] tq_tag   [0:TEXQ_N-1];      // qtag[23:TEXQ_AW]
+    reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid (packed for 1-cyc barrier clear)
+    // P_SRC fill arbiter: sole owner of tri_p0_rd/tri_p0_addr, single-outstanding.
+    reg         fill_busy;                  // a fill is in flight (p0_ok pending)
+    reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
+    reg  [15:0] fill_tag;                   // tag the in-flight fill will stamp
+    // combinational hit test for a qtag against the current cache contents.
+    function automatic tq_hit(input [23:0] qt);
+        tq_hit = tq_valid[qt[TEXQ_AW-1:0]] && (tq_tag[qt[TEXQ_AW-1:0]] == qt[23:TEXQ_AW]);
+    endfunction
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
 
@@ -592,7 +611,8 @@ module blitter_top #(
             snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
-            pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0; tex_pend<=1'b0; tex_rdy<=1'b0;
+            pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
+            fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}};
         end else begin
             bm_rd<=1'b0;
             pipe_start<=1'b0;     // single-cycle blit_start pulse to comp_pipeline
@@ -617,7 +637,7 @@ module blitter_top #(
                 // fetch (B_GOT/p0_ok). With the A||B overlap these are cycles where A may
                 // still be doing productive address-gen work, so dpath=(tri-texwait) is a
                 // conservative proxy; tri_cyc/covered is the true wall-clock throughput.
-                if ((state==S_TRI_PIX) && (pb==B_GOT) && !tex_rdy)
+                if ((state==S_TRI_PIX) && (pb==B_FILL) && !tq_hit(b_qtag))
                     perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
@@ -848,6 +868,9 @@ module blitter_top #(
             S_STAGE_BARRIER: begin
                 stage_barrier     <= 1'b1;   // one-cycle request
                 barrier_seen_busy <= 1'b0;
+                // [Lever 1] drop the blitter-local qword cache exactly when jtframe ch5
+                // is invalidated — per-command (triangles in a command share the atlas).
+                tq_valid          <= {TEXQ_N{1'b0}};
                 state<=S_STAGE_BARRIER_WAIT;
             end
             // Wait for the barrier to actually engage (busy rises) and then finish
@@ -928,7 +951,9 @@ module blitter_top #(
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
-                    pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0; tex_pend<=1'b0; tex_rdy<=1'b0;
+                    // (the qword cache persists across triangles in a command; it is
+                    // dropped only at the per-command STAGE barrier, not here.)
+                    pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
                     state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
@@ -937,14 +962,17 @@ module blitter_top #(
             // coverage walk is fully drained, overlapping pixel N's blend/write (pb)
             // with pixel N+1's mul/addr/texel-fetch (pa).
             S_TRI_PIX: begin
-                // Always-listening texel catcher: the single outstanding P_SRC read's
-                // p0_ok can strobe in ANY cycle after A_ISSUE (variable memory latency),
-                // possibly while pb is still blending the previous pixel. Latch it here,
-                // independent of pb's state, so the 1-cycle strobe is never missed.
-                if (tex_pend && p0_ok) begin
-                    tex_hold <= p0_dout[h_tex_lane*16 +: 16];
-                    tex_rdy  <= 1'b1;
-                    tex_pend <= 1'b0;
+                // Always-listening fill catcher: the single outstanding P_SRC read's
+                // p0_ok can strobe in ANY cycle after the fill was issued (variable
+                // memory latency), possibly while pb is still blending the previous
+                // pixel. Latch the returned qword into the BRAM here, independent of
+                // pb's state, so the 1-cycle strobe is never missed and fill_busy is
+                // cleared to admit the next single-outstanding fill.
+                if (fill_busy && p0_ok) begin
+                    tq_data[fill_slot]  <= p0_dout;
+                    tq_tag[fill_slot]   <= fill_tag;
+                    tq_valid[fill_slot] <= 1'b1;
+                    fill_busy           <= 1'b0;
                 end
                 // ==== sub-FSM A: coverage walk -> W*recip mul -> texel addr -> issue P_SRC ====
                 case (pa)
@@ -1048,10 +1076,20 @@ module blitter_top #(
             // (colour, dst qword/lane, texel lane) so A can immediately race ahead on
             // the next pixel while B blends this one off the h_* snapshot.
             A_ISSUE: if (!h_full) begin
-                tri_p0_rd  <= 1'b1;   // pulse P_SRC read for tri_p0_addr (set in A_ADDR2)
-                tex_pend   <= 1'b1;   // arm the always-listening texel catcher for this read
+                // Speculatively start a fill for this pixel's qword if it is not
+                // resident and the single-outstanding arbiter is idle. tri_p0_addr was
+                // computed 8-byte-aligned in A_ADDR2; hold it as the fill address.
+                if (!tq_hit(tri_p0_addr[26:3]) && !fill_busy) begin
+                    tri_p0_rd  <= 1'b1;
+                    tri_p0_addr<= tri_p0_addr;               // (already aligned in A_ADDR2)
+                    fill_busy  <= 1'b1;
+                    fill_slot  <= tri_p0_addr[3+:TEXQ_AW];
+                    fill_tag   <= tri_p0_addr[3+TEXQ_AW +: 16];
+                end
                 h_cr <= cr_q; h_cg <= cg_q; h_cb <= cb_q; h_ca <= ca_q;
-                h_dst_qw <= dst_qw_q; h_dst_lane <= dst_lane_q; h_tex_lane <= tex_lane_q;
+                h_dst_qw <= dst_qw_q; h_dst_lane <= dst_lane_q;
+                h_tex_lane <= tex_lane_q;
+                h_qtag <= tri_p0_addr[26:3];                 // qword tag handed to pb
                 h_full <= 1'b1;
                 pa<=A_PIX;
             end
@@ -1067,21 +1105,35 @@ module blitter_top #(
             // Latch the texel and FREE the handoff (single-outstanding read consumed, so
             // A may issue the next). COPY/COLORKEY need no dst read; CONST_ALPHA/ADD/
             // MULTIPLY read the destination pixel first.
-            B_GOT: if (tex_rdy) begin
-                texel_q <= tex_hold;   // texel already caught by the always-listening latch
-                tex_rdy <= 1'b0;
+            B_GOT: if (h_full) begin
                 // snapshot the handoff payload into B-local regs, THEN free the handoff
-                // so A may issue the next read while B blends off these private copies.
+                // so A may issue the next read while B resolves/blends off these copies.
                 b_cr <= h_cr; b_cg <= h_cg; b_cb <= h_cb; b_ca <= h_ca;
                 b_dst_qw <= h_dst_qw; b_dst_lane <= h_dst_lane;
-                h_full  <= 1'b0;
-                if (tri_need_dst) begin
-                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= h_dst_qw;
-                    pb<=B_DSTW;
-                end else begin
-                    dst_q <= 16'd0;
-                    pb<=B_WR;
+                b_qtag <= h_qtag; b_tex_lane <= h_tex_lane;
+                h_full <= 1'b0;
+                pb <= B_FILL;
+            end
+            // Resolve the texel from the local qword BRAM. HIT -> latch texel_q and go
+            // to dst/blend. MISS -> demand-fetch through the single-outstanding arbiter
+            // (if idle) and stay here; the always-listening catcher fills the slot, then
+            // tq_hit passes on a later cycle. If a fill is already in flight, just wait.
+            B_FILL: begin
+                if (tq_hit(b_qtag)) begin
+                    texel_q <= tq_data[b_qtag[TEXQ_AW-1:0]][b_tex_lane*16 +: 16];
+                    if (tri_need_dst) begin
+                        tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
+                    end else begin dst_q <= 16'd0; pb<=B_WR; end
+                end else if (!fill_busy) begin
+                    // demand-fetch (arbiter idle): issue the read for b_qtag's qword.
+                    tri_p0_rd  <= 1'b1;
+                    tri_p0_addr<= {b_qtag, 3'd0};
+                    fill_busy  <= 1'b1;
+                    fill_slot  <= b_qtag[TEXQ_AW-1:0];
+                    fill_tag   <= b_qtag[23:TEXQ_AW];
+                    // stay in B_FILL; the catcher fills the slot, then tq_hit passes.
                 end
+                // else: a fill (ours or pa's speculation) is in flight -> wait here.
             end
             // comp_fbram read has 1-cycle latency: B_DSTW presents rd_en, B_DSTC
             // captures the registered qword and lane-selects the dst pixel.
