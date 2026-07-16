@@ -2,12 +2,12 @@
 //
 //  OpenBOR Native Video Timing Generator
 //
-//  320x240 active area @ 59.92 Hz (420x262 total)
+//  320x224 active area @ 59.92 Hz (420x262 total)
 //  Exact Genesis H40 timing — NTSC-derived MCLK from colorburst crystal.
 //  CLK_VIDEO: 53.693 MHz (exact Genesis MCLK), variable CE_PIXEL for H_TOTAL=420.
 //
 //  H: 320 active + 100 blanking = 420 total (exact Genesis H40)
-//  V: 240 active +   2 FP + 3 sync + 17 BP = 262 total (exact Genesis NTSC)
+//  V: 224 active +  10 FP + 3 sync + 25 BP = 262 total (Genesis NTSC V28, active 28..251, centered)
 //
 //  Refresh: 15,700 / 262 = 59.92 Hz (exact Genesis)
 //  H freq:  53,693,182 / 3420 = 15,700 Hz (exact Genesis)
@@ -39,7 +39,7 @@ module openbor_video_timing (
 );
 
 // -- Timing constants --------------------------------------------------
-// 320x240 active, centered for 15kHz CRT, NTSC-compatible H rate.
+// 320x224 active, centered for 15kHz CRT, NTSC-compatible H rate.
 // CRT-compatible blanking with balanced porches.
 localparam H_ACTIVE = 320;
 localparam H_FP     = 17;
@@ -47,19 +47,24 @@ localparam H_SYNC   = 38;
 localparam H_BP     = 45;
 localparam H_TOTAL  = 420;   // 320+17+38+45 (exact Genesis H40)
 
-localparam V_ACTIVE = 240;
-localparam V_FP     = 2;
-localparam V_SYNC   = 3;
-localparam V_BP     = 17;
-localparam V_TOTAL  = 262;   // 240+2+3+17 (exact Genesis NTSC)
+localparam V_ACTIVE = 224;   // [FO Task 5] Genesis NTSC V28 (224), CYCLE-EXACT per the
+                             // MegaDrive core rtl/video_cond.sv: NTSC active = lines
+                             // 28..251 of 262. V28 is V30's window (20..259) shrunk 8
+                             // off the top AND 8 off the bottom == CENTERED, so the
+                             // image sits identically to a real Genesis (not bottom-cropped).
+localparam V_FP     = 10;    // V30's 2 + 8  (active ends 8 lines earlier: 259 -> 251)
+localparam V_SYNC   = 3;     // Genesis NTSC vsync = 3 lines (unchanged)
+localparam V_BP     = 25;    // V30's 17 + 8 (active starts 8 lines later: 20 -> 28)
+localparam V_TOTAL  = 262;   // 224+10+3+25 (== Genesis NTSC; H rate + refresh unchanged)
 
 // Derived boundaries — adjusted by OSD H/V position offset.
 wire [9:0] h_sync_start = H_ACTIVE + H_FP + {{5{h_adj[4]}}, h_adj};
 wire [9:0] h_sync_end   = h_sync_start + H_SYNC;
 // [#107] Clamp v_sync_start to >= V_ACTIVE so vsync can never assert INSIDE active video
-// (lines 0..V_ACTIVE-1). The raw value V_ACTIVE+V_FP+v_adj = 242+v_adj drops to 239 at the
-// maximum OSD shift-up (v_adj=-3), one line inside active -> bottom-row roll/clip on strict
-// 15 kHz displays (vblank is not asserted until line V_ACTIVE). Floor at V_ACTIVE.
+// (lines 0..V_ACTIVE-1). With V_FP=10 the raw value V_ACTIVE+V_FP+v_adj = 234+v_adj stays
+// >= V_ACTIVE (224) for every OSD shift (v_adj>=-8 -> 226), so the floor no longer fires,
+// but it is kept defensively: at the smaller V_FP=2 (V30) it prevented vsync asserting one
+// line inside active on strict 15 kHz displays. Floor at V_ACTIVE.
 wire [8:0] v_sync_start_raw = V_ACTIVE + V_FP + {{5{v_adj[3]}}, v_adj};
 wire [8:0] v_sync_start = (v_sync_start_raw < V_ACTIVE[8:0]) ? V_ACTIVE[8:0] : v_sync_start_raw;
 wire [8:0] v_sync_end   = v_sync_start + V_SYNC;
