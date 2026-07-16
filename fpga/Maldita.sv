@@ -245,16 +245,16 @@ assign LED_POWER[1]= 1;
 assign BUTTONS = 0;
 
 reg  [26:0] act_cnt;
-always @(posedge clk_sys) act_cnt <= act_cnt + 1'd1; 
+always @(posedge clk_sys) act_cnt <= act_cnt + 1'd1;
 assign LED_USER    = FB ? led[0] : act_cnt[26]  ? act_cnt[25:18]  > act_cnt[7:0]  : act_cnt[25:18]  <= act_cnt[7:0];
 
 wire [26:0] act_cnt2 = {~act_cnt[26],act_cnt[25:0]};
 assign LED_POWER[0]= FB ? led[2] : act_cnt2[26] ? act_cnt2[25:18] > act_cnt2[7:0] : act_cnt2[25:18] <= act_cnt2[7:0];
 
 
-`include "build_id.v" 
+`include "build_id.v"
 localparam CONF_STR = {
-	"Solarus;;",
+	"Maldita Castilla;;",
 	"SC0,SOL,Load Quest;",
 	"-;",
 	"OCE,H Position (CRT),0,+1,+2,+3,-3,-2,-1;",
@@ -746,7 +746,7 @@ always @(posedge clk_sys) begin
 	end
 end
 
-////////////////////////////  MT32pi  ////////////////////////////////// 
+////////////////////////////  MT32pi  //////////////////////////////////
 
 //
 // Pin | USB Name | Signal
@@ -847,7 +847,7 @@ always @(posedge CLK_AUDIO) begin : i2s_proc
 		if (i2s_ws) mt32_i2s_l <= i2s_buf;
 		else        mt32_i2s_r <= i2s_buf;
 	end
-	
+
 	if (RESET) begin
 		i2s_buf    <= 0;
 		mt32_i2s_l <= 0;
