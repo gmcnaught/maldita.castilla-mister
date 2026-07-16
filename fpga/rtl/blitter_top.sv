@@ -405,6 +405,36 @@ module blitter_top #(
     reg  [14:0]  dst_qw_q;                 // comp_fbram qword index for this pixel
     reg  [1:0]   dst_lane_q;               // x[1:0]
 
+    // [pipeline stage 3a] The per-pixel S_TRI_* walk is split into two concurrent
+    // sub-FSMs that run every cycle while the main state sits at the umbrella
+    // S_TRI_RUN, overlapping one pixel's blend/write (B) with the next pixel's
+    // address-gen + texel fetch (A):
+    //   pa (address-gen): walk coverage -> W*recip mul -> texel addr -> issue P_SRC read
+    //   pb (consume+blend): wait texel -> dst read -> 3-stage blend -> comp_fbram write
+    // They rendezvous through a SINGLE-DEEP texel handoff (h_full + h_* snapshot),
+    // matching the single-outstanding P_SRC channel. Because A computes pixel N+1
+    // (clobbering the live cr_q/dst_qw_q/... regs) while B is still blending pixel N,
+    // B must consume the handoff SNAPSHOT h_* rather than the live regs. Triangle
+    // constants (c_blend/c_alpha/c_src_*) are stable while pixels are in flight (the
+    // pipe drains before the next triangle's setup), so they need no snapshot.
+    localparam [2:0] A_PIX=3'd0, A_MUL0=3'd1, A_MUL1=3'd2, A_MUL=3'd3,
+                     A_ADDR=3'd4, A_ADDR2=3'd5, A_ISSUE=3'd6, A_DONE=3'd7;
+    localparam [2:0] B_IDLE=3'd0, B_GOT=3'd1, B_DSTW=3'd2, B_DSTC=3'd3,
+                     B_WR=3'd4, B_WR2=3'd5, B_WR3=3'd6;
+    reg  [2:0]   pa, pb;                   // the two concurrent sub-FSM states
+    reg          h_full;                   // texel handoff occupied (single-outstanding)
+    reg  [7:0]   h_cr, h_cg, h_cb, h_ca;   // handoff: interpolated colour
+    reg  [14:0]  h_dst_qw;                 // handoff: comp_fbram qword index
+    reg  [1:0]   h_dst_lane;               // handoff: x[1:0]
+    reg  [1:0]   h_tex_lane;               // handoff: texel qword lane
+    // B-local copies of the handoff payload, snapshotted at B_GOT. B FREES the handoff
+    // (h_full<=0) at B_GOT so A can issue the next texel read, but B keeps using the
+    // payload through B_WR3 — so it must read these private copies, not the live h_*
+    // (which A may already have overwritten for the next pixel).
+    reg  [7:0]   b_cr, b_cg, b_cb, b_ca;
+    reg  [14:0]  b_dst_qw;
+    reg  [1:0]   b_dst_lane;
+
     // registered bus-owner outputs (muxed onto p0_*/fb_* below when tri_busy)
     reg          tri_p0_rd;   reg [26:0] tri_p0_addr;
     reg          tri_fb_rd_en; reg [14:0] tri_fb_rd_qw;
@@ -552,6 +582,7 @@ module blitter_top #(
             snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
+            pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
         end else begin
             bm_rd<=1'b0;
             pipe_start<=1'b0;     // single-cycle blit_start pulse to comp_pipeline
@@ -572,8 +603,12 @@ module blitter_top #(
                 if (pipe_busy) perf_pipe_cyc <= perf_pipe_cyc + 32'd1;
                 // [profiling] all TRILIST states are 45..63 (highest state values)
                 if (state >= S_TRI_VFETCH) perf_tri_cyc <= perf_tri_cyc + 32'd1;
-                // cycles stalled waiting on the per-pixel texel fetch (S_TRI_GOTTEX/p0_ok)
-                if (state == S_TRI_GOTTEX && !p0_ok) perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
+                // cycles the consume sub-FSM (pb) stalls waiting on the per-pixel texel
+                // fetch (B_GOT/p0_ok). With the A||B overlap these are cycles where A may
+                // still be doing productive address-gen work, so dpath=(tri-texwait) is a
+                // conservative proxy; tri_cyc/covered is the true wall-clock throughput.
+                if ((state==S_TRI_PIX) && (pb==B_GOT) && !p0_ok)
+                    perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
             case (state)
@@ -882,70 +917,66 @@ module blitter_top #(
                     Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
-                    state<=S_TRI_PIX;
+                    // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
+                    pa<=A_PIX; pb<=B_IDLE; h_full<=1'b0;
+                    state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
-            // Evaluate coverage at (tri_px,tri_py). If covered, interpolate the
-            // attributes (A = round(W * area_recip / 2^40)), clamp the texel
-            // coord, and issue the P_SRC texel read.
+            // [pipeline stage 3a] Umbrella "run" state: tick the two concurrent
+            // sub-FSMs (pa = address-gen || pb = consume+blend) every cycle until the
+            // coverage walk is fully drained, overlapping pixel N's blend/write (pb)
+            // with pixel N+1's mul/addr/texel-fetch (pa).
             S_TRI_PIX: begin
-                if (!tri_cv) begin
-                    // cursor walked past the last bbox pixel -> triangle done
-                    state<=S_TRI_NEXT;
-                end else if ((w0>=0) && (w1>=0) && (w2>=0)) begin
-                    // Interpolation stage 1: LATCH the multiply operands into
-                    // single-fanout registers. The actual six W*area_recip products
-                    // happen next cycle (S_TRI_MUL0) so the multiply sits between two
-                    // dedicated register layers (w*_q/recip_q -> mul_*) and Quartus
-                    // maps it to a PIPELINED DSP. Doing the multiply straight off
-                    // Wu..Wa (which also feed the accumulate + coverage compares) left
-                    // it combinational and unable to close ~98 MHz.
-                    // [pipeline stage 1] snapshot this pixel's (px,py) into pxs/pys and
-                    // advance the cursor NOW, so the datapath (which reads pxs/pys and
-                    // the *_q operand regs) is decoupled from the walk accumulators.
-                    pxs <= tri_px; pys <= tri_py;
-                    wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
-                    wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
-                    recip_q <= $signed(ts_area_recip);
-                    advance_cursor;
-                    state<=S_TRI_MUL0;
-                end else begin
-                    // non-covered: advance the cursor and re-evaluate next cycle
-                    // (folds the former PIX->ADV->PIX 2-cyc skip into 1 cyc).
-                    advance_cursor;
-                    state<=S_TRI_PIX;
+                // ==== sub-FSM A: coverage walk -> W*recip mul -> texel addr -> issue P_SRC ====
+                case (pa)
+                // Evaluate coverage at (tri_px,tri_py). If covered, LATCH the multiply
+                // operands into single-fanout regs (the six W*area_recip products happen
+                // in A_MUL0 -> pipelined DSP) and dispatch down A; always advance the walk
+                // cursor now (stage-1 decoupling). Non-covered pixels skip in 1 cyc.
+                A_PIX: begin
+                    if (!tri_cv) begin
+                        pa<=A_DONE;           // cursor exhausted; let B drain
+                    end else if ((w0>=0) && (w1>=0) && (w2>=0)) begin
+                        pxs <= tri_px; pys <= tri_py;
+                        wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
+                        wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
+                        recip_q <= $signed(ts_area_recip);
+                        advance_cursor;
+                        pa<=A_MUL0;
+                    end else begin
+                        advance_cursor;       // non-covered: skip in 1 cyc, stay in A_PIX
+                    end
                 end
-            end
             // Interpolation stage 1b: two 48x24 partial products per lane, split on
             // recip's 24-bit halves (operands >= 0 -> unsigned). Registered -> each
             // is a shallow pipelined multiply; the tile-adder tree of a full 48x48
             // is broken up and finished in S_TRI_MUL1.
-            S_TRI_MUL0: begin
+            A_MUL0: begin
                 pp_u_lo <= $unsigned(wu_q) * recip_q[23:0];  pp_u_hi <= $unsigned(wu_q) * recip_q[47:24];
                 pp_v_lo <= $unsigned(wv_q) * recip_q[23:0];  pp_v_hi <= $unsigned(wv_q) * recip_q[47:24];
                 pp_r_lo <= $unsigned(wr_q) * recip_q[23:0];  pp_r_hi <= $unsigned(wr_q) * recip_q[47:24];
                 pp_g_lo <= $unsigned(wg_q) * recip_q[23:0];  pp_g_hi <= $unsigned(wg_q) * recip_q[47:24];
                 pp_b_lo <= $unsigned(wb_q) * recip_q[23:0];  pp_b_hi <= $unsigned(wb_q) * recip_q[47:24];
                 pp_a_lo <= $unsigned(wa_q) * recip_q[23:0];  pp_a_hi <= $unsigned(wa_q) * recip_q[47:24];
-                state<=S_TRI_MUL1;
+                pa<=A_MUL1;
             end
             // Interpolation stage 1c: recombine the partial products (adds only).
             // mul_X = pp_lo + (pp_hi << 24) == wX_q * recip_q (bit-exact).
-            S_TRI_MUL1: begin
+            A_MUL1: begin
                 mul_u <= {24'd0,pp_u_lo} + {pp_u_hi,24'd0};
                 mul_v <= {24'd0,pp_v_lo} + {pp_v_hi,24'd0};
                 mul_r <= {24'd0,pp_r_lo} + {pp_r_hi,24'd0};
                 mul_g <= {24'd0,pp_g_lo} + {pp_g_hi,24'd0};
                 mul_b <= {24'd0,pp_b_lo} + {pp_b_hi,24'd0};
                 mul_a <= {24'd0,pp_a_lo} + {pp_a_hi,24'd0};
-                state<=S_TRI_MUL;
+                pa<=A_MUL;
             end
             // Interpolation stage 2: round the products and do the nearest-texel
             // clamp; register the clamped coords. The texel-ADDRESS multiply
             // (itv*stride) is deferred to S_TRI_ADDR so it is NOT chained with the
             // wide 96-bit W*recip rounding here in one cycle — that chain was the
             // reported worst path (mul_v[40] -> tri_p0_addr, -5.576 ns).
-            S_TRI_MUL: begin
+            A_MUL: begin
                 // texel coords (u12.4) then nearest-texel with clamp
                 rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
                 rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
@@ -968,7 +999,7 @@ module blitter_top #(
                 // pixel's snapshot (pxs/pys), since the walk cursor has already moved on.
                 dst_qw_q   <= pys*16'd80 + (pxs>>2);
                 dst_lane_q <= pxs[1:0];
-                state<=S_TRI_ADDR;
+                pa<=A_ADDR;
             end
             // Interpolation stage 3a: the texel-row multiply itv*stride, REGISTERED
             // in its own cycle. itv_q is a clamped texel row (<= tex_h-1), so the
@@ -976,49 +1007,77 @@ module blitter_top #(
             // the product (input itv_q + output tex_row) makes it a pipelined DSP.
             // Doing it combinationally into the address add was an ~8.9 ns multiply
             // feeding tri_p0_addr (the -2.0 ns worst path).
-            S_TRI_ADDR: begin
+            A_ADDR: begin
                 tex_row <= itv_q[15:0] * c_src_stride;
-                state<=S_TRI_ADDR2;
+                pa<=A_ADDR2;
             end
             // Interpolation stage 3b: texel byte address add + P_SRC read (adds
             // only; no multiply). One extra cycle per covered pixel, negligible vs.
             // the SDRAM texel-read wait.
-            S_TRI_ADDR2: begin
-                // texel byte address (8-byte aligned; lane = byte[2:1])
+            A_ADDR2: begin
+                // texel byte address (8-byte aligned; lane = byte[2:1]). The P_SRC
+                // read itself is NOT issued here — it is deferred to A_ISSUE so the
+                // single-outstanding channel is only driven once the previous texel
+                // has been consumed by B (h_full cleared).
                 texbyte = c_src_off + tex_row + (itu_q<<<1);
                 tri_p0_addr <= texbyte[26:0] & ~27'h7;
-                tri_p0_rd   <= 1'b1;
                 tex_lane_q  <= texbyte[2:1];
-                state<=S_TRI_GOTTEX;
+                pa<=A_ISSUE;
             end
-            // Wait for the texel; latch it. COPY/COLORKEY need no dst read;
-            // CONST_ALPHA/ADD/MULTIPLY read the destination pixel first.
-            S_TRI_GOTTEX: if (p0_ok) begin
-                texel_q <= p0_dout[tex_lane_q*16 +: 16];
+            // Issue the texel read into the single-deep handoff. Stall until B has
+            // consumed the previous one (h_full==0). Snapshot the per-pixel payload
+            // (colour, dst qword/lane, texel lane) so A can immediately race ahead on
+            // the next pixel while B blends this one off the h_* snapshot.
+            A_ISSUE: if (!h_full) begin
+                tri_p0_rd  <= 1'b1;   // pulse P_SRC read for tri_p0_addr (set in A_ADDR2)
+                h_cr <= cr_q; h_cg <= cg_q; h_cb <= cb_q; h_ca <= ca_q;
+                h_dst_qw <= dst_qw_q; h_dst_lane <= dst_lane_q; h_tex_lane <= tex_lane_q;
+                h_full <= 1'b1;
+                pa<=A_PIX;
+            end
+            // Address-gen drained (cursor exhausted). Idle until B finishes.
+            A_DONE: ;
+            default: pa<=A_PIX;
+            endcase
+
+            // ==== sub-FSM B: wait texel -> dst read -> 3-stage blend -> comp_fbram write ====
+            case (pb)
+            // Wait for a handed-off pixel, then for its texel.
+            B_IDLE: if (h_full) pb<=B_GOT;
+            // Latch the texel and FREE the handoff (single-outstanding read consumed, so
+            // A may issue the next). COPY/COLORKEY need no dst read; CONST_ALPHA/ADD/
+            // MULTIPLY read the destination pixel first.
+            B_GOT: if (p0_ok) begin
+                texel_q <= p0_dout[h_tex_lane*16 +: 16];
+                // snapshot the handoff payload into B-local regs, THEN free the handoff
+                // so A may issue the next read while B blends off these private copies.
+                b_cr <= h_cr; b_cg <= h_cg; b_cb <= h_cb; b_ca <= h_ca;
+                b_dst_qw <= h_dst_qw; b_dst_lane <= h_dst_lane;
+                h_full  <= 1'b0;
                 if (tri_need_dst) begin
-                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= dst_qw_q;
-                    state<=S_TRI_DSTW;
+                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= h_dst_qw;
+                    pb<=B_DSTW;
                 end else begin
                     dst_q <= 16'd0;
-                    state<=S_TRI_WR;
+                    pb<=B_WR;
                 end
             end
-            // comp_fbram read has 1-cycle latency: DSTW presents rd_en, DSTC
+            // comp_fbram read has 1-cycle latency: B_DSTW presents rd_en, B_DSTC
             // captures the registered qword and lane-selects the dst pixel.
-            S_TRI_DSTW: state<=S_TRI_DSTC;
-            S_TRI_DSTC: begin
-                dst_q <= fb_rd_qword[dst_lane_q*16 +: 16];
-                state<=S_TRI_WR;
+            B_DSTW: pb<=B_DSTC;
+            B_DSTC: begin
+                dst_q <= fb_rd_qword[b_dst_lane*16 +: 16];
+                pb<=B_WR;
             end
             // ── blend stage A (comp_mixer stage A analogue) ──────────────────────
             // Tint the source channels (red255(texel*c)), split the dst channels, and
             // combine the per-vertex alpha with the global alpha: ea=(ca*g_alpha)/255,
             // na=255-ea. Register everything the MAC needs. One small multiply-or-
             // reduce per lane, no chain — mirrors blt_tri.sv:122-129 exactly.
-            S_TRI_WR: begin
-                b1_tsr <= modch({1'b0, texel_q[15:11]}, cr_q);   // tinted source channels
-                b1_tsg <= modch(texel_q[10:5],          cg_q);
-                b1_tsb <= modch({1'b0, texel_q[4:0]},   cb_q);
+            B_WR: begin
+                b1_tsr <= modch({1'b0, texel_q[15:11]}, b_cr);   // tinted source channels
+                b1_tsg <= modch(texel_q[10:5],          b_cg);
+                b1_tsb <= modch({1'b0, texel_q[4:0]},   b_cb);
                 b1_dr  <= {1'b0, dst_q[15:11]};  // dst channels (dr/db 5-bit, dg 6-bit)
                 b1_dg  <= dst_q[10:5];
                 b1_db  <= {1'b0, dst_q[4:0]};
@@ -1029,19 +1088,19 @@ module blitter_top #(
                 // verified BIT-EXACT over the full product range x in [0,65025]. Only
                 // the divide changes; the 8x8 ca*g_alpha multiply is kept. na from the
                 // same temp so the reduction is instantiated once.
-                xa_t   = {8'd0, ca_q} * {8'd0, c_alpha};   // x = ca*g_alpha, [0,65025]
+                xa_t   = {8'd0, b_ca} * {8'd0, c_alpha};   // x = ca*g_alpha, [0,65025]
                 ea_t   = ( ({8'd0, xa_t} << 8) + {8'd0, xa_t} + 24'd257 ) >> 16;
                 b1_ea  <= ea_t;
                 b1_na  <= 8'd255 - ea_t;
                 // colorkey cull (stable inputs; carried to the write stage)
                 b1_we  <= !((c_blend==BLEND_KEY) && (texel_q==c_colorkey));
-                state<=S_TRI_WR2;
+                pb<=B_WR2;
             end
             // ── blend stage B (comp_mixer stage B analogue) ──────────────────────
             // Per-channel intermediate selected by blend mode: the weighted-sum MAC
             // (CALPHA), the saturating pre-sum (ADD), the product (MUL), or the tinted
             // source (COPY/KEY). One multiply-or-add layer, reduced next stage.
-            S_TRI_WR2: begin
+            B_WR2: begin
                 case (c_blend)
                   BLEND_ALPHA: begin   // BM_CALPHA: tsr*ea + dr*na  (reduced /255 in C)
                     b2_r <= b1_tsr*b1_ea + b1_dr*b1_na;
@@ -1065,12 +1124,12 @@ module blitter_top #(
                   end
                 endcase
                 b2_we <= b1_we;
-                state<=S_TRI_WR3;
+                pb<=B_WR3;
             end
             // ── blend stage C (comp_mixer stage C analogue) ──────────────────────
             // /255,/31,/63 reduce (or ADD saturate), RGB565 pack, and the comp_fbram
             // write if not culled. Byte-identical result to blt_tri.sv:132-148.
-            S_TRI_WR3: begin
+            B_WR3: begin
                 case (c_blend)
                   BLEND_ALPHA: begin
                     bl_or = red255(b2_r); bl_og = red255(b2_g); bl_ob = red255(b2_b);
@@ -1091,18 +1150,20 @@ module blitter_top #(
                 endcase
                 if (b2_we) begin
                     tri_fb_wr_en   <= 1'b1;
-                    tri_fb_wr_qw   <= dst_qw_q;
-                    tri_fb_wr_lane <= dst_lane_q;
+                    tri_fb_wr_qw   <= b_dst_qw;
+                    tri_fb_wr_lane <= b_dst_lane;
                     tri_fb_wr_pix  <= { bl_or[4:0], bl_og[5:0], bl_ob[4:0] };
                 end
-                // [pipeline stage 1] the cursor was already advanced at dispatch
-                // (S_TRI_PIX); return straight to the walk for the next pixel.
-                state<=S_TRI_PIX;
+                pb<=B_IDLE;   // pixel written; ready for the next handoff
             end
-            // [pipeline stage 1] S_TRI_ADV retired: the per-pixel advance moved into
-            // advance_cursor() invoked at dispatch time in S_TRI_PIX. Kept as an
-            // unreachable safety arm (should never be entered).
-            S_TRI_ADV: state<=S_TRI_PIX;
+            default: pb<=B_IDLE;
+            endcase
+
+            // Triangle drained when address-gen is done, the blend pipe is empty, and
+            // no texel is outstanding -> advance to the next triangle / finish.
+            if ((pa==A_DONE) && (pb==B_IDLE) && !h_full)
+                state<=S_TRI_NEXT;
+            end
             // Triangle done: advance to the next triangle, else finish the command.
             S_TRI_NEXT: begin
                 if (tri_idx + 16'd1 < tri_count) begin
