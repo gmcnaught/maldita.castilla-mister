@@ -327,6 +327,7 @@ module comp_pipeline (
     P_SPAN_BEGIN  = 6'd21,    // decide: decode span N+1 (overlap) or composite last span
     P_DEC_RD      = 6'd22,    // decode a span record -> pend + src-row multiply
     P_DEC_RD2     = 6'd23,    // gpix range -> fill_lo/hi + pend; kick the prefetch
+    P_DEC_MUL     = 6'd25,    // [pipelined src-row mult] sum partial products (P_DEC_RD -> here -> P_DEC_RD2)
     P_ADVANCE     = 6'd24;    // post-drain: wait !prefetch_busy, promote pend->serve
   reg [5:0] state;
 
@@ -577,15 +578,17 @@ module comp_pipeline (
   localparam [3:0] PIPE_DEPTH = 3 + MIX_LAT;
   reg [3:0]  drain_cnt;
 
-  // source row base byte address for the current span (origin-y applied). Uses the
-  // registered span-record read (sp_q_src_y), valid in P_COMP_RD. The 16x16 multiply
-  // is registered into src_row_base_r in P_COMP_RD and the gpix adds happen the next
-  // cycle (P_COMP_RD2) — splitting the multiply from the address adds keeps this off
-  // the critical path (it was the worst setup path: span RAM -> mult -> gpix_lo).
-  wire [31:0] src_row_base_q = c_src_off
-            + (({16'd0, c_src_y} + {16'd0, sp_q_src_y})
-                 * {16'd0, c_src_stride});
-  reg  [31:0] src_row_base_r;   // registered src_row_base (post-multiply)
+  // source row base byte address for the current span (origin-y applied):
+  //   src_row_base = c_src_off + (c_src_y + sp_q_src_y) * c_src_stride
+  // [pipelined 2026-07-17] The 16x16 multiply is split across two cycles to cut fabric-
+  // clock combinational depth (after the Lever-1 texel-cache congestion this path fell
+  // to -1.146ns): P_DEC_RD registers two 17x8 partial products (sy_pp_lo/hi = the src-y
+  // sum times each byte of c_src_stride), and P_DEC_MUL sums them with c_src_off into
+  // src_row_base_r. Bit-identical (all 32-bit mod-2^32 arithmetic); +1 cycle per span
+  // (P_DEC_MUL), amortized to nothing over the span's pixels. src_row_base_r stays valid
+  // in P_DEC_RD2 for dec_base exactly as before.
+  reg  [31:0] sy_pp_lo, sy_pp_hi;  // registered partial products: srcy_sum * stride byte
+  reg  [31:0] src_row_base_r;      // registered src_row_base (post-multiply, from P_DEC_MUL)
   // [Task 3c] base gpix of the span being decoded (valid in P_DEC_RD2 off the
   // registered src_row_base_r + dec_src_x0 latched in P_DEC_RD):
   // [PAL8 v1, Task 3.1] src_row_base_r is a BYTE offset; the byte->pixel convert is
@@ -760,12 +763,24 @@ module comp_pipeline (
           pend_band_row <= (sp_q_dst_y - chunk_base_y);
           dec_src_x0    <= sp_q_src_x0;
           dec_len       <= sp_q_len;
-          src_row_base_r <= src_row_base_q;
+          // [pipelined src-row mult, stage 1] register the two 17x8 partial products of
+          // (c_src_y + sp_q_src_y) * c_src_stride, split on c_src_stride's byte halves.
+          // P_DEC_MUL sums them + c_src_off. Bit-identical to the old 1-cycle multiply.
+          sy_pp_lo <= ({16'd0, c_src_y} + {16'd0, sp_q_src_y}) * {24'd0, c_src_stride[7:0]};
+          sy_pp_hi <= ({16'd0, c_src_y} + {16'd0, sp_q_src_y}) * {24'd0, c_src_stride[15:8]};
           // synthesis translate_off
           if ((sp_q_dst_y - chunk_base_y) > (BAND_H - 9'd1))
             $display("FAIL: band_row %0d out of range (chunk spans not consecutive rows)",
                      sp_q_dst_y - chunk_base_y);
           // synthesis translate_on
+          state <= P_DEC_MUL;
+        end
+
+        // [pipelined src-row mult, stage 2] src_row_base = c_src_off + sy_pp_lo +
+        // (sy_pp_hi << 8) == c_src_off + (c_src_y+sp_q_src_y)*c_src_stride (mod 2^32).
+        // Adds only; result ready for P_DEC_RD2's dec_base exactly as the old path was.
+        P_DEC_MUL: begin
+          src_row_base_r <= c_src_off + sy_pp_lo + {sy_pp_hi[23:0], 8'd0};
           state <= P_DEC_RD2;
         end
 

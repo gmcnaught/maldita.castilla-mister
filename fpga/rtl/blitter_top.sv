@@ -465,12 +465,12 @@ module blitter_top #(
     // P_SRC read fills one slot. Decouples the rasterizer's texel read (1-cyc
     // BRAM hit) from the single-outstanding P_SRC latency. Bit-exact: same
     // texel bytes, fetched earlier. See docs .../2026-07-16-trilist-lever1-*.
-    // 64 qwords: the tq_hit() tag compare is a TEXQ_N:1 distributed mux on the fabric
-    // clock; 256 left it at -0.427ns (b_qtag->tq_rhit) / -0.291ns (tri_p0_addr->fill_slot).
-    // 64 shrinks the mux ~2 LUT levels (~+1ns) to close, and still holds 32x more than the
-    // 2-line jtframe cache — the prefetch window only needs ~FIFO-depth qwords resident.
-    localparam integer TEXQ_N     = 64;
-    localparam integer TEXQ_AW    = 6;      // $clog2(TEXQ_N)
+    // 256 qwords. (A 64-entry variant closed the tq_hit tag mux but placed a fragile
+    // comp_pipeline neighbor WORSE -1.146 vs 256's -0.427 — pure placement variance — so
+    // the larger cache stays; the fabric-clock closure is addressed via a compositor-path
+    // timing hint, not by shrinking this.) Tag width auto-tracks via TEXQ_TW below.
+    localparam integer TEXQ_N     = 256;
+    localparam integer TEXQ_AW    = 8;      // $clog2(TEXQ_N)
     localparam integer TEXQ_TW    = 24 - TEXQ_AW;  // tag width = qtag[23:TEXQ_AW] (widens as N shrinks)
     reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
     reg  [TEXQ_TW-1:0] tq_tag [0:TEXQ_N-1]; // qtag[23:TEXQ_AW]
