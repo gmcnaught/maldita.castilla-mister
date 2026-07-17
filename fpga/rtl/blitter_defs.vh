@@ -85,6 +85,19 @@
 // Task 2; 10 is free and matches the host ABI (blitter_ref.h BLT_OP_TRILIST).
 `define OP_TRILIST            8'd10
 `define BLT_F_COLORMOD        8'h40  // _pad bytes carry RGB888 src tint (cr,cg,cb)
+// ── [app-surface v1] render-target select (step-1 plan Tasks 2/6). BLT_OP_SET_TARGET
+// binds the composite destination among named surfaces; the target id rides the
+// command's color low byte (cmd_qw[3][47:32], same field FILL uses for its color).
+// opcodes 0-7 and 10 are taken in blitter_ref.h; 11 is the chosen free value.
+// (These MUST match the host emitter + blitter_ref.h — locked protocol constants.)
+`define OP_SET_TARGET         8'd11
+`define BLT_TARGET_WORK       2'd0   // composite into the WORK framebuffer (default; scanned)
+`define BLT_TARGET_APPSURF    2'd2   // composite into the off-screen app-surface (never scanned)
+// NOTE (Task 7 dependency — flag-bit conflict flagged to the lead): the plan's
+// BLT_F_SRC_SURFACE=0x40 COLLIDES with BLT_F_COLORMOD=0x40 above (taken in both
+// blitter_ref.h:138 and blitter_top.sv). The next free flag bit is 0x80. Do NOT
+// define BLT_F_SRC_SURFACE here until the value is reconciled with the engine team's
+// reference model (Task 3). Task 6 does not use it.
 // ── [PAL8 v1] source-format constants (mirror blitter_ref.h) ─────────────────────
 `define BLT_FMT_RGB565        8'd0
 `define BLT_FMT_ARGB4444      8'd1

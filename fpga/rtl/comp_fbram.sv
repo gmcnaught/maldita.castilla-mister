@@ -39,7 +39,21 @@ module comp_fbram #(
     // snapshot write: full-qword write into the scanout buffer (vblank work->scan copy)
     input  wire          snap_we,
     input  wire [AW-1:0] snap_qw,
-    input  wire [63:0]   snap_qword       // {lane3,lane2,lane1,lane0}
+    input  wire [63:0]   snap_qword,      // {lane3,lane2,lane1,lane0}
+    // ── off-screen APP-SURFACE render target (app-surface v1, plan Task 6) ─────────
+    // A second, independent 1W1R full-size surface (same 4-lane-bank qword layout as
+    // WORK). The compositor's write/read is routed here by blitter_top when the active
+    // render target is APPSURF. It is OFF-SCREEN: never scanned, no scan buffer, no
+    // snapshot copy. Ports float UNCONNECTED on the legacy scanout/unit benches — the
+    // enable gates make an unconnected (z) enable a no-op (`if (z)` is false), so those
+    // benches are unaffected. Task 7 adds a texel read from this surface (surf_rd_*).
+    input  wire          surf_wr_en,
+    input  wire [AW-1:0] surf_wr_qw,
+    input  wire [1:0]    surf_wr_lane,
+    input  wire [15:0]   surf_wr_pix,
+    input  wire          surf_rd_en,
+    input  wire [AW-1:0] surf_rd_qw,
+    output wire [63:0]   surf_rd_qword    // {lane3,lane2,lane1,lane0}
 );
     // composite-read copy (rd_*) of the four lane banks
     (* ramstyle = "no_rw_check, M10K" *) reg [15:0] bank0 [0:FB_QWORDS-1];
@@ -95,6 +109,34 @@ module comp_fbram #(
         s2 <= sbank2[scan_rd_qw]; s3 <= sbank3[scan_rd_qw];
     end
     assign scan_rd_qword = {s3, s2, s1, s0};
+
+    // ── off-screen APP-SURFACE bank (app-surface v1) ─────────────────────────────
+    // Independent 1W1R storage, same 4-lane-bank layout as WORK. No scan/snapshot copy
+    // (never displayed). Clean 1-write/1-read full-width RAM -> M10K, same as WORK.
+    (* ramstyle = "no_rw_check, M10K" *) reg [15:0] surf_bank0 [0:FB_QWORDS-1];
+    (* ramstyle = "no_rw_check, M10K" *) reg [15:0] surf_bank1 [0:FB_QWORDS-1];
+    (* ramstyle = "no_rw_check, M10K" *) reg [15:0] surf_bank2 [0:FB_QWORDS-1];
+    (* ramstyle = "no_rw_check, M10K" *) reg [15:0] surf_bank3 [0:FB_QWORDS-1];
+
+    // composite write into the surface (exactly one lane per cycle). An unconnected
+    // surf_wr_en floats to z on legacy benches; `if (z)`/`if (x)` is false -> no write.
+    wire sfwe0 = surf_wr_en & (surf_wr_lane == 2'd0);
+    wire sfwe1 = surf_wr_en & (surf_wr_lane == 2'd1);
+    wire sfwe2 = surf_wr_en & (surf_wr_lane == 2'd2);
+    wire sfwe3 = surf_wr_en & (surf_wr_lane == 2'd3);
+    always @(posedge clk) if (sfwe0) surf_bank0[surf_wr_qw] <= surf_wr_pix;
+    always @(posedge clk) if (sfwe1) surf_bank1[surf_wr_qw] <= surf_wr_pix;
+    always @(posedge clk) if (sfwe2) surf_bank2[surf_wr_qw] <= surf_wr_pix;
+    always @(posedge clk) if (sfwe3) surf_bank3[surf_wr_qw] <= surf_wr_pix;
+
+    // surface read port (registered, 1-cyc latency) — composite RMW read when APPSURF,
+    // and (Task 7) the texel sample of the surface-as-texture.
+    reg [15:0] u0, u1, u2, u3;
+    always @(posedge clk) if (surf_rd_en) begin
+        u0 <= surf_bank0[surf_rd_qw]; u1 <= surf_bank1[surf_rd_qw];
+        u2 <= surf_bank2[surf_rd_qw]; u3 <= surf_bank3[surf_rd_qw];
+    end
+    assign surf_rd_qword = {u3, u2, u1, u0};
 
 `ifdef FABRIC_ASSERT
     // [#110 SVA] SCAN read-during-write hazard. The snapshot (snap_*) writes the SCAN

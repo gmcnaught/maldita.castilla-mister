@@ -85,6 +85,17 @@ module blitter_top #(
     output wire          fb_snap_we,
     output wire [14:0]   fb_snap_qw,
     output wire [63:0]   fb_snap_qword,
+    // ---- off-screen APP-SURFACE render-target port to comp_fbram (app-surface v1) ----
+    // When BLT_OP_SET_TARGET binds APPSURF, the composite write/read is routed to this
+    // independent off-screen surface instead of the WORK banks. The surface is never
+    // scanned (no scan/snapshot). Task 7 adds a texel read of it via surf_rd_*.
+    output wire          surf_wr_en,
+    output wire [14:0]   surf_wr_qw,
+    output wire [1:0]    surf_wr_lane,
+    output wire [15:0]   surf_wr_pix,
+    output wire          surf_rd_en,
+    output wire [14:0]   surf_rd_qw,
+    input  wire [63:0]   surf_rd_qword,
     // ---- SDRAM STAGE WRITE path (issue #19, BLT_OP_STAGE) ----------------------
     // A BLT_OP_STAGE command copies a source region from DDR3 (SRC_QW + off) into
     // SDRAM at the heap-relative byte offset `off` (exactly the address the SDRAM
@@ -178,7 +189,8 @@ module blitter_top #(
         S_TRI_MUL1=6'd63;         // sum the W*area_recip partial products -> mul_*
 
     localparam [7:0] OP_NOP=8'd0, OP_END=8'd1, OP_FILL=8'd2, OP_BLIT=8'd3, OP_STAGE=8'd4,
-                     OP_TRILIST=8'd10;
+                     OP_TRILIST=8'd10,
+                     OP_SET_TARGET=`OP_SET_TARGET;   // [app-surface v1] bind composite target
     // [v2 escape-elim] blend_mode now spans 0..5 (ADD=4, MULTIPLY=5). The decode just
     // forwards c_blend to comp_pipeline, which maps it onto comp_mixer modes.
     localparam [7:0] BLEND_KEY=8'd1, BLEND_ALPHA=8'd2, BLEND_PALPHA=8'd3,
@@ -211,6 +223,10 @@ module blitter_top #(
     // comp_pipeline's composite-write outputs (pre-mux); muxed with tri_fb_wr_* below.
     wire          pipe_fb_wr_en; wire [14:0] pipe_fb_wr_qw; wire [1:0] pipe_fb_wr_lane; wire [15:0] pipe_fb_wr_pix;
     wire          snap_busy, snap_rd_en; wire [14:0] snap_rd_qw;
+    // [app-surface v1] composite RMW-read result seen by the renderer: the off-screen
+    // surface when compositing APPSURF, else the WORK framebuffer. Assigned in the
+    // target-routing mux at the bottom; fed to comp_pipeline + the TRILIST dst read.
+    wire [63:0]   comp_rd_qword;
     reg           snap_start;    // 1-cycle work->scan snapshot trigger
     // [#104] Synchronize vs (scanout vblank; may cross from the video clock) through a
     // 3-FF chain BEFORE the rising-edge detect, detecting between the two RESOLVED stages
@@ -262,6 +278,14 @@ module blitter_top #(
     //                      clear/setup overhead; tri - texwait = rasterizer datapath.
     reg  [31:0] perf_tri_cyc, perf_texwait_cyc;
     reg  [1:0]  target_buf;   // 0/1 = framebuffer; 2 = off-screen bg-cache (no flip)
+    // [app-surface v1] Active COMPOSITE render target, bound by BLT_OP_SET_TARGET mid-ring.
+    // DECOUPLED from target_buf on purpose: target_buf is the DISPLAY double-buffer / flip
+    // selector (drives vctrl_val's flip bit) and must not be perturbed by a mid-ring target
+    // bind. comp_target only steers the composite write/read mux (WORK vs off-screen surface)
+    // and is reset to WORK at every frame start, so a frame that never emits SET_TARGET is
+    // byte-identical to today. Values: BLT_TARGET_WORK / BLT_TARGET_APPSURF.
+    reg  [1:0]  comp_target;
+    wire        appsurf_active = (comp_target == `BLT_TARGET_APPSURF);
     // [collapse-single-source] The per-blit source read is ALWAYS from SDRAM now
     // (single source pipeline). The old C_SRCSEL bit0 (DDR3-vs-SDRAM source mux,
     // `srcsel`) and the DDR3 live-source datapath were removed; the C_SRCSEL control
@@ -638,6 +662,7 @@ module blitter_top #(
             stage_barrier<=1'b0; barrier_seen_busy<=1'b0;
             snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             tri_busy<=1'b0; tri_setup_start<=1'b0;
+            comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
             pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
             fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}}; last_pf_qtag<=24'hFFFFFF;
@@ -687,6 +712,7 @@ module blitter_top #(
                 else begin
                     idle<=0; bm_rd<=1; bm_addr<=`BLTCTRL_QW+`C_CMDCOUNT;
                     rd_ret<=S_GOT_CMDCNT; state<=S_RD_WAIT;
+                    comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] each frame begins targeting WORK
                     perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;   // frame start: reset perf
                     perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;   // [profiling] reset per-frame
                 end
@@ -812,6 +838,13 @@ module blitter_top #(
             S_SETUP: begin
                 if (c_opcode==OP_END)       state<=S_FRAME_VCTRL;
                 else if (c_opcode==OP_NOP)  state<=S_NEXT_CMD;
+                else if (c_opcode==OP_SET_TARGET) begin
+                    // [app-surface v1] Bind the composite render target. The target id
+                    // rides the command's color low byte (c_color = cmd_qw[3][47:32]).
+                    // Only comp_target moves — target_buf (display flip) is untouched.
+                    comp_target <= c_color[1:0];   // BLT_TARGET_WORK(0) / BLT_TARGET_APPSURF(2)
+                    state<=S_NEXT_CMD;
+                end
                 else if (c_opcode==OP_STAGE) begin
                     // BLT_OP_STAGE: copy {c_h,c_w} bytes from DDR3 SRC_QW+off into
                     // SDRAM. DDR3 read base = c_src_off. SDRAM dest = u32[2]
@@ -1179,7 +1212,7 @@ module blitter_top #(
             // captures the registered qword and lane-selects the dst pixel.
             B_DSTW: pb<=B_DSTC;
             B_DSTC: begin
-                dst_q <= fb_rd_qword[b_dst_lane*16 +: 16];
+                dst_q <= comp_rd_qword[b_dst_lane*16 +: 16];   // [app-surface v1] WORK or surface
                 pb<=B_WR;
             end
             // ── blend stage A (comp_mixer stage A analogue) ──────────────────────
@@ -1415,7 +1448,7 @@ module blitter_top #(
         // The work WRITE port is comp_pipeline's alone; the work READ port is shared with
         // the snapshot controller (mux below), so comp_pipeline drives pipe_fb_rd_*.
         .fb_wr_en(pipe_fb_wr_en), .fb_wr_qw(pipe_fb_wr_qw), .fb_wr_lane(pipe_fb_wr_lane), .fb_wr_pix(pipe_fb_wr_pix),
-        .fb_rd_en(pipe_fb_rd_en), .fb_rd_qw(pipe_fb_rd_qw), .fb_rd_qword(fb_rd_qword),
+        .fb_rd_en(pipe_fb_rd_en), .fb_rd_qw(pipe_fb_rd_qw), .fb_rd_qword(comp_rd_qword),
         .blit_done(p_blit_done));
 
     // ── work->scan snapshot controller [FB-in-BRAM double-buffer] ────────────────
@@ -1435,19 +1468,46 @@ module blitter_top #(
     assign src_sdram_din64    = stage_din64_fsm;
     assign src_sdram_waddr    = stage_waddr_fsm;
 
-    // 2-way fb_rd mux: snapshot (vblank) owns the work-read port during the
-    // once-per-frame work->scan copy; otherwise the normal compositor
-    // (comp_pipeline) drives it. (The retired bg-write bake used to sit
-    // between these two as a third priority tier.)
-    assign fb_rd_en = snap_busy ? snap_rd_en : (tri_busy ? tri_fb_rd_en : pipe_fb_rd_en);
-    assign fb_rd_qw = snap_busy ? snap_rd_qw : (tri_busy ? tri_fb_rd_qw : pipe_fb_rd_qw);
+    // ── composite target routing [app-surface v1] ───────────────────────────────
+    // The compositor's write + RMW-read (from the TRILIST walk while tri_busy, else
+    // comp_pipeline FILL/BLIT) is steered to the WORK framebuffer or the off-screen
+    // APPSURF surface by comp_target. The work->scan snapshot ALWAYS targets WORK and
+    // keeps priority on the WORK read port. When comp_target==WORK (every frame that
+    // never emits SET_TARGET) the WORK paths are byte-identical to before and the
+    // surface ports are idle.
 
-    // fb_wr mux: the TRILIST walk (tri_busy) owns the composite-write port while it
-    // rasterizes; otherwise comp_pipeline (FILL/BLIT) drives it.
-    assign fb_wr_en   = tri_busy ? tri_fb_wr_en   : pipe_fb_wr_en;
-    assign fb_wr_qw   = tri_busy ? tri_fb_wr_qw   : pipe_fb_wr_qw;
-    assign fb_wr_lane = tri_busy ? tri_fb_wr_lane : pipe_fb_wr_lane;
-    assign fb_wr_pix  = tri_busy ? tri_fb_wr_pix  : pipe_fb_wr_pix;
+    // shared composite write (tri owns while rasterizing; else comp_pipeline)
+    wire        cw_en   = tri_busy ? tri_fb_wr_en   : pipe_fb_wr_en;
+    wire [14:0] cw_qw   = tri_busy ? tri_fb_wr_qw   : pipe_fb_wr_qw;
+    wire [1:0]  cw_lane = tri_busy ? tri_fb_wr_lane : pipe_fb_wr_lane;
+    wire [15:0] cw_pix  = tri_busy ? tri_fb_wr_pix  : pipe_fb_wr_pix;
+    // shared composite RMW-read address/enable (snapshot forces WORK below)
+    wire        cr_en = tri_busy ? tri_fb_rd_en : pipe_fb_rd_en;
+    wire [14:0] cr_qw = tri_busy ? tri_fb_rd_qw : pipe_fb_rd_qw;
+
+    // WORK write port: enabled only when the composite target is WORK.
+    assign fb_wr_en   = appsurf_active ? 1'b0 : cw_en;
+    assign fb_wr_qw   = cw_qw;
+    assign fb_wr_lane = cw_lane;
+    assign fb_wr_pix  = cw_pix;
+    // SURFACE write port: enabled only when the composite target is APPSURF.
+    assign surf_wr_en   = appsurf_active ? cw_en : 1'b0;
+    assign surf_wr_qw   = cw_qw;
+    assign surf_wr_lane = cw_lane;
+    assign surf_wr_pix  = cw_pix;
+
+    // WORK read port: snapshot (always WORK) wins; else the compositor when target==WORK.
+    assign fb_rd_en = snap_busy ? snap_rd_en : (appsurf_active ? 1'b0 : cr_en);
+    assign fb_rd_qw = snap_busy ? snap_rd_qw : cr_qw;
+    // SURFACE read port: the compositor when target==APPSURF (snapshot never reads it).
+    assign surf_rd_en = (!snap_busy && appsurf_active) ? cr_en : 1'b0;
+    assign surf_rd_qw = cr_qw;
+
+    // Read result back to the renderer: surface when compositing APPSURF, else WORK.
+    // comp_target is stable across a whole blit (it only moves at SET_TARGET, between
+    // fully-drained blits), so the 1-cycle read latency never straddles a target change.
+    // The snapshot reads fb_rd_qword directly and is unaffected by this mux.
+    assign comp_rd_qword = appsurf_active ? surf_rd_qword : fb_rd_qword;
 
     // owner mux: comp_pipeline drives the bus only while pipe_busy; otherwise the
     // FSM's bm_* drive it for ring/clear/STAGE/status traffic.
