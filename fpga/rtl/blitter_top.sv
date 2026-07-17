@@ -432,8 +432,8 @@ module blitter_top #(
     // pops the head and resolves/blends. Replaces the old single-deep h_full handoff.
     // Payload = {ca,cb,cg,cr[8b each]=32, dst_qw[15], dst_lane[2], qtag[24], texlane[2]}
     // = 75 bits. Pointer-with-extra-MSB scheme gives full/empty disambiguation.
-    localparam integer TEXFIFO_D  = 16;
-    localparam integer TEXFIFO_AW = 4;      // $clog2(TEXFIFO_D)
+    localparam integer TEXFIFO_D  = 8;
+    localparam integer TEXFIFO_AW = 3;      // $clog2(TEXFIFO_D)
     localparam integer PW = 32+15+2+24+2;   // payload width = 75
     reg  [PW-1:0] pf_mem [0:TEXFIFO_D-1];
     reg  [TEXFIFO_AW:0] pf_wr, pf_rd;       // extra MSB for full/empty disambiguation
@@ -472,27 +472,30 @@ module blitter_top #(
     localparam integer TEXQ_N     = 256;
     localparam integer TEXQ_AW    = 8;      // $clog2(TEXQ_N)
     localparam integer TEXQ_TW    = 24 - TEXQ_AW;  // tag width = qtag[23:TEXQ_AW] (widens as N shrinks)
-    reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
-    reg  [TEXQ_TW-1:0] tq_tag [0:TEXQ_N-1]; // qtag[23:TEXQ_AW]
+    // tq_data + tq_tag are read ONLY by pb (B_LOOK, registered) and written ONLY by the
+    // catcher -> both infer M10K (registered-read BRAM), so neither the 64-bit data nor
+    // the 18-bit tag read is a distributed 256:1 mux on the fabric clock. This is only
+    // possible because pa no longer reads the tag RAM (it uses the last_pf_qtag filter
+    // below instead of a full residency check) — a registered+combinational mixed read of
+    // tq_tag previously crashed Quartus 17.0 Verific ("read to RAM wasn't mapped to a
+    // specific read port"), which is why the tag was distributed before.
+    (* ramstyle = "no_rw_check, M10K" *) reg [63:0] tq_data [0:TEXQ_N-1];        // cached qwords
+    (* ramstyle = "no_rw_check, M10K" *) reg [TEXQ_TW-1:0] tq_tag [0:TEXQ_N-1];  // qtag[23:TEXQ_AW]
     reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid; packed for a 1-cycle SYNCHRONOUS clear on the per-command barrier
-    // registered read of the qword cache (B_LOOK -> B_FILL). tq_data has a SINGLE
-    // registered reader (here) + single writer (catcher) -> infers M10K, removing the
-    // 64-bit distributed read mux that failed STA. The tag/valid compare is done
-    // combinationally via tq_hit() and its RESULT registered into tq_rhit (NOT the raw
-    // tag registered) — so tq_tag/tq_valid keep only combinational readers and do NOT
-    // trigger RAM inference (a registered + combinational mixed read of tq_tag crashed
-    // Quartus 17.0 Verific: "read to RAM wasn't mapped to a specific read port"). The
-    // tag-mux path now ends at the tq_rhit register (full cycle), same STA benefit.
+    // registered qword-cache read (B_LOOK -> B_FILL): raw tag/valid/data captured, hit
+    // compare done in B_FILL off the registers (short path).
     reg  [63:0]  tq_rdata;                  // registered tq_data[slot] (M10K read)
-    reg          tq_rhit;                   // registered tq_hit(b_qtag) result
+    reg  [TEXQ_TW-1:0] tq_rtag;             // registered tq_tag[slot]  (M10K read)
+    reg          tq_rvalid;                 // registered tq_valid[slot]
+    // pa best-effort prefetch de-dup: skip re-issuing a fill for the qword it just
+    // prefetched (catches the dominant consecutive-same-qword case; 4 texels share a
+    // qword). NOT a residency check — pb's B_LOOK/B_FILL demand path is the correctness
+    // backbone, so a missed skip only costs a redundant fill, never a wrong texel.
+    reg  [23:0]  last_pf_qtag;              // last qword tag pa issued a prefetch for
     // P_SRC fill arbiter: sole owner of tri_p0_rd/tri_p0_addr, single-outstanding.
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
     reg  [TEXQ_TW-1:0] fill_tag;            // tag the in-flight fill will stamp
-    // combinational hit test for a qtag against the current cache contents.
-    function automatic logic tq_hit(input logic [23:0] qt);
-        tq_hit = tq_valid[qt[TEXQ_AW-1:0]] && (tq_tag[qt[TEXQ_AW-1:0]] == qt[23:TEXQ_AW]);
-    endfunction
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
 
@@ -637,7 +640,7 @@ module blitter_top #(
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
             pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
-            fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}};
+            fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}}; last_pf_qtag<=24'hFFFFFF;
         end else begin
             bm_rd<=1'b0;
             pipe_start<=1'b0;     // single-cycle blit_start pulse to comp_pipeline
@@ -898,6 +901,7 @@ module blitter_top #(
                 // [Lever 1] drop the blitter-local qword cache exactly when jtframe ch5
                 // is invalidated — per-command (triangles in a command share the atlas).
                 tq_valid          <= {TEXQ_N{1'b0}};
+                last_pf_qtag      <= 24'hFFFFFF;   // fresh prefetch filter after invalidation
                 state<=S_STAGE_BARRIER_WAIT;
             end
             // Wait for the barrier to actually engage (busy rises) and then finish
@@ -1102,16 +1106,17 @@ module blitter_top #(
             // MUST match pb's B_IDLE unpack exactly. tri_p0_addr is now updated
             // (texbyte&~7), so its [26:3] qtag is correct.
             A_ISSUE: if (!pf_full) begin
-                // best-effort prefetch: kick a fill for this qword if not resident and the
-                // arbiter is idle. Uses the REGISTERED tri_p0_addr (no combinational add in
-                // the path) so tq_hit's 256-entry tag lookup is not chained behind texbyte's
-                // adder — keeps the fabric-clock path short. Prefetch is best-effort; pb's
-                // B_FILL demand-fetch is the correctness backbone (bit-exact either way).
-                if (!tq_hit(tri_p0_addr[26:3]) && !fill_busy) begin
-                    tri_p0_rd  <= 1'b1;
-                    fill_busy  <= 1'b1;
-                    fill_slot  <= tri_p0_addr[3+:TEXQ_AW];
-                    fill_tag   <= tri_p0_addr[3+TEXQ_AW +: TEXQ_TW];
+                // best-effort prefetch: kick a fill for this qword when the arbiter is idle
+                // and it isn't the qword we just prefetched (last_pf_qtag skips the common
+                // 4-consecutive-pixels-share-a-qword case). No tag-RAM read here — that lets
+                // tq_tag be a single-reader M10K (see decl). Prefetch is best-effort; pb's
+                // B_LOOK/B_FILL demand path is the correctness backbone (bit-exact either way).
+                if ((tri_p0_addr[26:3] != last_pf_qtag) && !fill_busy) begin
+                    tri_p0_rd    <= 1'b1;
+                    fill_busy    <= 1'b1;
+                    fill_slot    <= tri_p0_addr[3+:TEXQ_AW];
+                    fill_tag     <= tri_p0_addr[3+TEXQ_AW +: TEXQ_TW];
+                    last_pf_qtag <= tri_p0_addr[26:3];
                 end
                 pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
                     {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q, tri_p0_addr[26:3], tex_lane_q};
@@ -1132,21 +1137,21 @@ module blitter_top #(
                 pf_rd <= pf_rd + 1'b1;
                 pb <= B_LOOK;
             end
-            // Registered qword-cache read: capture tq_data[slot] into tq_rdata (its single
-            // registered reader -> M10K) and the combinational tq_hit() RESULT into tq_rhit
-            // in the SAME cycle (an atomic snapshot). B_FILL then resolves off tq_rhit/
-            // tq_rdata (short path), not off a 256-entry mux. b_qtag was registered in
-            // B_IDLE so the address/compare carry no adder.
+            // Registered qword-cache read (the M10K read cycle): capture data/tag/valid for
+            // b_qtag's slot into registers — an atomic snapshot. tq_data + tq_tag are
+            // single-reader here -> both infer M10K, so neither is a distributed mux on the
+            // fabric clock. b_qtag was registered in B_IDLE so the address carries no adder.
             B_LOOK: begin
-                tq_rdata <= tq_data[b_qtag[TEXQ_AW-1:0]];
-                tq_rhit  <= tq_hit(b_qtag);
+                tq_rdata  <= tq_data [b_qtag[TEXQ_AW-1:0]];
+                tq_rtag   <= tq_tag  [b_qtag[TEXQ_AW-1:0]];
+                tq_rvalid <= tq_valid[b_qtag[TEXQ_AW-1:0]];
                 pb <= B_FILL;
             end
-            // Resolve the texel off the REGISTERED snapshot. HIT -> latch texel_q and go to
-            // dst/blend. MISS -> demand-fetch through the single-outstanding arbiter (if
-            // idle), then B_WAIT for the in-flight fill and re-read via B_LOOK.
+            // Resolve the texel off the REGISTERED snapshot. HIT (valid & tag match) -> latch
+            // texel_q and go to dst/blend. MISS -> demand-fetch through the single-outstanding
+            // arbiter (if idle), then B_WAIT for the in-flight fill and re-read via B_LOOK.
             B_FILL: begin
-                if (tq_rhit) begin
+                if (tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
                     texel_q <= tq_rdata[b_tex_lane*16 +: 16];
                     if (tri_need_dst) begin
                         tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
