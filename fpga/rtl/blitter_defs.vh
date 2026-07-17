@@ -93,11 +93,13 @@
 `define OP_SET_TARGET         8'd11
 `define BLT_TARGET_WORK       2'd0   // composite into the WORK framebuffer (default; scanned)
 `define BLT_TARGET_APPSURF    2'd2   // composite into the off-screen app-surface (never scanned)
-// NOTE (Task 7 dependency — flag-bit conflict flagged to the lead): the plan's
-// BLT_F_SRC_SURFACE=0x40 COLLIDES with BLT_F_COLORMOD=0x40 above (taken in both
-// blitter_ref.h:138 and blitter_top.sv). The next free flag bit is 0x80. Do NOT
-// define BLT_F_SRC_SURFACE here until the value is reconciled with the engine team's
-// reference model (Task 3). Task 6 does not use it.
+// [app-surface v1] TRILIST texel-source select (Task 7): when set, the triangle
+// samples texels from the APPSURF render-target surface instead of the SDRAM heap.
+// RESOLVED to 0x80 (lead correction 2026-07-17): the plan's original 0x40 collided
+// with BLT_F_COLORMOD=0x40 (taken in blitter_ref.h:138 and blitter_top.sv); 0x80 is
+// the only free flag bit. The RTL decode + golden mirror land in Task 7 (gated on the
+// engine team's reference-model Task 3); Task 6 does not read this flag.
+`define BLT_F_SRC_SURFACE     8'h80
 // ── [PAL8 v1] source-format constants (mirror blitter_ref.h) ─────────────────────
 `define BLT_FMT_RGB565        8'd0
 `define BLT_FMT_ARGB4444      8'd1
