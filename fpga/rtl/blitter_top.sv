@@ -465,10 +465,15 @@ module blitter_top #(
     // P_SRC read fills one slot. Decouples the rasterizer's texel read (1-cyc
     // BRAM hit) from the single-outstanding P_SRC latency. Bit-exact: same
     // texel bytes, fetched earlier. See docs .../2026-07-16-trilist-lever1-*.
-    localparam integer TEXQ_N     = 256;
-    localparam integer TEXQ_AW    = 8;      // $clog2(TEXQ_N)
+    // 64 qwords: the tq_hit() tag compare is a TEXQ_N:1 distributed mux on the fabric
+    // clock; 256 left it at -0.427ns (b_qtag->tq_rhit) / -0.291ns (tri_p0_addr->fill_slot).
+    // 64 shrinks the mux ~2 LUT levels (~+1ns) to close, and still holds 32x more than the
+    // 2-line jtframe cache — the prefetch window only needs ~FIFO-depth qwords resident.
+    localparam integer TEXQ_N     = 64;
+    localparam integer TEXQ_AW    = 6;      // $clog2(TEXQ_N)
+    localparam integer TEXQ_TW    = 24 - TEXQ_AW;  // tag width = qtag[23:TEXQ_AW] (widens as N shrinks)
     reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
-    reg  [15:0] tq_tag   [0:TEXQ_N-1];      // qtag[23:TEXQ_AW]
+    reg  [TEXQ_TW-1:0] tq_tag [0:TEXQ_N-1]; // qtag[23:TEXQ_AW]
     reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid; packed for a 1-cycle SYNCHRONOUS clear on the per-command barrier
     // registered read of the qword cache (B_LOOK -> B_FILL). tq_data has a SINGLE
     // registered reader (here) + single writer (catcher) -> infers M10K, removing the
@@ -483,7 +488,7 @@ module blitter_top #(
     // P_SRC fill arbiter: sole owner of tri_p0_rd/tri_p0_addr, single-outstanding.
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
-    reg  [15:0] fill_tag;                   // tag the in-flight fill will stamp
+    reg  [TEXQ_TW-1:0] fill_tag;            // tag the in-flight fill will stamp
     // combinational hit test for a qtag against the current cache contents.
     function automatic logic tq_hit(input logic [23:0] qt);
         tq_hit = tq_valid[qt[TEXQ_AW-1:0]] && (tq_tag[qt[TEXQ_AW-1:0]] == qt[23:TEXQ_AW]);
@@ -1106,7 +1111,7 @@ module blitter_top #(
                     tri_p0_rd  <= 1'b1;
                     fill_busy  <= 1'b1;
                     fill_slot  <= tri_p0_addr[3+:TEXQ_AW];
-                    fill_tag   <= tri_p0_addr[3+TEXQ_AW +: 16];
+                    fill_tag   <= tri_p0_addr[3+TEXQ_AW +: TEXQ_TW];
                 end
                 pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
                     {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q, tri_p0_addr[26:3], tex_lane_q};
