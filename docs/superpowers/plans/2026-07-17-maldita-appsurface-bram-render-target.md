@@ -515,4 +515,108 @@ git add -A && git commit -m "deploy: app-surface fabric render target verified o
 
 ## Appendix A: Frame-graph findings (filled in by Task 1)
 
-_TODO(Task 1): record APPSURF_DETECT, APPSURF_W×H, BLIT_BLEND, BLIT_HAS_SHADER, EFFECT_FBOS, LAYER_ORDER here._
+**Capture:** `GMLOADER_FRAMEGRAPH=600` on device (`192.168.20.81`), `--preset fabric`,
+steady-state frames 600–602 (3 identical frames, confirming steady state). Raw dump in
+`.superpowers/sdd/task-1-report.md`. Instrumentation: `gmloader-next/gmloader/mister/blitter.cpp`
+(`fg_window()` + `FG ` trace lines, gated on `getenv("GMLOADER_FRAMEGRAPH")`).
+
+**Observed per-frame structure (identical across f=600,601,602):**
+
+```
+bindFBO fbo=1
+  d# fbo=1 fbotex=4 srctex=5 prog=6 blend=ALPHA vp=[0,0,288,216] scr=[56,60..232,362]
+  d# fbo=1 fbotex=4 srctex=7 prog=6 blend=ALPHA vp=[0,0,288,216] scr=[56,68..218,176]
+  d# fbo=1 fbotex=4 srctex=5 prog=6 blend=ALPHA vp=[0,0,288,216] scr=[148,172..151,176]
+  d# fbo=1 fbotex=4 srctex=7 prog=6 blend=ALPHA vp=[0,0,288,216] scr=[56,178..212,236]
+  d# fbo=1 fbotex=4 srctex=6 prog=6 blend=ALPHA vp=[0,0,288,216] scr=[0,0..256,318]
+bindFBO fbo=0
+  d# fbo=0 fbotex=0 srctex=4 prog=6 blend=ALPHA vp=[0,0,320,240] scr=[0,-0..320,240]
+  d# fbo=0 fbotex=0 srctex=4 prog=6 blend=ALPHA vp=[0,0,320,240] scr=[0,-0..320,240]
+  d# fbo=0 fbotex=0 srctex=6 prog=6 blend=ALPHA vp=[0,0,320,240] scr=[0,-0..320,240]
+```
+
+- **`APPSURF_DETECT`** — FBO id **1**, color-attachment texture id **4** (fbotex=4).
+  Confirmed by the rule: FBO 1 recurs as a render target every frame, and its color
+  texture (id 4) later appears as `srctex` in a `fbo=0` fullscreen draw
+  (`vp=[0,0,320,240]`, `scr=[0,-0..320,240]`).
+- **`APPSURF_W`, `APPSURF_H`** — **288×216** (the viewport bound while FBO 1 is the
+  render target). ≤ 320×240 as assumed; 288×216 = 320×240 × 0.9 (same 4:3 aspect,
+  scaled — consistent with a small on-screen border/frame around the game view).
+- **`BLIT_BLEND`** — **ALPHA** (`GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`) for both `fbo=0`
+  draws sampling `srctex=4` (the surface).
+- **`BLIT_HAS_SHADER`** — **false**. Every draw in the window — into FBO 1 and into
+  FBO 0, including the surface→screen draws — uses `prog=6`, the same program as the
+  scene draws. No distinct shader program is bound for the surface blit.
+- **`EFFECT_FBOS`** — **none observed** in this window: only FBO 1 (app surface) and
+  FBO 0 (default) are bound across all 3 captured frames. See caveat below re: `tex=6`.
+
+**`LAYER_ORDER` — ⚠️ CONTRADICTS the spec's stated assumption.** The design doc
+(`docs/superpowers/specs/2026-07-17-maldita-appsurface-bram-render-target-design.md`,
+"Problem" section) states, from an earlier (non-steady-state, likely boot/intro) trace:
+`backgrounds → DEF (blend=NONE, then ALPHA) → surface → DEF (ALPHA) LAST`. The
+steady-state gameplay frame captured here shows a **different** order:
+
+1. Scene rendered into the app surface (FBO 1): 5 draws, textures 5/7/5/7/**6**.
+2. `SET_TARGET`-equivalent to `DEF`/WORK: the app surface (`srctex=4`) is drawn to
+   `DEF` **twice**, back-to-back, identical params (blend=ALPHA, fullscreen) — not a
+   single blit as assumed.
+3. **After** the surface blit(s), one more fullscreen ALPHA draw to `DEF` samples
+   `srctex=6` — the *same* texture id used as the topmost layer inside the app surface
+   in step 1.
+
+So in this steady-state frame there is **no "backgrounds → WORK" phase preceding the
+surface blit at all** — the surface is composited *first* against whatever WORK already
+holds (presumably cleared to a border/backdrop color, not observed as a draw in this
+window), and `tex=6` is layered *on top of* the surface afterward, not behind it.
+
+**Corroborating evidence from the existing boot-time trace (`BLIT draw#`, `LOG_FIRST=24`,
+same run, draws 1–24, well before frame 600):**
+
+```
+draw#1  rt=FBO tex=5(2048x2048)              sprite → surface FBO
+draw#2  rt=DEF  tex=4(512x256)  blend=NONE   background atlas → DEF (opaque)
+draw#3  rt=DEF  tex=4(512x256)  blend=ALPHA  background atlas → DEF
+draw#4  rt=DEF  tex=4(512x256)  blend=ALPHA  background atlas → DEF
+draw#5  rt=DEF  tex=6(2048x2048) blend=ALPHA the surface → DEF, LAST   (repeats every ~4 draws)
+```
+
+This *does* match the spec's assumed order (background(s) → DEF, surface → DEF last) —
+but note the **texture ids mean something different here than at frame 600**: at boot,
+`tex=4` is a small 512×256 background-tile atlas and `tex=6` is a 2048×2048 texture
+matching a GameMaker application-surface page (sampled fullscreen, last, into DEF). By
+frame 600, `tex=4` is FBO 1's *own* color attachment (the surface itself, confirmed via
+`fbotex=4` in the `FG` dump) and `tex=6` is something else again (used mid-scene inside
+the surface, then again after the surface blit). GL texture/FBO names are recycled
+across the run (room transitions / surface recreation reallocate ids), so **the boot
+trace's ids do not carry over to steady state** — this is not just a numbering artifact
+of my read; the *structural* order genuinely differs: boot = background(s)-then-surface;
+steady-state (frame 600+) = surface-then-something-else. The spec's "Problem" section
+appears to have been written from a boot/intro-frame trace, not steady-state gameplay.
+
+**Analysis / why this likely does not block the plan mechanically, but needs eyes-on
+before Task 2:** `tex=6` never appears as an `attachTex`/render-target FBO in this or
+any of the 3 captured frames (no second `bindFBO` besides FBO 1), so it is most likely a
+plain uploaded texture (a static border/letterbox-frame graphic — 288×216 is exactly
+320×240 scaled by 0.9, leaving a ~16px margin the border would fill), not a second
+render-target surface requiring `EFFECT_FBOS` handling. The plan's Task 5 routing is
+per-draw (target/source based), not order-based, so a draw that neither targets nor
+samples the app-surface FBO (like the `tex=6` draw) should pass through the existing
+`DEF`-target fabric path unaffected regardless of when it fires relative to the surface
+blit. However: (a) the **duplicate** surface→WORK draw (identical params, twice) is
+unexplained and un-budgeted for in the plan's per-frame data flow (Task 5's "Produces"
+clause assumes one SET_TARGET+TRILIST pair for the blit); (b) `tex=6`'s true nature
+(border art vs. some other GM surface not rebound every frame, e.g. an FBO configured
+once at boot and never re-bound in steady state — which this capture window cannot rule
+out) is inferred, not confirmed. Given the explicit gate condition in Task 1's brief
+("if LAYER_ORDER ... contradicts the spec's assumption ... STOP"), this warrants review
+before Task 2 proceeds, rather than silently reconciling it.
+
+**Recommendation:** either (1) confirm `tex=6` is static border art (e.g. instrument
+`Blitter_OnTexImage2D` for tex id 6 to log its dimensions/upload frequency — a
+per-frame-changing tex=6 would rule out "static border"), and revise the spec's
+`LAYER_ORDER` language to "per-draw target/source routing, order-independent" rather
+than "surface composited last over backgrounds"; or (2) if `tex=6` turns out to be
+FBO-backed, add it to `EFFECT_FBOS` (SW fallback, in scope already) before Task 2.
+Also confirm whether the duplicate `srctex=4` draw is intentional (harmless if truly
+identical — same source, same blend, same target) or a GM-side artifact worth
+understanding before wiring `Task 5`'s one-blit-per-frame assumption.
