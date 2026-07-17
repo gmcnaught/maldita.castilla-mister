@@ -419,9 +419,14 @@ module blitter_top #(
     // pipe drains before the next triangle's setup), so they need no snapshot.
     localparam [2:0] A_PIX=3'd0, A_MUL0=3'd1, A_MUL1=3'd2, A_MUL=3'd3,
                      A_ADDR=3'd4, A_ADDR2=3'd5, A_ISSUE=3'd6, A_DONE=3'd7;
-    localparam [2:0] B_IDLE=3'd0, B_DSTW=3'd2, B_DSTC=3'd3,
-                     B_WR=3'd4, B_WR2=3'd5, B_WR3=3'd6, B_FILL=3'd7;
-    reg  [2:0]   pa, pb;                   // the two concurrent sub-FSM states
+    // pb widened to 4 bits: the qword-BRAM read is pipelined through B_LOOK (present the
+    // slot as a REGISTERED read address so tq_data infers M10K) and B_WAIT (stall on a
+    // demand/prefetch fill, then re-read). This breaks the b_qtag -> 256-entry distributed
+    // tag/data mux -> dst_q combinational path that failed STA at -1.732ns on the fabric clk.
+    localparam [3:0] B_IDLE=4'd0, B_LOOK=4'd1, B_FILL=4'd2, B_WAIT=4'd3,
+                     B_DSTW=4'd4, B_DSTC=4'd5, B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8;
+    reg  [2:0]   pa;                       // address-gen sub-FSM state
+    reg  [3:0]   pb;                       // consume+blend sub-FSM state
     // [Task 2] depth-D payload FIFO decouples pa from pb: pa pushes each pixel's
     // payload as it finishes address-gen and races ahead up to TEXFIFO_D pixels; pb
     // pops the head and resolves/blends. Replaces the old single-deep h_full handoff.
@@ -465,6 +470,12 @@ module blitter_top #(
     reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
     reg  [15:0] tq_tag   [0:TEXQ_N-1];      // qtag[23:TEXQ_AW]
     reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid; packed for a 1-cycle SYNCHRONOUS clear on the per-command barrier
+    // registered read of the qword cache (B_LOOK -> B_FILL). Registering the read address
+    // (b_qtag's slot) lets tq_data infer as M10K (registered-read BRAM) and moves the
+    // hit-compare + texel-lane select onto registered data — the STA fix.
+    reg  [63:0]  tq_rdata;                  // registered tq_data[slot]
+    reg  [15:0]  tq_rtag;                   // registered tq_tag[slot]
+    reg          tq_rvalid;                 // registered tq_valid[slot]
     // P_SRC fill arbiter: sole owner of tri_p0_rd/tri_p0_addr, single-outstanding.
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
@@ -638,11 +649,13 @@ module blitter_top #(
                 if (pipe_busy) perf_pipe_cyc <= perf_pipe_cyc + 32'd1;
                 // [profiling] all TRILIST states are 45..63 (highest state values)
                 if (state >= S_TRI_VFETCH) perf_tri_cyc <= perf_tri_cyc + 32'd1;
-                // cycles the consume sub-FSM (pb) stalls waiting on the per-pixel texel
-                // fetch in B_FILL. With the A||B overlap these are cycles where A may
-                // still be doing productive address-gen work, so dpath=(tri-texwait) is a
-                // conservative proxy; tri_cyc/covered is the true wall-clock throughput.
-                if ((state==S_TRI_PIX) && (pb==B_FILL) && !tq_hit(b_qtag))
+                // cycles the consume sub-FSM (pb) stalls in B_WAIT waiting on the per-pixel
+                // texel fetch (a demand/prefetch fill in flight). With the A||B overlap
+                // these are cycles where A may still be doing productive address-gen work,
+                // so dpath=(tri-texwait) is a conservative proxy; tri_cyc/covered is the true
+                // wall-clock throughput. (Counting B_WAIT rather than a tq_hit() read keeps
+                // the wide tag mux off the perf-counter's combinational path.)
+                if ((state==S_TRI_PIX) && (pb==B_WAIT))
                     perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
@@ -1108,29 +1121,47 @@ module blitter_top #(
             B_IDLE: if (!pf_empty) begin
                 {b_ca, b_cb, b_cg, b_cr, b_dst_qw, b_dst_lane, b_qtag, b_tex_lane} <= pf_head;
                 pf_rd <= pf_rd + 1'b1;
+                pb <= B_LOOK;
+            end
+            // Registered qword-BRAM read: present b_qtag's slot as the read address and
+            // capture tq_data/tq_tag/tq_valid into registers. This is the M10K read cycle
+            // (registered address -> registered data), so the HIT compare + texel-lane
+            // select in B_FILL run off tq_r* (short path), not off a 256-entry mux of the
+            // raw arrays. b_qtag was registered in B_IDLE, so the address carries no adder.
+            B_LOOK: begin
+                tq_rdata  <= tq_data [b_qtag[TEXQ_AW-1:0]];
+                tq_rtag   <= tq_tag  [b_qtag[TEXQ_AW-1:0]];
+                tq_rvalid <= tq_valid[b_qtag[TEXQ_AW-1:0]];
                 pb <= B_FILL;
             end
-            // Resolve the texel from the local qword BRAM. HIT -> latch texel_q and go
-            // to dst/blend. MISS -> demand-fetch through the single-outstanding arbiter
-            // (if idle) and stay here; the always-listening catcher fills the slot, then
-            // tq_hit passes on a later cycle. If a fill is already in flight, just wait.
+            // Resolve the texel off the REGISTERED read. HIT (valid & tag match) -> latch
+            // texel_q and go to dst/blend. MISS -> demand-fetch through the single-
+            // outstanding arbiter (if idle), then B_WAIT for the in-flight fill and re-read.
             B_FILL: begin
-                if (tq_hit(b_qtag)) begin
-                    texel_q <= tq_data[b_qtag[TEXQ_AW-1:0]][b_tex_lane*16 +: 16];
+                if (tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
+                    texel_q <= tq_rdata[b_tex_lane*16 +: 16];
                     if (tri_need_dst) begin
                         tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
                     end else begin dst_q <= 16'd0; pb<=B_WR; end
-                end else if (!fill_busy) begin
-                    // demand-fetch (arbiter idle): issue the read for b_qtag's qword.
-                    tri_p0_rd  <= 1'b1;
-                    tri_p0_addr<= {b_qtag, 3'd0};
-                    fill_busy  <= 1'b1;
-                    fill_slot  <= b_qtag[TEXQ_AW-1:0];
-                    fill_tag   <= b_qtag[23:TEXQ_AW];
-                    // stay in B_FILL; the catcher fills the slot, then tq_hit passes.
+                end else begin
+                    if (!fill_busy) begin
+                        // demand-fetch (arbiter idle): issue the read for b_qtag's qword.
+                        tri_p0_rd  <= 1'b1;
+                        tri_p0_addr<= {b_qtag, 3'd0};
+                        fill_busy  <= 1'b1;
+                        fill_slot  <= b_qtag[TEXQ_AW-1:0];
+                        fill_tag   <= b_qtag[23:TEXQ_AW];
+                    end
+                    // wait for the in-flight fill (ours or pa's speculation) to land, then
+                    // re-read via B_LOOK. Re-checking is required because our registered
+                    // read is now stale, and pa's fill may have been for a different qword.
+                    pb <= B_WAIT;
                 end
-                // else: a fill (ours or pa's speculation) is in flight -> wait here.
             end
+            // Stall until the single outstanding fill lands (catcher writes tq_data[slot]
+            // and clears fill_busy), then re-issue the registered read. On device this is
+            // the per-pixel texel-fetch wait; the perf counter attributes it to texwait.
+            B_WAIT: if (!fill_busy) pb <= B_LOOK;
             // comp_fbram read has 1-cycle latency: B_DSTW presents rd_en, B_DSTC
             // captures the registered qword and lane-selects the dst pixel.
             B_DSTW: pb<=B_DSTC;
