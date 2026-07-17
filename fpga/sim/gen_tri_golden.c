@@ -164,6 +164,11 @@ static blt_vtx_t verts[6];
 static int       ntris = 0;
 static blt_cmd_t hdr;
 static uint16_t  fb[FB_W*FB_H];
+/* [app-surface v1] the app-surface texel source for a BLT_F_SRC_SURFACE scene. Filled
+ * by the tri_surface scenario; passed to blt_raster_tri and emitted as <scen>_surf.hex
+ * so the RTL testbench backdoor-loads the SAME image into comp_fbram's surface bank. */
+static uint16_t  surface_img[FB_W*FB_H];
+static int       uses_surface = 0;
 
 static blt_vtx_t VTX(int px, int py, int u, int v, uint8_t cr, uint8_t cg, uint8_t cb, uint8_t ca) {
     blt_vtx_t t;
@@ -278,6 +283,32 @@ static int build(const char *s) {
         };
         put_verts(v,6);
         set_hdr(BLT_BLEND_COPY, 8,8,16, 0, 255);
+    } else if (!strcmp(s, "tri_surface")) {
+        /* [app-surface v1] sample-surface-as-texture (BLT_F_SRC_SURFACE). A
+         * fullscreen quad whose UV == position (12.4, no half-texel bias), so
+         * destination pixel (px,py) samples surface texel (px+1,py+1) -- the
+         * existing rasterizer +1 sample-point convention (see the refmodel
+         * test_surface_src comment). No SDRAM texture: the texel source is the
+         * app-surface, backdoor-loaded into the RTL surface bank from surf.hex.
+         * The surface is a deterministic per-pixel pattern so the +1 offset and
+         * the fixed 320x240 clamp are both exercised pixel-exactly. */
+        uses_surface = 1;
+        for (int y=0;y<FB_H;y++) for (int x=0;x<FB_W;x++)
+            surface_img[y*FB_W+x] = (uint16_t)((((x*5)&0x1F)<<11) |
+                                               (((y*3)&0x3F)<<5) | ((x+y)&0x1F));
+        blt_vtx_t v[6] = {
+            VTX(0,   0,    0,        0,        255,255,255,255),
+            VTX(FB_W,0,    FB_W*16,  0,        255,255,255,255),
+            VTX(FB_W,FB_H, FB_W*16,  FB_H*16,  255,255,255,255),
+            VTX(0,   0,    0,        0,        255,255,255,255),
+            VTX(FB_W,FB_H, FB_W*16,  FB_H*16,  255,255,255,255),
+            VTX(0,   FB_H, 0,        FB_H*16,  255,255,255,255),
+        };
+        put_verts(v,6);
+        /* tw/th/stride are IGNORED for a surface source (clamp is a fixed
+         * 320x240); pass 0 to prove the RTL does not consult src_x/src_y. */
+        set_hdr(BLT_BLEND_COPY, 0,0,0, 0, 255);
+        hdr.flags = (uint8_t)BLT_F_SRC_SURFACE;
     } else {
         fprintf(stderr, "unknown scenario '%s'\n", s);
         return -1;
@@ -292,7 +323,7 @@ int main(int argc, char **argv) {
     /* --- golden framebuffer: blue clear + blt_raster_tri (THE golden math) --- */
     for (int i=0;i<FB_W*FB_H;i++) fb[i] = (uint16_t)BLUE;
     blt_surface_heap_t sh = { heap, heap_len, 0, 0 };
-    blt_raster_tri(fb, &sh, &hdr, verts, ntris);
+    blt_raster_tri(fb, &sh, &hdr, verts, ntris, surface_img);
 
     /* --- ring: TRILIST header + END, wire-packed --- */
     blt_cmd_t end_cmd; memset(&end_cmd, 0, sizeof end_cmd);
@@ -328,7 +359,20 @@ int main(int argc, char **argv) {
     for (int i=0;i<FB_W*FB_H;i++) fprintf(fe, "%04x\n", fb[i]);
     fclose(fe);
 
-    printf("gen_tri_golden: scenario=%s ntris=%d heap=%uB -> %s , %s\n",
-           argv[1], ntris, (unsigned)heap_len, ddrpath, exppath);
+    /* [app-surface v1] surf.hex: the app-surface texel source, pixel-linear
+     * (line = y*320+x), one RGB565 per line. The testbench $readmemh's this and
+     * backdoor-loads comp_fbram's surface bank so the RTL samples the SAME image. */
+    if (uses_surface) {
+        char surfpath[256];
+        snprintf(surfpath, sizeof surfpath, "vectors/%s_surf.hex", argv[1]);
+        FILE *fs = fopen(surfpath, "w");
+        if (!fs) { perror("fopen surf.hex"); return 1; }
+        for (int i=0;i<FB_W*FB_H;i++) fprintf(fs, "%04x\n", surface_img[i]);
+        fclose(fs);
+    }
+
+    printf("gen_tri_golden: scenario=%s ntris=%d heap=%uB -> %s , %s%s\n",
+           argv[1], ntris, (unsigned)heap_len, ddrpath, exppath,
+           uses_surface ? " (+surf.hex)" : "");
     return 0;
 }

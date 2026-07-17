@@ -200,8 +200,11 @@ module blitter_top #(
                      F_SRC_FB=8'h20,     // [retired] was the carry-forward FB->FB copy flag;
                                          // no longer emitted (FB-in-BRAM), now a no-op. Kept in
                                          // the protocol constants for ring-format compatibility.
-                     F_COLORMOD=8'h40;   // [v2 escape-elim] _pad bytes carry an RGB888 tint
+                     F_COLORMOD=8'h40,   // [v2 escape-elim] _pad bytes carry an RGB888 tint
                                          // (cr,cg,cb) modulating the SOURCE before the blend.
+                     F_SRC_SURFACE=`BLT_F_SRC_SURFACE; // [app-surface v1] TRILIST: sample the
+                                         // off-screen APPSURF render target as this draw's texel
+                                         // source instead of the SDRAM heap (0x80).
     // Source pixel formats (cmd.format). Both are 16bpp: RGB565 and ARGB4444
     // ({A4,R4,G4,B4}); BLEND_PALPHA just reinterprets the fetched 16-bit source
     // pixel. comp_pipeline owns the source addressing/fetch now.
@@ -448,7 +451,10 @@ module blitter_top #(
     // demand/prefetch fill, then re-read). This breaks the b_qtag -> 256-entry distributed
     // tag/data mux -> dst_q combinational path that failed STA at -1.732ns on the fabric clk.
     localparam [3:0] B_IDLE=4'd0, B_LOOK=4'd1, B_FILL=4'd2, B_WAIT=4'd3,
-                     B_DSTW=4'd4, B_DSTC=4'd5, B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8;
+                     B_DSTW=4'd4, B_DSTC=4'd5, B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8,
+                     // [app-surface v1] surface texel read: issue surf_rd (B_SURF_W is the
+                     // 1-cyc BRAM latency), latch the texel (B_SURF_C), then dst/blend.
+                     B_SURF_W=4'd9, B_SURF_C=4'd10;
     reg  [2:0]   pa;                       // address-gen sub-FSM state
     reg  [3:0]   pb;                       // consume+blend sub-FSM state
     // [Task 2] depth-D payload FIFO decouples pa from pb: pa pushes each pixel's
@@ -483,6 +489,12 @@ module blitter_top #(
     reg          tri_p0_rd;   reg [26:0] tri_p0_addr;
     reg          tri_fb_rd_en; reg [14:0] tri_fb_rd_qw;
     reg          tri_fb_wr_en; reg [14:0] tri_fb_wr_qw; reg [1:0] tri_fb_wr_lane; reg [15:0] tri_fb_wr_pix;
+    // [app-surface v1] TRILIST texel-source = surface (BLT_F_SRC_SURFACE). Latched at
+    // OP_TRILIST setup. The surface texel read is a 1-cyc comp_fbram surf_rd BRAM hit
+    // (NO tq cache / P_SRC): surf_qw_q/lane computed in A_ADDR2, read in B_SURF_*.
+    reg          tri_src_surface;
+    reg          tri_surf_rd_en; reg [14:0] tri_surf_rd_qw;   // drive comp_fbram surf_rd port
+    reg  [14:0]  surf_qw_q;      // A_ADDR2 surface qword (itv*80 + itu>>2), pushed to the FIFO
 
     // ── Lever 1: blitter-local prefetching qword texel cache ────────────────
     // Direct-mapped BRAM of TEXQ_N qwords; slot = qtag[TEXQ_AW-1:0]; a single
@@ -664,6 +676,7 @@ module blitter_top #(
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
+            tri_surf_rd_en<=1'b0; tri_src_surface<=1'b0;   // [app-surface v1]
             pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
             fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}}; last_pf_qtag<=24'hFFFFFF;
         end else begin
@@ -673,6 +686,7 @@ module blitter_top #(
             tri_p0_rd<=1'b0;      // single-cycle P_SRC texel read pulse
             tri_fb_rd_en<=1'b0;   // single-cycle comp_fbram dst read
             tri_fb_wr_en<=1'b0;   // single-cycle comp_fbram composite write
+            tri_surf_rd_en<=1'b0; // [app-surface v1] single-cycle surface texel read
             stage_barrier<=1'b0;  // single-cycle barrier request unless re-asserted in S_STAGE_BARRIER
             src_sdram_we<=1'b0;   // single-cycle write request unless re-asserted (held in S_STAGE_WR_WAIT)
             stage_we_burst_fsm<=1'b0; // single-cycle burst-write request unless re-asserted
@@ -867,6 +881,9 @@ module blitter_top #(
                     tri_idx      <= 16'd0;
                     tri_entry_qw <= `SRC_QW + ({c_dst_y, c_dst_x} >> 3);
                     tri_busy     <= 1'b1;
+                    // [app-surface v1] texel source = off-screen APPSURF surface when set,
+                    // else the SDRAM heap. Stable for the whole command (drains before next).
+                    tri_src_surface <= (c_flags & F_SRC_SURFACE) != 8'd0;
                     if (c_w == 16'd0) begin tri_busy<=1'b0; state<=S_NEXT_CMD; end
                     else                    state<=S_TRI_VFETCH;
                 end
@@ -1093,8 +1110,11 @@ module blitter_top #(
                 rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
                 itu   = (rnd_u + 64'sd8) >>> 4;
                 itv   = (rnd_v + 64'sd8) >>> 4;
-                tw1r  = c_src_x - 16'd1;
-                th1r  = c_src_y - 16'd1;
+                // [app-surface v1] clamp bound: for a surface source the texel extent is the
+                // FIXED 320x240 surface (c_src_x/c_src_y are NOT consulted — they may be 0),
+                // matching the refmodel tex_nearest_surface; else the command's tex_w/tex_h.
+                tw1r  = tri_src_surface ? (`FB_W - 16'd1) : (c_src_x - 16'd1);
+                th1r  = tri_src_surface ? (`FB_H - 16'd1) : (c_src_y - 16'd1);
                 if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
                 if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
                 itu_q <= itu; itv_q <= itv;   // registered for the S_TRI_ADDR multiply
@@ -1119,19 +1139,29 @@ module blitter_top #(
             // Doing it combinationally into the address add was an ~8.9 ns multiply
             // feeding tri_p0_addr (the -2.0 ns worst path).
             A_ADDR: begin
-                tex_row <= itv_q[15:0] * c_src_stride;
+                // [app-surface v1] row stride: a surface row is 80 qwords (320 px) wide;
+                // an SDRAM texture row is c_src_stride BYTES. Same registered 16x16 DSP.
+                tex_row <= itv_q[15:0] * (tri_src_surface ? 16'd80 : c_src_stride);
                 pa<=A_ADDR2;
             end
             // Interpolation stage 3b: texel byte address add + P_SRC read (adds
             // only; no multiply). One extra cycle per covered pixel, negligible vs.
             // the SDRAM texel-read wait.
             A_ADDR2: begin
-                // texel byte address (8-byte aligned; lane = byte[2:1]). Only the
-                // adds + register writes live here; the prefetch fill-kick moved to
-                // A_ISSUE so tq_hit's tag lookup is not chained behind texbyte's adder.
-                texbyte = c_src_off + tex_row + (itu_q<<<1);
-                tri_p0_addr <= texbyte[26:0] & ~27'h7;
-                tex_lane_q  <= texbyte[2:1];
+                if (tri_src_surface) begin
+                    // [app-surface v1] surface qword = itv*80 + (itu>>2), lane = itu[1:0].
+                    // tex_row already holds itv*80 (qwords). No SDRAM byte address / P_SRC
+                    // read — the texel is a 1-cyc comp_fbram surf_rd hit (B_SURF_*).
+                    surf_qw_q  <= tex_row[14:0] + {2'b0, itu_q[14:2]};   // itu>>2
+                    tex_lane_q <= itu_q[1:0];
+                end else begin
+                    // texel byte address (8-byte aligned; lane = byte[2:1]). Only the
+                    // adds + register writes live here; the prefetch fill-kick moved to
+                    // A_ISSUE so tq_hit's tag lookup is not chained behind texbyte's adder.
+                    texbyte = c_src_off + tex_row + (itu_q<<<1);
+                    tri_p0_addr <= texbyte[26:0] & ~27'h7;
+                    tex_lane_q  <= texbyte[2:1];
+                end
                 pa<=A_ISSUE;
             end
             // Push this pixel's payload into the depth-D FIFO. Stall only when the FIFO
@@ -1144,15 +1174,19 @@ module blitter_top #(
                 // 4-consecutive-pixels-share-a-qword case). No tag-RAM read here — that lets
                 // tq_tag be a single-reader M10K (see decl). Prefetch is best-effort; pb's
                 // B_LOOK/B_FILL demand path is the correctness backbone (bit-exact either way).
-                if ((tri_p0_addr[26:3] != last_pf_qtag) && !fill_busy) begin
+                // [app-surface v1] no SDRAM prefetch for a surface source (the texel is a
+                // 1-cyc surf_rd BRAM hit, no tq cache); guard the fill-kick on !surface.
+                if (!tri_src_surface && (tri_p0_addr[26:3] != last_pf_qtag) && !fill_busy) begin
                     tri_p0_rd    <= 1'b1;
                     fill_busy    <= 1'b1;
                     fill_slot    <= tri_p0_addr[3+:TEXQ_AW];
                     fill_tag     <= tri_p0_addr[3+TEXQ_AW +: TEXQ_TW];
                     last_pf_qtag <= tri_p0_addr[26:3];
                 end
+                // qtag field carries the SDRAM qword tag, or (surface) surf_qw zero-extended.
                 pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
-                    {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q, tri_p0_addr[26:3], tex_lane_q};
+                    {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q,
+                     (tri_src_surface ? {9'd0, surf_qw_q} : tri_p0_addr[26:3]), tex_lane_q};
                 pf_wr <= pf_wr + 1'b1;
                 pa<=A_PIX;
             end
@@ -1168,7 +1202,23 @@ module blitter_top #(
             B_IDLE: if (!pf_empty) begin
                 {b_ca, b_cb, b_cg, b_cr, b_dst_qw, b_dst_lane, b_qtag, b_tex_lane} <= pf_head;
                 pf_rd <= pf_rd + 1'b1;
-                pb <= B_LOOK;
+                if (tri_src_surface) begin
+                    // [app-surface v1] issue the surface texel read now. surf_qw is the low
+                    // 15 bits of the qtag field (pf_head[16:2]); b_qtag isn't valid until
+                    // next cycle so read the qword straight off the FIFO head.
+                    tri_surf_rd_en <= 1'b1; tri_surf_rd_qw <= pf_head[2 +: 15];
+                    pb <= B_SURF_W;
+                end else pb <= B_LOOK;
+            end
+            // [app-surface v1] surface texel path: B_SURF_W is the 1-cyc surf_rd BRAM
+            // latency; B_SURF_C latches the texel (lane-select), then dst-read/blend —
+            // mirrors B_FILL's HIT tail (no tq cache, no P_SRC).
+            B_SURF_W: pb <= B_SURF_C;
+            B_SURF_C: begin
+                texel_q <= surf_rd_qword[b_tex_lane*16 +: 16];
+                if (tri_need_dst) begin
+                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
+                end else begin dst_q <= 16'd0; pb<=B_WR; end
             end
             // Registered qword-cache read (the M10K read cycle): capture data/tag/valid for
             // b_qtag's slot into registers — an atomic snapshot. tq_data + tq_tag are
@@ -1499,9 +1549,13 @@ module blitter_top #(
     // WORK read port: snapshot (always WORK) wins; else the compositor when target==WORK.
     assign fb_rd_en = snap_busy ? snap_rd_en : (appsurf_active ? 1'b0 : cr_en);
     assign fb_rd_qw = snap_busy ? snap_rd_qw : cr_qw;
-    // SURFACE read port: the compositor when target==APPSURF (snapshot never reads it).
-    assign surf_rd_en = (!snap_busy && appsurf_active) ? cr_en : 1'b0;
-    assign surf_rd_qw = cr_qw;
+    // SURFACE read port: two mutually-exclusive users, selected by comp_target.
+    //  - APPSURF (compositing INTO the surface): the composite RMW read (Task 6).
+    //  - WORK (compositing into WORK): the TRILIST surface texel sample (Task 7,
+    //    BLT_F_SRC_SURFACE) — the tri walk reads the surface as its texture. These
+    //    never overlap (target is one or the other), so one 1W1R read port suffices.
+    assign surf_rd_en = appsurf_active ? (snap_busy ? 1'b0 : cr_en) : tri_surf_rd_en;
+    assign surf_rd_qw = appsurf_active ? cr_qw : tri_surf_rd_qw;
 
     // Read result back to the renderer: surface when compositing APPSURF, else WORK.
     // comp_target is stable across a whole blit (it only moves at SET_TARGET, between

@@ -14,7 +14,7 @@ REFMODEL  := ../../../mister-fpga-blitter/refmodel
 CC        ?= cc
 CFLAGS    ?= -O2 -Wall
 
-SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad
+SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface
 
 .PHONY: all vectors clean
 all: gen_tri_golden
