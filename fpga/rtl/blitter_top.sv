@@ -470,12 +470,16 @@ module blitter_top #(
     reg  [63:0] tq_data  [0:TEXQ_N-1];      // cached qwords
     reg  [15:0] tq_tag   [0:TEXQ_N-1];      // qtag[23:TEXQ_AW]
     reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid; packed for a 1-cycle SYNCHRONOUS clear on the per-command barrier
-    // registered read of the qword cache (B_LOOK -> B_FILL). Registering the read address
-    // (b_qtag's slot) lets tq_data infer as M10K (registered-read BRAM) and moves the
-    // hit-compare + texel-lane select onto registered data — the STA fix.
-    reg  [63:0]  tq_rdata;                  // registered tq_data[slot]
-    reg  [15:0]  tq_rtag;                   // registered tq_tag[slot]
-    reg          tq_rvalid;                 // registered tq_valid[slot]
+    // registered read of the qword cache (B_LOOK -> B_FILL). tq_data has a SINGLE
+    // registered reader (here) + single writer (catcher) -> infers M10K, removing the
+    // 64-bit distributed read mux that failed STA. The tag/valid compare is done
+    // combinationally via tq_hit() and its RESULT registered into tq_rhit (NOT the raw
+    // tag registered) — so tq_tag/tq_valid keep only combinational readers and do NOT
+    // trigger RAM inference (a registered + combinational mixed read of tq_tag crashed
+    // Quartus 17.0 Verific: "read to RAM wasn't mapped to a specific read port"). The
+    // tag-mux path now ends at the tq_rhit register (full cycle), same STA benefit.
+    reg  [63:0]  tq_rdata;                  // registered tq_data[slot] (M10K read)
+    reg          tq_rhit;                   // registered tq_hit(b_qtag) result
     // P_SRC fill arbiter: sole owner of tri_p0_rd/tri_p0_addr, single-outstanding.
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
@@ -1123,22 +1127,21 @@ module blitter_top #(
                 pf_rd <= pf_rd + 1'b1;
                 pb <= B_LOOK;
             end
-            // Registered qword-BRAM read: present b_qtag's slot as the read address and
-            // capture tq_data/tq_tag/tq_valid into registers. This is the M10K read cycle
-            // (registered address -> registered data), so the HIT compare + texel-lane
-            // select in B_FILL run off tq_r* (short path), not off a 256-entry mux of the
-            // raw arrays. b_qtag was registered in B_IDLE, so the address carries no adder.
+            // Registered qword-cache read: capture tq_data[slot] into tq_rdata (its single
+            // registered reader -> M10K) and the combinational tq_hit() RESULT into tq_rhit
+            // in the SAME cycle (an atomic snapshot). B_FILL then resolves off tq_rhit/
+            // tq_rdata (short path), not off a 256-entry mux. b_qtag was registered in
+            // B_IDLE so the address/compare carry no adder.
             B_LOOK: begin
-                tq_rdata  <= tq_data [b_qtag[TEXQ_AW-1:0]];
-                tq_rtag   <= tq_tag  [b_qtag[TEXQ_AW-1:0]];
-                tq_rvalid <= tq_valid[b_qtag[TEXQ_AW-1:0]];
+                tq_rdata <= tq_data[b_qtag[TEXQ_AW-1:0]];
+                tq_rhit  <= tq_hit(b_qtag);
                 pb <= B_FILL;
             end
-            // Resolve the texel off the REGISTERED read. HIT (valid & tag match) -> latch
-            // texel_q and go to dst/blend. MISS -> demand-fetch through the single-
-            // outstanding arbiter (if idle), then B_WAIT for the in-flight fill and re-read.
+            // Resolve the texel off the REGISTERED snapshot. HIT -> latch texel_q and go to
+            // dst/blend. MISS -> demand-fetch through the single-outstanding arbiter (if
+            // idle), then B_WAIT for the in-flight fill and re-read via B_LOOK.
             B_FILL: begin
-                if (tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
+                if (tq_rhit) begin
                     texel_q <= tq_rdata[b_tex_lane*16 +: 16];
                     if (tri_need_dst) begin
                         tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
