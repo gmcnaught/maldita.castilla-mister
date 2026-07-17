@@ -17,14 +17,21 @@ CFLAGS    ?= -O2 -Wall
 SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface
 
 .PHONY: all vectors clean
-all: gen_tri_golden
+all: gen_tri_golden gen_system_golden
 
 gen_tri_golden: gen_tri_golden.c blt_tri.c
 	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_tri_golden.c
 
-vectors: gen_tri_golden
+# [app-surface v1] Task 8 full-frame integration golden: a two-pass ring executed
+# by the reference blt_execute() (surface render + sample). Emits the ring + vertex
+# heap + the golden WORK framebuffer for tb_blitter_system_pipe.sv's surface phase.
+gen_system_golden: gen_system_golden.c
+	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_system_golden.c
+
+vectors: gen_tri_golden gen_system_golden
 	mkdir -p vectors
 	for s in $(SCENARIOS); do ./gen_tri_golden $$s; done
+	./gen_system_golden
 
 clean:
-	rm -f gen_tri_golden
+	rm -f gen_tri_golden gen_system_golden

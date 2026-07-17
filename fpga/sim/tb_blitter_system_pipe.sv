@@ -123,6 +123,9 @@ module tb_blitter_system_pipe;
   // [FB-in-BRAM #96] on-chip composite framebuffer ports (declared before use).
   wire        fb_wr_en;  wire [14:0] fb_wr_qw; wire [1:0] fb_wr_lane; wire [15:0] fb_wr_pix;
   wire        fb_rd_en;  wire [14:0] fb_rd_qw; wire [63:0] fb_rd_qword;
+  // [app-surface v1] off-screen surface render-target port (Tasks 6/7).
+  wire        sf_wr_en;  wire [14:0] sf_wr_qw; wire [1:0] sf_wr_lane; wire [15:0] sf_wr_pix;
+  wire        sf_rd_en;  wire [14:0] sf_rd_qw; wire [63:0] sf_rd_qword;
 
   blitter_top blt(
     .clk(clk), .rst(reset), .vs(vs),
@@ -142,6 +145,9 @@ module tb_blitter_system_pipe;
     // SDRAM sdram_fb0_px path, which read 0 after the cutover -> every phase FAILed).
     .fb_wr_en(fb_wr_en), .fb_wr_qw(fb_wr_qw), .fb_wr_lane(fb_wr_lane), .fb_wr_pix(fb_wr_pix),
     .fb_rd_en(fb_rd_en), .fb_rd_qw(fb_rd_qw), .fb_rd_qword(fb_rd_qword),
+    // [app-surface v1] off-screen surface render-target port
+    .surf_wr_en(sf_wr_en), .surf_wr_qw(sf_wr_qw), .surf_wr_lane(sf_wr_lane), .surf_wr_pix(sf_wr_pix),
+    .surf_rd_en(sf_rd_en), .surf_rd_qw(sf_rd_qw), .surf_rd_qword(sf_rd_qword),
     // [Task 1.2] CLUT read port is no longer top-level (internal to blitter_top,
     // wired between comp_pipeline and clut_bram) — no ports to connect here.
     .idle(bt_idle));
@@ -149,7 +155,9 @@ module tb_blitter_system_pipe;
   // ---- [FB-in-BRAM #96] on-chip composite framebuffer (the real dest) ----------
   comp_fbram fbram(.clk(clk),
     .wr_en(fb_wr_en), .wr_qw(fb_wr_qw), .wr_lane(fb_wr_lane), .wr_pix(fb_wr_pix),
-    .rd_en(fb_rd_en), .rd_qw(fb_rd_qw), .rd_qword(fb_rd_qword));
+    .rd_en(fb_rd_en), .rd_qw(fb_rd_qw), .rd_qword(fb_rd_qword),
+    .surf_wr_en(sf_wr_en), .surf_wr_qw(sf_wr_qw), .surf_wr_lane(sf_wr_lane), .surf_wr_pix(sf_wr_pix),
+    .surf_rd_en(sf_rd_en), .surf_rd_qw(sf_rd_qw), .surf_rd_qword(sf_rd_qword));
 
   // FB pixel (dx,dy) lives in comp_fbram WORK: qword = dy*80 + (dx>>2), lane = dx[1:0]
   // (dy*320 contributes 0 to the lane since 320%4==0). Peek the four lane banks.
@@ -370,6 +378,9 @@ module tb_blitter_system_pipe;
   integer p2_errs=0;
   integer p3_errs=0;            // PHASE3: per-command SDRAM-source mux errors
   integer p4_errs=0;            // PHASE4: FB1->FB0 carry-forward errors
+  integer p5_errs=0;            // [app-surface v1] PHASE5: full-frame surface render+sample
+  // [app-surface v1] golden WORK for the two-pass surface scene (blt_execute of the ring)
+  reg [15:0] sys_exp [0:320*240-1];
   reg phase1_ok=0;
   // Probe: latch if comp_pipeline ever drives the system source-read port while it
   // owns the bus. After Task 5, src_sdram_rd is replaced by p0_rd (the cache-ok
@@ -679,7 +690,49 @@ module tb_blitter_system_pipe;
     $display("PHASE4 (carry-forward):     DEFERRED (build with -DP2_SDRAM_SYS)");
 `endif
 
-    if (phase1_ok && p2_errs==0 && p3_errs==0 && p4_errs==0) $display("RESULT: PASS");
+    // ============= PHASE 5: full-frame surface render + sample (Tasks 6/7/8) =====
+    // Two-pass scene executed by the fabric: SET_TARGET APPSURF; clear+sprite into
+    // the off-screen surface; SET_TARGET WORK; clear+bg into WORK; then a
+    // BLT_F_SRC_SURFACE TRILIST samples the surface over WORK. The ring + vertex heap
+    // come from vectors/sys_surface_ddr.hex; the golden WORK (sys_exp) is blt_execute
+    // of the SAME ring. This proves the whole render-into-surface -> sample-over-WORK
+    // flow (incl. the mid-ring target switch + surface write->read ordering) bit-exact.
+    begin : phase5
+      integer sx, sy, sidx, t5;
+      reg [15:0] sgot, sexp;
+      // load the golden WORK, then the ring (@200008) + vertex heap (@210000).
+      $readmemh("vectors/sys_surface_exp.hex", sys_exp);
+      $readmemh("vectors/sys_surface_ddr.hex", mem);
+      wmem(32'h200001, 64'd8);          // cmd_count = 8 (6 draws + SET_TARGETs + END)
+      wmem(32'h200002, 64'd0);          // C_TARGET = 0 (frame default WORK)
+      wmem(32'h200003, 64'd0);          // clear_color (unused; clears are ring FILLs)
+      wmem(32'h200004, 64'd0);          // flags = 0 (no control-block CLEAR)
+      wmem(32'h200007, 64'd2);          // C_PIPE=1 (FILLs via comp_pipeline), C_SRCSEL=0
+      submit_n = submit_n + 1;
+      wmem(32'h200000, submit_n[63:0]); // bump submit -> run the frame
+      t5=0;
+      while (mem[32'h200005][31:0] !== submit_n[31:0] && t5<8000000) begin @(posedge clk); t5=t5+1; end
+      repeat(20) @(posedge clk);
+      $display("=== PHASE5 done_seq=%0d submit=%0d (t5=%0d) ===", mem[32'h200005][31:0], submit_n[31:0], t5);
+      if (mem[32'h200005][31:0] !== submit_n[31:0]) begin
+        p5_errs=p5_errs+1; $display("  P5 FAIL: frame never completed (hang/timeout)");
+      end
+      // full-frame diff of WORK (comp_fbram) vs the blt_execute golden
+      for (sy=0; sy<240; sy=sy+1) for (sx=0; sx<320; sx=sx+1) begin
+        sgot = getpx(sx,sy); sexp = sys_exp[sy*320+sx];
+        if (sgot !== sexp) begin
+          p5_errs=p5_errs+1;
+          if (p5_errs<=20) $display("  P5 MISMATCH (%0d,%0d): got %04h exp %04h", sx,sy,sgot,sexp);
+        end
+      end
+      // spot-log the four observable layers
+      $display("P5 sprite(0,0)=%h (exp F81F)  surf(50,50)=%h (exp 0410)", getpx(0,0), getpx(50,50));
+      $display("P5 clear(160,0)=%h (exp 001F)  bg(300,10)=%h (exp 07E0)", getpx(160,0), getpx(300,10));
+      if (p5_errs==0) $display("PHASE5 (surface render+sample): PASS");
+      else            $display("PHASE5 (surface render+sample): FAIL (p5_errs=%0d)", p5_errs);
+    end
+
+    if (phase1_ok && p2_errs==0 && p3_errs==0 && p4_errs==0 && p5_errs==0) $display("RESULT: PASS");
     else $display("RESULT: FAIL");
     $finish;
   end
