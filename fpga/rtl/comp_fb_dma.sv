@@ -31,8 +31,7 @@ module comp_fb_dma #(
     input  wire            rst,
 
     // ── trigger / status ───────────────────────────────────────────────────────
-    input  wire            vs,          // scanout vblank (reserved; caller edge-detects → start, per fbram_snapshot)
-    input  wire            start,       // 1-cyc pulse: begin a WORK→DDR copy
+    input  wire            start,       // 1-cyc pulse (from blitter_top's vblank FSM): begin a WORK→DDR copy
     output reg             busy,        // high for the duration of the copy
     input  wire [MAW-1:0]  fb_base_qw,  // DDR qword base of the framebuffer slot
 

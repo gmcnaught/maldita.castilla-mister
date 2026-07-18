@@ -233,8 +233,41 @@ assign VGA_F1 = 0;
 // equal these same fixed values, so this is a no-op until the option is enabled.
 assign VIDEO_ARX = NATIVE_VID_ACTIVE ? freak_arx : 13'd4;
 assign VIDEO_ARY = NATIVE_VID_ACTIVE ? freak_ary : 13'd3;
-assign VGA_SCALER= 0;
 assign VGA_DISABLE = 0;
+
+// ── [DDR-scanout] DDR framebuffer address map ────────────────────────────────────────
+// The framework's ascal scans a DDR3 framebuffer this fabric writes. Placed in the 768 KiB
+// region ABOVE the host texture heap, at MF_DEV_TLBUF_OFF (0xF40000) within the 16 MiB
+// blitter window (0x3B000000): the host writes only ctrl(+0)/ring(+0x40)/SRC-heap(+0x80000..
+// +0xF40000) and never above 0xF40000 (raster_backend_mfgpu.cpp), and the RTL has no
+// TL_BUF/FRT/CFT reads — so this slot is disjoint from control block, ring, and heap, and
+// the host never allocates here. No host-constant change needed.
+//   FB byte range: 0x3BF40000 .. 0x3BF40000 + 320*240*2 (0x25800) = 0x3BF65800  (< 0x3C000000)
+localparam [28:0] FB_QW_BASE   = 29'h077E8000;  // 0x3BF40000 >> 3 (qword base; DMA mem_addr = base+qw)
+localparam [31:0] FB_BYTE_BASE = 32'h3BF40000;  // ascal FB_BASE (byte address)
+
+// ── [DDR-scanout] framework framebuffer (FB_EN + ascal) scanout ──────────────────────
+// The fabric writes a 320x240 RGB565 framebuffer to DDR (FB_BASE, via comp_fb_dma) and the
+// framework's ascal scales it to HDMI (VGA_SCALER=1), replacing the retired custom openbor
+// scanout. Triple-buffered by ascal (lowlat=0, framework default). FB_* ports exist only
+// under MISTER_FB (set in Maldita.qsf). CROP/ASPECT — DEVICE-CONFIRM (Task 4): presenting
+// the FULL 320x240 frame (FB_HEIGHT=240); the game's usual 320x224 crop (status[18]) no
+// longer sits on the analog path — VIDEO_ARX/ARY (above) drives the HDMI aspect. If the
+// crop/aspect regresses on device, switch to FB_HEIGHT=224 + adjust FB_BASE/aspect here.
+`ifdef MISTER_FB
+assign VGA_SCALER    = 1'b1;          // route scanout through ascal (HDMI from FB_BASE)
+assign FB_EN         = 1'b1;
+assign FB_FORMAT     = 5'b00100;      // 16bpp RGB565 ([2:0]=100 16bpp, [3]=0 565, [4]=0 RGB)
+assign FB_WIDTH      = 12'd320;
+assign FB_HEIGHT     = 12'd240;
+assign FB_STRIDE     = 14'd640;       // 320 px * 2 B/px, contiguous (matches comp_fb_dma layout)
+assign FB_BASE       = FB_BYTE_BASE;  // 0x3BF40000 (above the host texture heap)
+assign FB_FORCE_BLANK = 1'b0;
+// FB_VBL / FB_LL are framework INPUTS: FB_VBL sources fb_vs (the DMA trigger, above); FB_LL
+// (low-latency select) is framework-driven and observed only — the emu does not drive it.
+`else
+assign VGA_SCALER    = 1'b0;          // FB path disabled build — analog scanout
+`endif
 
 assign AUDIO_MIX = 0;
 assign HDMI_FREEZE = 0;
@@ -401,12 +434,21 @@ wire  [7:0] bd_be;
 // vram_demux read-data back to the blitter mem_dout path
 wire [63:0] blt_demux_dout;
 wire        blt_demux_dready;
-// clk_sys-domain vsync for the coherency flush + the vblank WORK->DDR DMA trigger
-// (blitter_top edge-detects the rising edge). [DDR-scanout] nv_vs (native_video) is retired;
-// sourced from the generic video-timing VSync (clk_vid-domain) here, double-flopped into
-// clk_sys. WIP: Task 3 finalizes the vblank source against the framework FB_VBL contract.
+// clk_sys-domain vblank for the coherency flush + the WORK->DDR DMA trigger (blitter_top
+// edge-detects the rising edge -> S_SNAP_* pulses fb_dma_start). [DDR-scanout] Sourced from
+// the framework FB_VBL: ascal's framebuffer vblank. Triggering the copy on FB_VBL lands the
+// WORK->DDR write between ascal's reads of FB_BASE (ascal triple-buffers the single FB_BASE,
+// lowlat=0), minimizing tearing; the ~0.2 ms copy fits well inside the vblank. FB_VBL is
+// clk_vid-domain (sys_top registers ascal o_vbl on clk_vid), so double-flop into clk_sys.
+// DEVICE-CONFIRM (Task 4): verify no tear vs ascal's FB_BASE read cadence; if it tears,
+// gate the writer more tightly on FB_VBL width or add a second FB_BASE ping-pong.
+`ifdef MISTER_FB
+wire        fb_vs_src = FB_VBL;
+`else
+wire        fb_vs_src = VSync;   // FB path disabled build — generic-timing fallback
+`endif
 reg  [1:0]  fb_vs_sync = 2'b0;
-always @(posedge clk_sys) fb_vs_sync <= {fb_vs_sync[0], VSync};
+always @(posedge clk_sys) fb_vs_sync <= {fb_vs_sync[0], fb_vs_src};
 wire        fb_vs = fb_vs_sync[1];
 
 // [#44] SDRAM source-STAGING write path: the blitter's BLT_OP_STAGE FSM copies atlas
@@ -500,7 +542,19 @@ sdram_fb_cache #(.SDRAM_AW(25)) fbcache
 // WORK->DDR copy (external comp_fb_dma) reads WORK via the same rd_* port (wired in Task 3).
 // Scanout is now the framework FB_EN + ascal path from a DDR framebuffer (Task 3).
 wire        fb_wr_en;  wire [14:0] fb_wr_qw; wire [1:0] fb_wr_lane; wire [15:0] fb_wr_pix;
-wire        fb_rd_en;  wire [14:0] fb_rd_qw; wire [63:0] fb_rd_qword;
+// WORK read port (comp_fbram rd_*): time-shared between the compositor (blt_fb_rd_*) and
+// the vblank WORK->DDR DMA (dma_work_rd_*). They are mutually exclusive in time — the DMA
+// runs only while fb_dma_busy, during which blitter_top is parked in S_SNAP_* with the
+// compositor idle (blt_fb_rd_en=0) — so a simple fb_dma_busy mux is race-free. [DDR-scanout]
+wire        blt_fb_rd_en; wire [14:0] blt_fb_rd_qw;      // compositor's WORK read (blitter_top)
+wire        dma_work_rd_en; wire [14:0] dma_work_rd_qw;  // comp_fb_dma's WORK read
+wire        fb_rd_en  = fb_dma_busy ? dma_work_rd_en : blt_fb_rd_en;
+wire [14:0] fb_rd_qw  = fb_dma_busy ? dma_work_rd_qw : blt_fb_rd_qw;
+wire [63:0] fb_rd_qword;   // comp_fbram registered read data -> both readers
+
+// [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake (blitter_top <-> comp_fb_dma).
+wire        fb_dma_start;  // 1-cyc pulse from blitter_top's S_SNAP_* FSM
+wire        fb_dma_busy;   // comp_fb_dma mid-copy (also the WORK-read mux select)
 
 // [app-surface v1] off-screen APP-SURFACE render-target port: blitter_top routes the
 // composite write/read here (instead of the WORK banks) when SET_TARGET binds APPSURF,
@@ -516,6 +570,30 @@ comp_fbram u_fbram (
 	// app-surface v1: off-screen APPSURF render target
 	.surf_wr_en (surf_wr_en), .surf_wr_qw(surf_wr_qw), .surf_wr_lane(surf_wr_lane), .surf_wr_pix(surf_wr_pix),
 	.surf_rd_en (surf_rd_en), .surf_rd_qw(surf_rd_qw), .surf_rd_qword(surf_rd_qword)
+);
+
+// ── [DDR-scanout] WORK -> DDR framebuffer burst-DMA (Task 1 comp_fb_dma) ──────────────
+// On blitter_top's vblank pulse it streams the completed WORK buffer (comp_fbram rd_*) out
+// to FB_BYTE_BASE via a DDR write master on the freed arbiter reader slot (rdr_*, below).
+wire        dma_mem_wr;   wire [31:0] dma_mem_addr; wire [7:0] dma_mem_burstcnt;
+wire [63:0] dma_mem_din;  wire [7:0]  dma_mem_be;
+comp_fb_dma #(.FB_QWORDS(19200), .AW(15), .MAW(32)) u_fb_dma (
+	.clk          (clk_sys),
+	.rst          (RESET),
+	.start        (fb_dma_start),
+	.busy         (fb_dma_busy),
+	.fb_base_qw   (FB_QW_BASE),
+	// WORK read (muxed onto comp_fbram rd_* by fb_dma_busy above)
+	.work_rd_en   (dma_work_rd_en),
+	.work_rd_qw   (dma_work_rd_qw),
+	.work_rd_qword(fb_rd_qword),
+	// DDR write master -> arbiter reader slot (rdr_*)
+	.mem_wr       (dma_mem_wr),
+	.mem_addr     (dma_mem_addr),
+	.mem_burstcnt (dma_mem_burstcnt),
+	.mem_din      (dma_mem_din),
+	.mem_be       (dma_mem_be),
+	.mem_busy     (rdr_busy_w)          // arbiter reader-slot busy = write not-yet-accepted
 );
 
 // --- DDR3 port sharing: old ddram (SDRAM clear) + native video reader ---
@@ -625,17 +703,17 @@ blitter_top blitter
 	.fb_wr_qw       (fb_wr_qw),
 	.fb_wr_lane     (fb_wr_lane),
 	.fb_wr_pix      (fb_wr_pix),
-	.fb_rd_en       (fb_rd_en),
-	.fb_rd_qw       (fb_rd_qw),
+	.fb_rd_en       (blt_fb_rd_en),   // compositor WORK read (muxed with the DMA at u_fbram)
+	.fb_rd_qw       (blt_fb_rd_qw),
 	.fb_rd_qword    (fb_rd_qword),
-	// [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake. Task 3 wires these to the
-	// external comp_fb_dma; until then fb_dma_start dangles and fb_dma_busy is tied idle
-	// (the vblank FSM parks in S_SNAP_BUSY — harmless: this WIP has no scanout driver yet).
+	// [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake -> comp_fb_dma (u_fb_dma).
+	// S_SNAP_* pulses fb_dma_start at vblank (fb_vs = ascal FB_VBL) and waits on fb_dma_busy
+	// while comp_fb_dma streams WORK out to the DDR framebuffer.
 	.vs             (fb_vs),
 	.osd_restart    (osd_restart),
 	.osd_fps_on     (osd_fps_on),
-	.fb_dma_start   (),
-	.fb_dma_busy    (1'b0),
+	.fb_dma_start   (fb_dma_start),
+	.fb_dma_busy    (fb_dma_busy),
 	// [app-surface v1] off-screen APPSURF render-target port -> comp_fbram u_fbram
 	.surf_wr_en     (surf_wr_en),
 	.surf_wr_qw     (surf_wr_qw),
@@ -652,13 +730,17 @@ ddr_blitter_arb #(.ENABLE(1'b1)) blitter_arb
 (
 	.clk          (clk_sys),
 	.reset        (RESET),
-	// [DDR-scanout] reader master IDLE (openbor reader retired; Task 3 repurposes this slot)
-	.rdr_burstcnt (8'd0),
-	.rdr_addr     (29'd0),
+	// [DDR-scanout] the freed openbor reader slot is repurposed as comp_fb_dma's DDR WRITE
+	// master (WORK->framebuffer). The reader slot is the arbiter's DEFAULT/priority owner, and
+	// the blitter can't borrow while rdr_we is asserted — but there's no contention anyway: the
+	// DMA runs only at vblank while the blitter is parked in S_SNAP_*. rdr_rd tied 0 (write-only);
+	// mem_busy = rdr_busy (write accepted when ~rdr_busy = state==G_READER & ~ddram_busy).
+	.rdr_burstcnt (dma_mem_burstcnt),
+	.rdr_addr     (dma_mem_addr[28:0]),
 	.rdr_rd       (1'b0),
-	.rdr_din      (64'd0),
-	.rdr_be       (8'd0),
-	.rdr_we       (1'b0),
+	.rdr_din      (dma_mem_din),
+	.rdr_be       (dma_mem_be),
+	.rdr_we       (dma_mem_wr),
 	.rdr_busy     (rdr_busy_w),
 	.rdr_grant    (rdr_grant_w),
 	// blitter DDR side now comes from vram_demux (bd_*), not the raw mem_* bus

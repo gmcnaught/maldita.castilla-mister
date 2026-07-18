@@ -23,7 +23,6 @@ module tb_fb_dma;
 
     // ── DUT I/O ──────────────────────────────────────────────────────────────────
     reg              start = 1'b0;
-    reg              vs    = 1'b0;
     wire             busy;
     reg  [MAW-1:0]   fb_base_qw = BASE;
 
@@ -40,7 +39,7 @@ module tb_fb_dma;
 
     comp_fb_dma #(.FB_QWORDS(FB_QWORDS), .AW(AW), .MAW(MAW)) dut (
         .clk(clk), .rst(rst),
-        .vs(vs), .start(start), .busy(busy), .fb_base_qw(fb_base_qw),
+        .start(start), .busy(busy), .fb_base_qw(fb_base_qw),
         .work_rd_en(work_rd_en), .work_rd_qw(work_rd_qw), .work_rd_qword(work_rd_qword_r),
         .mem_wr(mem_wr), .mem_addr(mem_addr), .mem_burstcnt(mem_burstcnt),
         .mem_din(mem_din), .mem_be(mem_be), .mem_busy(mem_busy)
