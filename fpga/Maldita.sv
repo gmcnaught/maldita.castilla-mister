@@ -506,12 +506,22 @@ wire        fb_scan_rd_en; wire [14:0] fb_scan_rd_qw; wire [63:0] fb_scan_rd_qwo
 // [FB-in-BRAM double-buffer] vblank work->scan snapshot (blitter_top u_snap -> comp_fbram)
 wire        fb_snap_we; wire [14:0] fb_snap_qw; wire [63:0] fb_snap_qword;
 
+// [app-surface v1] off-screen APP-SURFACE render-target port: blitter_top routes the
+// composite write/read here (instead of the WORK banks) when SET_TARGET binds APPSURF,
+// and (Task 7) reads it back as a texel source. Completes the Task-6 deferred emu-top
+// routing — previously these floated (surf_wr_en -> z -> no write -> surface read black).
+wire        surf_wr_en; wire [14:0] surf_wr_qw; wire [1:0] surf_wr_lane; wire [15:0] surf_wr_pix;
+wire        surf_rd_en; wire [14:0] surf_rd_qw; wire [63:0] surf_rd_qword;
+
 comp_fbram u_fbram (
 	.clk        (clk_sys),
 	.wr_en      (fb_wr_en),  .wr_qw(fb_wr_qw),  .wr_lane(fb_wr_lane), .wr_pix(fb_wr_pix),
 	.rd_en      (fb_rd_en),  .rd_qw(fb_rd_qw),  .rd_qword(fb_rd_qword),
 	.scan_rd_en (fb_scan_rd_en), .scan_rd_qw(fb_scan_rd_qw), .scan_rd_qword(fb_scan_rd_qword),
-	.snap_we    (fb_snap_we), .snap_qw(fb_snap_qw), .snap_qword(fb_snap_qword)
+	.snap_we    (fb_snap_we), .snap_qw(fb_snap_qw), .snap_qword(fb_snap_qword),
+	// app-surface v1: off-screen APPSURF render target
+	.surf_wr_en (surf_wr_en), .surf_wr_qw(surf_wr_qw), .surf_wr_lane(surf_wr_lane), .surf_wr_pix(surf_wr_pix),
+	.surf_rd_en (surf_rd_en), .surf_rd_qw(surf_rd_qw), .surf_rd_qword(surf_rd_qword)
 );
 
 // Bridge the scanout reader's P_SCAN cache-ok protocol -> comp_fbram's scan port.
@@ -650,6 +660,14 @@ blitter_top blitter
 	.fb_snap_we     (fb_snap_we),
 	.fb_snap_qw     (fb_snap_qw),
 	.fb_snap_qword  (fb_snap_qword),
+	// [app-surface v1] off-screen APPSURF render-target port -> comp_fbram u_fbram
+	.surf_wr_en     (surf_wr_en),
+	.surf_wr_qw     (surf_wr_qw),
+	.surf_wr_lane   (surf_wr_lane),
+	.surf_wr_pix    (surf_wr_pix),
+	.surf_rd_en     (surf_rd_en),
+	.surf_rd_qw     (surf_rd_qw),
+	.surf_rd_qword  (surf_rd_qword),
 	.idle           (),
 	.dbg            ()              // #34 debug probe stripped for shipping core
 );
