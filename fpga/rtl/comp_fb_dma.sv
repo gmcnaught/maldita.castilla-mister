@@ -7,19 +7,22 @@
 // this in the original openbor core).
 //
 // On each `start` pulse (compositor vblank, from blitter_top's S_SNAP_* FSM) it:
+//   (0) latches wr_target = ~disp_active — the BACK buffer, the one the reader is NOT
+//       currently displaying (device-fix: double-buffer tearing — a free-running toggle could
+//       write the front buffer if the compositor laps the 60 Hz scanout).
 //   (1) bursts WORK qw 0..FB_QWORDS-1 (19200 qwords = 320x240 @ 4 RGB565 px/qword;
-//       lane0 = leftmost) into the INACTIVE buffer:
-//         buf_base = fb_qw_base + 8 (0x40 B)  +  sel * 0x8000 (0x40000 B)
+//       lane0 = leftmost) into the BACK buffer:
+//         buf_base = fb_qw_base + 8 (0x40 B)  +  wr_target * 0x8000 (0x40000 B)
 //         → BUF0 @ fb_qw_base+0x40, BUF1 @ fb_qw_base+0x40040  (openbor_video_reader layout),
 //   (2) writes ONE control-word qword at fb_qw_base+0:
-//         ctrl_word[31:0] = {frame_counter[29:0], 1'b0, sel}
+//         ctrl_word[31:0] = {frame_counter[29:0], 1'b0, wr_target}
 //         (matches the reader: frame_counter = ctrl_word[31:2] watchdog, active = ctrl_word[0];
-//          be=0x0F so only the low 32 bits are written, preserving the qword's high half —
-//          same discipline as blitter_top's legacy VCTRL write),
-//   (3) toggles `sel` and increments `frame_counter` for the next frame.
+//          be=0x0F so only the low 32 bits are written, preserving the qword's high half),
+//   (3) increments `frame_counter` (wr_target is re-latched from disp_active next start).
 // ORDER IS LOAD-BEARING: the control word is written AFTER the whole buffer is accepted, so
 // the reader (which polls the control word and picks active_buffer) never sees `active` point
-// at a half-written buffer. `busy` spans the ENTIRE sequence (buffer + control word).
+// at a half-written buffer, and cannot swap onto the buffer being written mid-copy. `busy`
+// spans the ENTIRE sequence (buffer + control word).
 //
 // Back-pressure: mem_wr/addr/din are HELD until the bus accepts (~mem_busy) — the blitter_top
 // S_WR_WAIT discipline; a stalled f2h write FIFO can never drop a beat. The WORK read uses a
@@ -40,6 +43,10 @@ module comp_fb_dma #(
     input  wire            start,       // 1-cyc pulse (compositor vblank): begin a WORK→DDR frame
     output reg             busy,        // high for the whole sequence (buffer copy + control word)
     input  wire [28:0]     fb_qw_base,  // DDR qword base: control word @+0, BUF0 @+8, BUF1 @+0x8008
+    // [device-fix: double-buffer tearing] the buffer the reader is CURRENTLY displaying (its
+    // latched active_buffer). We write the OTHER buffer (~disp_active), latched at `start`, so
+    // even if the compositor laps the 60 Hz scanout we never write the buffer being displayed.
+    input  wire            disp_active,
 
     // ── WORK read port (mux onto comp_fbram rd_* while busy) ─────────────────────
     output reg             work_rd_en,
@@ -64,8 +71,20 @@ module comp_fb_dma #(
     reg [AW:0]   rptr;         // next WORK qw to READ  (0..NQW)
     reg [AW:0]   wcnt;         // qwords WRITTEN so far (0..NQW) == current buffer write index
 
-    // ── double-buffer + control-word state (persists across frames) ────────────────
-    reg          sel;          // buffer being written THIS frame (0=BUF0, 1=BUF1); also active_buffer
+    // ── double-buffer + control-word state ─────────────────────────────────────────
+    // [device-fix: double-buffer tearing] wr_target = the buffer written THIS frame = the BACK
+    // buffer = ~disp_active, LATCHED at `start` so it is stable across the whole copy (the
+    // reader cannot swap the displayed buffer to the one being written until we write the
+    // control word AFTER the buffer). No free-running toggle -> we never write the front buffer.
+    reg          wr_target;
+    // [device-fix: double-buffer tearing] `published` = the buffer we last published (wrote its
+    // control word for). We only START a new copy once the reader has CONSUMED that publish
+    // (disp_active == published) — i.e. it has swapped onto the published buffer, freeing the
+    // OTHER one. Otherwise both buffers are in use (one displayed, one published-pending) and a
+    // new copy would overwrite the published buffer the reader is about to show -> tear. So we
+    // SKIP (drop the frame) until the reader catches up. This makes a producer faster than the
+    // 60 Hz scanout drop frames cleanly instead of tearing.
+    reg          published;
     reg [29:0]   frame_counter; // rider in control word [31:2]; increments per frame (reader watchdog)
     reg          ctrl_phase;    // 1 while writing the control word (after the buffer copy)
     reg          ctrl_pending;  // the control-word write is issued and awaiting acceptance
@@ -79,9 +98,9 @@ module comp_fb_dma #(
     reg [63:0]   hold_data;
 
     // ── addresses / control word ───────────────────────────────────────────────────
-    wire [31:0]  buf_base  = {3'b000, fb_qw_base} + BUF0_OFF + (sel ? BUF1_STEP : 32'd0);
-    wire [31:0]  ctrl_addr = {3'b000, fb_qw_base};                 // fb_qw_base + 0
-    wire [31:0]  ctrl_word = {frame_counter, 1'b0, sel};           // [31:2]=fc, [1]=0, [0]=sel
+    wire [31:0]  buf_base  = {3'b000, fb_qw_base} + BUF0_OFF + (wr_target ? BUF1_STEP : 32'd0);
+    wire [31:0]  ctrl_addr = {3'b000, fb_qw_base};                       // fb_qw_base + 0
+    wire [31:0]  ctrl_word = {frame_counter, 1'b0, wr_target};           // [31:2]=fc, [1]=0, [0]=target
 
     // ── mem master (phase-aware): buffer beats vs the single control-word write ──────
     // A write is ACCEPTED the cycle mem_wr & ~mem_busy; until then addr/din/wr are stable.
@@ -108,7 +127,8 @@ module comp_fb_dma #(
             rd_v1         <= 1'b0;
             rd_v2         <= 1'b0;
             hold_valid    <= 1'b0;
-            sel           <= 1'b0;
+            wr_target     <= 1'b0;
+            published     <= 1'b0;   // matches the reader's reset displayed buffer (BUF0)
             frame_counter <= 30'd0;
             ctrl_phase    <= 1'b0;
             ctrl_pending  <= 1'b0;
@@ -118,13 +138,19 @@ module comp_fb_dma #(
             if (!busy) begin
                 rd_busy <= 1'b0; rd_v1 <= 1'b0; rd_v2 <= 1'b0; hold_valid <= 1'b0;
                 ctrl_phase <= 1'b0; ctrl_pending <= 1'b0;
-                if (start) begin
+                // [device-fix] START only when the reader has CONSUMED our last publish
+                // (disp_active == published): then the OTHER buffer (~disp_active) is free to
+                // write. If the reader is still behind (hasn't swapped onto `published`), SKIP —
+                // re-writing the published buffer would tear the frame it is about to display.
+                if (start && (disp_active == published)) begin
                     busy <= 1'b1;
                     rptr <= {(AW+1){1'b0}};
                     wcnt <= {(AW+1){1'b0}};
+                    // latch the BACK buffer (~ the reader's displayed buffer) for the whole copy.
+                    wr_target <= ~disp_active;
                 end
             end else if (!ctrl_phase) begin
-                // ─── BUFFER phase: raster-copy WORK into buffer `sel` ───────────────
+                // ─── BUFFER phase: raster-copy WORK into buffer `wr_target` ─────────
                 // 1) read-latency shift: v1 → v2 (v2 sticky until captured).
                 if (rd_v1) begin rd_v2 <= 1'b1; rd_v1 <= 1'b0; end
                 // 2) WRITE acceptance — drain the hold slot into DDR (in-order == wcnt).
@@ -154,11 +180,13 @@ module comp_fb_dma #(
                     ctrl_pending <= 1'b1;
                 end
             end else begin
-                // ─── CONTROL-WORD phase: one held write of {frame_counter, 0, sel} ──
+                // ─── CONTROL-WORD phase: one held write of {frame_counter, 0, wr_target} ──
                 if (ctrl_pending & ~mem_busy) begin
                     ctrl_pending  <= 1'b0;
                     ctrl_phase    <= 1'b0;
-                    sel           <= ~sel;                 // next frame writes the other buffer
+                    // record what we just published; the next copy is gated on the reader
+                    // consuming it (disp_active == published). No free-running toggle.
+                    published     <= wr_target;
                     frame_counter <= frame_counter + 30'd1;
                     busy          <= 1'b0;                 // whole frame (buffer + control) complete
                 end

@@ -534,6 +534,9 @@ wire [63:0] fb_rd_qword;   // comp_fbram registered read data -> both readers
 // [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake (blitter_top <-> comp_fb_dma).
 wire        fb_dma_start;  // 1-cyc pulse from blitter_top's S_SNAP_* FSM
 wire        fb_dma_busy;   // comp_fb_dma mid-copy (also the WORK-read mux select)
+// [device-fix: double-buffer tearing] the reader's currently-displayed buffer -> comp_fb_dma,
+// which writes the OTHER (back) buffer so it never overwrites the frame being scanned out.
+wire        reader_disp_active;
 
 // [app-surface v1] off-screen APP-SURFACE render-target port: blitter_top routes the
 // composite write/read here (instead of the WORK banks) when SET_TARGET binds APPSURF,
@@ -562,6 +565,7 @@ comp_fb_dma #(.FB_QWORDS(19200), .AW(15), .MAW(32)) u_fb_dma (
 	.start        (fb_dma_start),
 	.busy         (fb_dma_busy),
 	.fb_qw_base   (FB_QW_BASE),
+	.disp_active  (reader_disp_active),   // [device-fix] write the BACK buffer (~reader's displayed)
 	// WORK read (muxed onto comp_fbram rd_* by fb_dma_busy above)
 	.work_rd_en   (dma_work_rd_en),
 	.work_rd_qw   (dma_work_rd_qw),
@@ -1124,6 +1128,7 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.audio_r        (),
 	.enable         (NATIVE_VID),
 	.frame_ready    (),
+	.disp_active    (reader_disp_active),   // [device-fix] displayed buffer -> comp_fb_dma back-buffer select
 	.dbg_blt        (32'd0),
 	.dbg_addr       (32'd0),
 	.dbg_diag       (32'd0)

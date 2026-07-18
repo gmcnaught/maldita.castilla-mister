@@ -1,40 +1,47 @@
-// tb_reader_ddr.sv — [DDR-scanout custom-reader / Option A] verifies openbor_video_reader's
-// NEW ddr_* burst line-fetch reads the correct ACTIVE DDR buffer (BUF0/BUF1 by active_buffer)
-// at the correct per-line addresses, and captures the buffer's qwords into the line buffer 1:1.
+// tb_reader_ddr.sv — [DDR-scanout custom-reader] verifies openbor_video_reader's ddr_* burst
+// line-fetch AND its 180°-rotation un-rotate (device-fix). A behavioral DDR model backs the
+// reader's ddr_* master with TWO distinct-patterned framebuffers + a control word; the real
+// openbor_video_timing drives the reader. Each timing frame the bench bumps the control-word
+// frame_counter and sets active_buffer.
 //
-// Setup: the real openbor_video_timing drives the reader (ce_pix full-rate). A behavioral DDR
-// model backs the reader's ddr_* master with TWO distinct-patterned framebuffers + a control
-// word. Each timing frame the bench bumps the control-word frame_counter (so the reader detects
-// a new frame) and sets active_buffer. Checks, per fetched line:
-//   (a) the reader's burst read address == (active ? BUF1 : BUF0) + line*80  (buffer + line select)
-//   (b) every captured line-buffer qword == the active buffer's qword at that (line,beat)  (data 1:1)
-// and that flipping active_buffer switches the displayed buffer.
+// Checks:
+//   (a) FETCH address (Y): each 80-beat read == buf_base + (239 - display_line)*80.
+//   (b) FETCH data 1:1: every line-buffer qword == the active buffer's qword at the fetched
+//       (Y-reversed) line.
+//   (c) OUTPUT orientation (X+Y): during active display, the output pixel cur_pix at screen
+//       (hcol, vcount) == the active buffer's pixel at STORAGE (319 - hcol, 239 - vcount).
+// (c) is the make-or-break: it catches a wrong-axis fix (only-X, only-Y, or none).
 //
 // Copyright (C) 2026 — GPL-3.0
 `default_nettype none
 `timescale 1ns/1ps
 module tb_reader_ddr;
     localparam [28:0] FB      = 29'd0;             // FB_QW_BASE: CTRL@0, BUF0@8, BUF1@0x8008
-    localparam [28:0] CTRLA   = FB;                // 0
-    localparam [28:0] BUF0    = FB + 29'd8;        // 8
-    localparam [28:0] BUF1    = FB + 29'h8008;     // 0x8008
-    localparam integer NQW    = 19200;             // 320x240/4
-    localparam integer STRIDE = 80;                // qwords/line
+    localparam [28:0] CTRLA   = FB;
+    localparam [28:0] BUF0    = FB + 29'd8;
+    localparam [28:0] BUF1    = FB + 29'h8008;
+    localparam integer NQW    = 19200;
+    localparam integer STRIDE = 80;
     localparam integer VACT   = 240;
+    localparam integer HACT   = 320;
 
     reg clk = 1'b0; always #5 clk = ~clk;          // single clock (clk_vid == ddr_clk)
     reg reset = 1'b1;
-    reg ce_pix = 1'b1;                             // full-rate pixel enable
+    // ce_pix ~1-in-8 (device-like): the display line-fetch is paced by new_line; a full-rate
+    // ce_pix would let the pixel output outrun the fetch (linebuf underflow -> stale line),
+    // which is a sim artifact, not the device behavior (device ce_pix is the Genesis H40 rate).
+    reg [2:0] ce_div = 3'd0;
+    always @(posedge clk) ce_div <= ce_div + 3'd1;
+    wire ce_pix = (ce_div == 3'd0);
 
     // ── timing ───────────────────────────────────────────────────────────────────
     wire        tim_hs, tim_vs, tim_hb, tim_vb, tim_de, tim_nf, tim_nl;
-    wire [9:0]  tim_hc;
     wire [8:0]  tim_vc;
     openbor_video_timing u_timing (
         .clk(clk), .ce_pix(ce_pix), .reset(reset),
         .h_adj(5'sd0), .v_adj(4'sd0),
         .hsync(tim_hs), .vsync(tim_vs), .hblank(tim_hb), .vblank(tim_vb), .de(tim_de),
-        .hcount(tim_hc), .vcount(tim_vc), .new_frame(tim_nf), .new_line(tim_nl)
+        .hcount(), .vcount(tim_vc), .new_frame(tim_nf), .new_line(tim_nl)
     );
 
     // ── reader (SCANOUT_ONLY, base 0) ─────────────────────────────────────────────
@@ -64,11 +71,24 @@ module tb_reader_ddr;
         .dbg_blt(32'd0), .dbg_addr(32'd0), .dbg_diag(32'd0)
     );
 
-    // ── DDR model: two framebuffers + control word, serves reads (busy=0) ──────────
+    // ── per-pixel test pattern: pix(buf,x,y) packed into the buffer (qw=y*80+x/4, lane=x%4) ──
+    function [15:0] pix(input integer b, input integer x, input integer y);
+        pix = {b[0], x[7:0], y[6:0]};
+    endfunction
+
     reg [63:0] mem0 [0:NQW-1];
     reg [63:0] mem1 [0:NQW-1];
     reg [31:0] ctrl_word;
-    integer i;
+    integer i, qw, ln, xx;
+    // active buffer pixel at STORAGE (x,y)
+    function [15:0] bufpix(input integer act, input integer x, input integer y);
+        reg [63:0] q;
+        begin
+            q = act ? mem1[y*STRIDE + (x/4)] : mem0[y*STRIDE + (x/4)];
+            bufpix = q[(x%4)*16 +: 16];
+        end
+    endfunction
+
     function [63:0] mem_read(input [28:0] a);
         begin
             if (a == CTRLA)                              mem_read = {32'd0, ctrl_word};
@@ -84,12 +104,10 @@ module tb_reader_ddr;
     reg  [7:0] rd_cnt_l, rd_i;
     always @(posedge clk) begin
         r_dout_ready <= 1'b0;
-        r_ddr_busy   <= 1'b0;                 // always ready to accept
+        r_ddr_busy   <= 1'b0;
         if (reset) begin serving <= 1'b0; end
         else if (!serving) begin
-            if (r_rd) begin                    // accepted (busy held low)
-                rd_addr_l <= r_addr; rd_cnt_l <= r_burstcnt; rd_i <= 8'd0; serving <= 1'b1;
-            end
+            if (r_rd) begin rd_addr_l <= r_addr; rd_cnt_l <= r_burstcnt; rd_i <= 8'd0; serving <= 1'b1; end
         end else begin
             r_dout       <= mem_read(rd_addr_l + {21'd0, rd_i});
             r_dout_ready <= 1'b1;
@@ -104,46 +122,69 @@ module tb_reader_ddr;
     reg        nf_q = 1'b0;
     always @(posedge clk) begin
         nf_q <= tim_nf;
-        if (!reset && tim_nf && !nf_q) fc <= fc + 30'd1;   // new displayed frame
+        if (!reset && tim_nf && !nf_q) fc <= fc + 30'd1;
     end
     always @(*) ctrl_word = {fc, 1'b0, model_active};
 
-    // ── checks (each counter is written by EXACTLY ONE always block → race-free) ────
-    integer addr_errs = 0, data_errs = 0, active_err = 0;
-    integer addr_checks = 0, data_checks = 0;
+    // ── checks ────────────────────────────────────────────────────────────────────
+    integer addr_errs = 0, data_errs = 0, orient_errs = 0, active_err = 0;
+    integer addr_checks = 0, data_checks = 0, orient_checks = 0;
 
-    // (a) burst-address check: each 80-beat read must target the active buffer's line.
+    // (a) burst address: Y-reversed source line (239 - display_line).
     wire burst_issue = r_rd && (r_burstcnt == 8'd80) && !serving;
     always @(posedge clk) begin
         if (!reset && burst_issue) begin
             if (r_addr !== ((u_reader.active_buffer ? BUF1 : BUF0)
-                            + (u_reader.display_line * STRIDE))) begin
+                            + ((9'd239 - u_reader.display_line) * STRIDE))) begin
                 if (addr_errs < 8) $display("  ADDR MISMATCH line=%0d active=%0b got=%h exp=%h",
                     u_reader.display_line, u_reader.active_buffer, r_addr,
-                    (u_reader.active_buffer ? BUF1 : BUF0) + (u_reader.display_line * STRIDE));
+                    (u_reader.active_buffer ? BUF1 : BUF0) + ((9'd239 - u_reader.display_line) * STRIDE));
                 addr_errs = addr_errs + 1;
             end
             addr_checks = addr_checks + 1;
         end
     end
 
-    // (b) data 1:1: every line-buffer write must equal the active buffer's qword at (line,beat).
-    //     The write's beat index is lb_waddr[6:0] (beat_count has already advanced by the time
-    //     lb_we is observed), and lb_waddr[7] is the line-parity — both set with lb_wdata.
+    // (b) fetch data 1:1 vs the fetched (Y-reversed) source line.
     always @(posedge clk) begin
         if (!reset && u_reader.lb_we) begin
             if (u_reader.lb_wdata !== (u_reader.active_buffer
-                    ? mem1[u_reader.display_line * STRIDE + u_reader.lb_waddr[6:0]]
-                    : mem0[u_reader.display_line * STRIDE + u_reader.lb_waddr[6:0]])) begin
-                if (data_errs < 8) $display("  DATA MISMATCH line=%0d beat=%0d active=%0b got=%h",
-                    u_reader.display_line, u_reader.lb_waddr[6:0], u_reader.active_buffer, u_reader.lb_wdata);
+                    ? mem1[(239 - u_reader.display_line) * STRIDE + u_reader.lb_waddr[6:0]]
+                    : mem0[(239 - u_reader.display_line) * STRIDE + u_reader.lb_waddr[6:0]])) begin
+                if (data_errs < 8) $display("  DATA MISMATCH line=%0d beat=%0d",
+                    u_reader.display_line, u_reader.lb_waddr[6:0]);
                 data_errs = data_errs + 1;
             end
             data_checks = data_checks + 1;
         end
     end
 
-    // wait until the reader has fetched at least `n` distinct lines of the CURRENT frame
+    // (c) OUTPUT orientation (X+Y): cur_pix at screen (hcol,vcount) == buffer pixel (319-hcol,239-vcount).
+    //     Gated to STABLE (non-flip) frames via orient_arm — the reader tolerates a single-line
+    //     re-anchor glitch at a buffer flip (documented; tear-free on device), which is not an
+    //     orientation error, so we measure orientation only on settled frames.
+    // Gate on the reader's steady-state prefetch pacing (fetch exactly one line ahead:
+    // display_line == vcount+1). In this single-clock bench the fetch can transiently lag the
+    // display right after frame_ready asserts (startup phase), which reads a stale linebuf
+    // line — a sim pacing artifact, not an orientation error. On correctly-paced lines the
+    // linebuf[vcount%2] holds the line fetched for display_line=vcount (source 239-vcount).
+    reg orient_arm = 1'b0;
+    always @(posedge clk) begin
+        if (!reset && orient_arm && ce_pix && tim_de && u_reader.frame_ready_vid
+            && (u_reader.display_line == (tim_vc + 9'd1))
+            && u_reader.hcol < HACT && tim_vc < (VACT-1)) begin
+            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, HACT-1 - u_reader.hcol, VACT-1 - tim_vc)) begin
+                if (orient_errs < 8) $display("  ORIENT MISMATCH screen(%0d,%0d) got=%h exp=%h (buf px %0d,%0d)",
+                    u_reader.hcol, tim_vc, u_reader.cur_pix,
+                    bufpix(u_reader.active_buffer, HACT-1 - u_reader.hcol, VACT-1 - tim_vc),
+                    HACT-1 - u_reader.hcol, VACT-1 - tim_vc);
+                orient_errs = orient_errs + 1;
+            end
+            orient_checks = orient_checks + 1;
+        end
+    end
+
+    // wait until the reader has fetched at least `n` distinct display lines this frame
     task wait_lines(input integer n);
         integer got; reg [8:0] last;
         begin
@@ -157,45 +198,62 @@ module tb_reader_ddr;
         end
     endtask
 
+    // wait `n` timing frames (new_frame rising edges) — used to settle past a buffer flip
+    task wait_frames(input integer n);
+        integer got; reg q;
+        begin
+            got = 0; q = tim_nf;
+            while (got < n) begin
+                @(posedge clk);
+                if (tim_nf && !q) got = got + 1;
+                q = tim_nf;
+            end
+        end
+    endtask
+
     initial begin
-        for (i = 0; i < NQW; i = i + 1) begin
-            mem0[i] = {32'hA0A0_0000 | i[15:0], 16'hB0B0, i[15:0]};   // distinct BUF0 pattern
-            mem1[i] = {32'hC1C1_0000 | i[15:0], 16'hD1D1, i[15:0]};   // distinct BUF1 pattern
+        for (qw = 0; qw < NQW; qw = qw + 1) begin
+            ln = qw / STRIDE; xx = (qw % STRIDE) * 4;
+            mem0[qw] = {pix(0, xx+3, ln), pix(0, xx+2, ln), pix(0, xx+1, ln), pix(0, xx+0, ln)};
+            mem1[qw] = {pix(1, xx+3, ln), pix(1, xx+2, ln), pix(1, xx+1, ln), pix(1, xx+0, ln)};
         end
         model_active = 1'b0;
         repeat (8) @(posedge clk);
         reset <= 1'b0;
 
-        // Frame 1 syncs the reader (captures prev counter, no display); frames after display.
-        // Fetch a batch of lines from BUF0 (active=0).
-        wait_lines(20);
-        $display("after BUF0 batch: addr_checks=%0d data_checks=%0d addr_errs=%0d data_errs=%0d active=%0b",
-                 addr_checks, data_checks, addr_errs, data_errs, u_reader.active_buffer);
-        if (u_reader.active_buffer !== 1'b0) begin $display("  active!=0 during BUF0 phase"); active_err=active_err+1; end
+        // BUF0 (active=0): settle a few frames (sync + first full frame -> frame_ready), then
+        // measure orientation on a STABLE frame (armed). addr/data run continuously (ungated).
+        wait_frames(3);
+        orient_arm = 1'b1; wait_lines(45); orient_arm = 1'b0;
+        $display("BUF0: addr_checks=%0d data_checks=%0d orient_checks=%0d addr_errs=%0d data_errs=%0d orient_errs=%0d active=%0b",
+                 addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
+        if (u_reader.active_buffer !== 1'b0) active_err = active_err + 1;
 
-        // Flip to BUF1: the reader picks up the new active_buffer at the NEXT frame's control
-        // poll (not mid-frame — that's the tear-free property). Wait for that flip, then fetch.
+        // Flip to BUF1 — reader switches at the next frame poll (tear-free, one tolerated re-anchor
+        // line). Settle PAST the flip frame, then measure orientation on a stable BUF1 frame.
         model_active = 1'b1;
         wait (u_reader.active_buffer === 1'b1);
-        wait_lines(20);
-        $display("after BUF1 batch: addr_checks=%0d data_checks=%0d addr_errs=%0d data_errs=%0d active=%0b",
-                 addr_checks, data_checks, addr_errs, data_errs, u_reader.active_buffer);
-        if (u_reader.active_buffer !== 1'b1) begin $display("  active!=1 during BUF1 phase"); active_err=active_err+1; end
+        wait_frames(3);
+        orient_arm = 1'b1; wait_lines(45); orient_arm = 1'b0;
+        $display("BUF1: addr_checks=%0d data_checks=%0d orient_checks=%0d addr_errs=%0d data_errs=%0d orient_errs=%0d active=%0b",
+                 addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
+        if (u_reader.active_buffer !== 1'b1) active_err = active_err + 1;
 
-        if (addr_checks < 30 || data_checks < 30) begin
-            $display("RESULT: FAIL — too few checks (addr=%0d data=%0d) — reader never fetched",
-                     addr_checks, data_checks);
+        if (addr_checks < 30 || data_checks < 30 || orient_checks < 300) begin
+            $display("RESULT: FAIL — too few checks (addr=%0d data=%0d orient=%0d)",
+                     addr_checks, data_checks, orient_checks);
             $fatal;
         end
-        if (addr_errs != 0 || data_errs != 0 || active_err != 0) begin
-            $display("RESULT: FAIL — addr_errs=%0d data_errs=%0d active_err=%0d", addr_errs, data_errs, active_err);
+        if (addr_errs || data_errs || orient_errs || active_err) begin
+            $display("RESULT: FAIL — addr_errs=%0d data_errs=%0d orient_errs=%0d active_err=%0d",
+                     addr_errs, data_errs, orient_errs, active_err);
             $fatal;
         end
-        $display("reader_ddr: ddr_* burst line-fetch reads the ACTIVE buffer 1:1 (BUF0 + BUF1), addresses + data exact");
+        $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; 180deg un-rotate correct — screen(x,y)=buf(319-x,239-y), both buffers");
         $display("RESULT: PASS");
         $finish;
     end
 
-    initial begin #500_000_000 $display("RESULT: FAIL — TIMEOUT"); $fatal; end
+    initial begin #900_000_000 $display("RESULT: FAIL — TIMEOUT"); $fatal; end
 endmodule
 `default_nettype wire

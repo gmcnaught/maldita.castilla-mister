@@ -102,6 +102,11 @@ module openbor_video_reader #(
     input  wire        enable,
     output wire        frame_ready,
 
+    // [device-fix: double-buffer tearing] the buffer this reader is CURRENTLY displaying
+    // (latched active_buffer, held for the whole frame). comp_fb_dma writes the OTHER buffer
+    // (~disp_active) so the producer can never write the buffer being scanned out.
+    output wire        disp_active,
+
     // DEBUG (issue #34): live blitter state snapshot, published into VSYNC_ADDR's
     // HIGH 32 bits (0x3A070004) each displayed frame. The reader stays alive when
     // the blitter wedges, so devmem 0x3A070004 reveals the frozen blitter state.
@@ -372,6 +377,9 @@ reg         cart_dl_prev;
 reg         cart_loading;
 
 assign ioctl_wait = cart_write_pending & ioctl_download;
+
+// [device-fix: double-buffer tearing] expose the currently-displayed buffer to comp_fb_dma.
+assign disp_active = active_buffer;
 
 // -- Line buffers (position-addressed ping-pong scanout) --------------
 // Two display lines of RGB565, stored as 80 x 64-bit words each (4 px/word),
@@ -732,7 +740,9 @@ always @(posedge ddr_clk) begin
                 // !ddr_busy so we only ask when the rdr slot is free (arbiter default-owner model,
                 // and comp_fb_dma is not writing during active display).
                 if (!fifo_aclr_ddr_active && !ddr_busy) begin
-                    ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
+                    // [device-fix: 180° rotation] Y un-rotate: fetch SOURCE line (239 -
+                    // display_line), so display line 0 (top) shows buffer line 239 (bottom).
+                    ddr_addr     <= buf_base_addr + ((9'd239 - display_line) * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // 80-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;
@@ -925,12 +935,19 @@ end
 reg  [8:0]  hcol;
 reg  [63:0] lb_q;
 
+// [device-fix: 180° rotation] The compositor writes WORK (hence the DDR buffer, copied
+// verbatim by comp_fb_dma) with the OPPOSITE X+Y convention to this reader's forward output
+// — on hardware the whole frame renders 180°-rotated. Un-rotate on the DISPLAY side (X here,
+// Y in the ST_READ_LINE fetch): output source column hcol_r = 319 - hcol, so display column 0
+// shows buffer column 319 (and the word-group / lane both come from hcol_r).
+wire [8:0]  hcol_r = 9'd319 - hcol;
+
 // vcount here is the native clk_vid timing counter (same domain as this read
 // port) -- no CDC needed. The ddr_clk fill side uses the gray-synced vcount_ddr.
 always @(posedge clk_vid)
-    lb_q <= linebuf[{vcount[0], hcol[8:2]}];
+    lb_q <= linebuf[{vcount[0], hcol_r[8:2]}];
 
-wire [15:0] cur_pix = lb_q[{hcol[1:0], 4'b0000} +: 16];
+wire [15:0] cur_pix = lb_q[{hcol_r[1:0], 4'b0000} +: 16];
 wire  [7:0] dec_r = {cur_pix[15:11], cur_pix[15:13]};
 wire  [7:0] dec_g = {cur_pix[10:5],  cur_pix[10:9]};
 wire  [7:0] dec_b = {cur_pix[4:0],   cur_pix[4:2]};
