@@ -740,9 +740,10 @@ always @(posedge ddr_clk) begin
                 // !ddr_busy so we only ask when the rdr slot is free (arbiter default-owner model,
                 // and comp_fb_dma is not writing during active display).
                 if (!fifo_aclr_ddr_active && !ddr_busy) begin
-                    // [device-fix: 180° rotation] Y un-rotate: fetch SOURCE line (239 -
-                    // display_line), so display line 0 (top) shows buffer line 239 (bottom).
-                    ddr_addr     <= buf_base_addr + ((9'd239 - display_line) * LINE_STRIDE);
+                    // [device-fix: vertical (Y) flip] fetch the REVERSED source line
+                    // (239 - display_line), so display row 0 (top) shows framebuffer row 239
+                    // (bottom) — un-flips the upside-down (Y-up vs Y-down) frame. X stays forward.
+                    ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // 80-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;
@@ -935,19 +936,18 @@ end
 reg  [8:0]  hcol;
 reg  [63:0] lb_q;
 
-// [device-fix: 180° rotation] The compositor writes WORK (hence the DDR buffer, copied
-// verbatim by comp_fb_dma) with the OPPOSITE X+Y convention to this reader's forward output
-// — on hardware the whole frame renders 180°-rotated. Un-rotate on the DISPLAY side (X here,
-// Y in the ST_READ_LINE fetch): output source column hcol_r = 319 - hcol, so display column 0
-// shows buffer column 319 (and the word-group / lane both come from hcol_r).
-wire [8:0]  hcol_r = 9'd319 - hcol;
+// [device-fix: vertical (Y) flip] The frame renders upside-down on hardware — a GameMaker/OpenGL
+// Y-up vs framebuffer Y-down convention mismatch (uniform across borders/HUD/scene). The X axis
+// is CORRECT (sword stays on the left; columns forward). Un-flip on the DISPLAY side, Y ONLY: the
+// ST_READ_LINE fetch reads the reversed SOURCE line (239 - display_line). The pixel output here is
+// UNCHANGED (hcol forward: column 0 = leftmost, lane = hcol[1:0]) — do NOT reverse X.
 
 // vcount here is the native clk_vid timing counter (same domain as this read
 // port) -- no CDC needed. The ddr_clk fill side uses the gray-synced vcount_ddr.
 always @(posedge clk_vid)
-    lb_q <= linebuf[{vcount[0], hcol_r[8:2]}];
+    lb_q <= linebuf[{vcount[0], hcol[8:2]}];
 
-wire [15:0] cur_pix = lb_q[{hcol_r[1:0], 4'b0000} +: 16];
+wire [15:0] cur_pix = lb_q[{hcol[1:0], 4'b0000} +: 16];
 wire  [7:0] dec_r = {cur_pix[15:11], cur_pix[15:13]};
 wire  [7:0] dec_g = {cur_pix[10:5],  cur_pix[10:9]};
 wire  [7:0] dec_b = {cur_pix[4:0],   cur_pix[4:2]};

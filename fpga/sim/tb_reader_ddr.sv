@@ -1,5 +1,5 @@
 // tb_reader_ddr.sv — [DDR-scanout custom-reader] verifies openbor_video_reader's ddr_* burst
-// line-fetch AND its 180°-rotation un-rotate (device-fix). A behavioral DDR model backs the
+// line-fetch AND its vertical (Y) FLIP un-flip (device-fix). A behavioral DDR model backs the
 // reader's ddr_* master with TWO distinct-patterned framebuffers + a control word; the real
 // openbor_video_timing drives the reader. Each timing frame the bench bumps the control-word
 // frame_counter and sets active_buffer.
@@ -8,9 +8,9 @@
 //   (a) FETCH address (Y): each 80-beat read == buf_base + (239 - display_line)*80.
 //   (b) FETCH data 1:1: every line-buffer qword == the active buffer's qword at the fetched
 //       (Y-reversed) line.
-//   (c) OUTPUT orientation (X+Y): during active display, the output pixel cur_pix at screen
-//       (hcol, vcount) == the active buffer's pixel at STORAGE (319 - hcol, 239 - vcount).
-// (c) is the make-or-break: it catches a wrong-axis fix (only-X, only-Y, or none).
+//   (c) OUTPUT orientation (Y only): during active display, the output pixel cur_pix at screen
+//       (hcol, vcount) == the active buffer's pixel at STORAGE (hcol UNCHANGED, 239 - vcount).
+// (c) is the make-or-break: it catches a wrong-axis fix (an accidental X reversal, or none).
 //
 // Copyright (C) 2026 — GPL-3.0
 `default_nettype none
@@ -27,12 +27,12 @@ module tb_reader_ddr;
 
     reg clk = 1'b0; always #5 clk = ~clk;          // single clock (clk_vid == ddr_clk)
     reg reset = 1'b1;
-    // ce_pix ~1-in-8 (device-like): the display line-fetch is paced by new_line; a full-rate
-    // ce_pix would let the pixel output outrun the fetch (linebuf underflow -> stale line),
-    // which is a sim artifact, not the device behavior (device ce_pix is the Genesis H40 rate).
-    reg [2:0] ce_div = 3'd0;
-    always @(posedge clk) ce_div <= ce_div + 3'd1;
-    wire ce_pix = (ce_div == 3'd0);
+    // ce_pix ~1-in-4 (paced): the display line-fetch is paced by new_line; a full-rate ce_pix
+    // would let the pixel output outrun the fetch (linebuf underflow -> stale line), a sim
+    // artifact, not device behavior (device ce_pix is the Genesis H40 rate).
+    reg [1:0] ce_div = 2'd0;
+    always @(posedge clk) ce_div <= ce_div + 2'd1;
+    wire ce_pix = (ce_div == 2'd0);   // ~1-in-4: paced enough (fetch keeps up), faster sim
 
     // ── timing ───────────────────────────────────────────────────────────────────
     wire        tim_hs, tim_vs, tim_hb, tim_vb, tim_de, tim_nf, tim_nl;
@@ -159,7 +159,7 @@ module tb_reader_ddr;
         end
     end
 
-    // (c) OUTPUT orientation (X+Y): cur_pix at screen (hcol,vcount) == buffer pixel (319-hcol,239-vcount).
+    // (c) OUTPUT orientation (Y-flip ONLY): cur_pix at screen (col c,row d) == buffer pixel (col c, row 239-d).
     //     Gated to STABLE (non-flip) frames via orient_arm — the reader tolerates a single-line
     //     re-anchor glitch at a buffer flip (documented; tear-free on device), which is not an
     //     orientation error, so we measure orientation only on settled frames.
@@ -173,11 +173,14 @@ module tb_reader_ddr;
         if (!reset && orient_arm && ce_pix && tim_de && u_reader.frame_ready_vid
             && (u_reader.display_line == (tim_vc + 9'd1))
             && u_reader.hcol < HACT && tim_vc < (VACT-1)) begin
-            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, HACT-1 - u_reader.hcol, VACT-1 - tim_vc)) begin
+            // [device-fix: vertical (Y) flip ONLY] display (col c, row d) must show framebuffer
+            // pixel (col c UNCHANGED, row 239-d). An accidental X reversal (col 319-c) or a
+            // no-op (row d) both fail this.
+            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, VACT-1 - tim_vc)) begin
                 if (orient_errs < 8) $display("  ORIENT MISMATCH screen(%0d,%0d) got=%h exp=%h (buf px %0d,%0d)",
                     u_reader.hcol, tim_vc, u_reader.cur_pix,
-                    bufpix(u_reader.active_buffer, HACT-1 - u_reader.hcol, VACT-1 - tim_vc),
-                    HACT-1 - u_reader.hcol, VACT-1 - tim_vc);
+                    bufpix(u_reader.active_buffer, u_reader.hcol, VACT-1 - tim_vc),
+                    u_reader.hcol, VACT-1 - tim_vc);
                 orient_errs = orient_errs + 1;
             end
             orient_checks = orient_checks + 1;
@@ -224,7 +227,7 @@ module tb_reader_ddr;
         // BUF0 (active=0): settle a few frames (sync + first full frame -> frame_ready), then
         // measure orientation on a STABLE frame (armed). addr/data run continuously (ungated).
         wait_frames(3);
-        orient_arm = 1'b1; wait_lines(45); orient_arm = 1'b0;
+        orient_arm = 1'b1; wait_lines(25); orient_arm = 1'b0;
         $display("BUF0: addr_checks=%0d data_checks=%0d orient_checks=%0d addr_errs=%0d data_errs=%0d orient_errs=%0d active=%0b",
                  addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
         if (u_reader.active_buffer !== 1'b0) active_err = active_err + 1;
@@ -234,7 +237,7 @@ module tb_reader_ddr;
         model_active = 1'b1;
         wait (u_reader.active_buffer === 1'b1);
         wait_frames(3);
-        orient_arm = 1'b1; wait_lines(45); orient_arm = 1'b0;
+        orient_arm = 1'b1; wait_lines(25); orient_arm = 1'b0;
         $display("BUF1: addr_checks=%0d data_checks=%0d orient_checks=%0d addr_errs=%0d data_errs=%0d orient_errs=%0d active=%0b",
                  addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
         if (u_reader.active_buffer !== 1'b1) active_err = active_err + 1;
@@ -249,7 +252,7 @@ module tb_reader_ddr;
                      addr_errs, data_errs, orient_errs, active_err);
             $fatal;
         end
-        $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; 180deg un-rotate correct — screen(x,y)=buf(319-x,239-y), both buffers");
+        $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; VERTICAL flip correct — screen(c,d)=buf(c,239-d), X unchanged, both buffers");
         $display("RESULT: PASS");
         $finish;
     end
