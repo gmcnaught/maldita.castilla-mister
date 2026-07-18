@@ -554,14 +554,15 @@ module tb_blitter_system_pipe;
     repeat(20) @(posedge clk);
     $display("=== blitter done_seq=%0d submit=%0d ; reader bursts=%0d errs=%0d ===",
              mem[32'h200005][31:0], mem[32'h200000][31:0], nbursts, errs);
-    // VCTRL stays on DDR (VCTRL_QW=0x07400000 is BELOW the FB range) -> mem[0].
-    // [FB-in-BRAM #96] composited pixels live in comp_fbram (getpx), not SDRAM.
-    $display("VCTRL      = %h (expect 4 = frame1|buf0)", mem[0][31:0]);
+    // [DDR-scanout custom-reader] blitter_top's VCTRL (control-word) write is RETIRED —
+    // comp_fb_dma is the sole control-word producer now, so mem[0] is no longer written by
+    // the blitter and is not asserted here. [FB-in-BRAM #96] composited pixels live in
+    // comp_fbram (getpx), not SDRAM.
+    $display("VCTRL      = %h (blitter VCTRL retired; comp_fb_dma is the producer now)", mem[0][31:0]);
     $display("BUF0[0,0]  = %h (expect blue 001F)", getpx(0,0));
     $display("rect px    = %h (expect red F800)", getpx(136,104));
     $display("non-rect   = %h (expect blue 001F, px (8,8))", getpx(8,8));
     phase1_ok = (errs==0 && mem[32'h200005][31:0]==mem[32'h200000][31:0]
-                 && mem[0][31:0]==32'd4
                  && getpx(0,0)==16'h001F                   // CLEAR=blue landed in comp_fbram
                  && getpx(136,104)==16'hF800               // FILL rect center = red
                  && getpx(8,8)==16'h001F);                 // outside rect = still blue

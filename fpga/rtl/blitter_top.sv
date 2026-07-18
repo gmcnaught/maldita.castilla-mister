@@ -1389,13 +1389,14 @@ module blitter_top #(
             S_PIPE_WAIT: if (p_blit_done) state<=S_NEXT_CMD;
 
             S_FRAME_VCTRL: begin
-                // Publish the new frame: write vctrl + bump frame_counter, then signal
-                // C_DONE. (The retired off-screen cache pass used to skip this for
-                // target==2; that path no longer exists.)
-                bm_wr<=1; bm_be<=8'h0F; bm_addr<=`VCTRL_QW;
-                bm_din<={32'd0, vctrl_val};
+                // [DDR-scanout custom-reader] The video control-word (VCTRL) write is RETIRED:
+                // comp_fb_dma is now the SOLE control-word producer — it writes the frame_counter
+                // + buffer-select word at FB_QW_BASE (0x3BF40000) AFTER its WORK->DDR copy, so the
+                // reader's active_buffer flip happens once the new frame is fully in DDR. Writing a
+                // second (stale, 0x3A) control word here would race that. This state no longer
+                // touches DDR — it only bumps the perf/debug frame_counter, then signals C_DONE.
                 frame_counter<=frame_counter+1;
-                wr_ret<=S_WR_DONE; state<=S_WR_WAIT;
+                state<=S_WR_DONE;
             end
             S_WR_DONE: begin
                 // low32 = done_seq (handshake); high32 = fabric-busy cyc this frame.

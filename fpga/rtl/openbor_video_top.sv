@@ -142,11 +142,9 @@ openbor_video_reader reader (
     .ddr_be         (ddr_be),
     .ddr_we         (ddr_we),
 
-    // SDRAM framebuffer read master (P_SCAN) — cache-ok protocol
-    .scan_addr      (scan_addr),
-    .scan_rd        (scan_rd),
-    .scan_dout      (scan_dout),
-    .scan_ok        (scan_ok),
+    // [DDR-scanout custom-reader] the reader's SDRAM P_SCAN master is retired — the display
+    // line-fetch now reads the DDR double-buffer directly via ddr_*. This wrapper's own
+    // scan_* ports are idled below (kept only for legacy bench port-compatibility).
 
     .clk_vid        (clk_vid),
     .ce_pix         (ce_pix),
@@ -195,5 +193,10 @@ assign vga_vs    = tim_vsync;
 assign vga_de    = tim_de;
 assign active    = enable & reader_frame_ready;
 assign vsync_out = tim_vsync;
+
+// [DDR-scanout custom-reader] SDRAM P_SCAN master retired — idle this wrapper's scan_* outputs
+// (the reader reads the DDR double-buffer via ddr_* now). scan_dout/scan_ok inputs are unused.
+assign scan_addr = 27'd0;
+assign scan_rd   = 1'b0;
 
 endmodule

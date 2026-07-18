@@ -235,39 +235,19 @@ assign VIDEO_ARX = NATIVE_VID_ACTIVE ? freak_arx : 13'd4;
 assign VIDEO_ARY = NATIVE_VID_ACTIVE ? freak_ary : 13'd3;
 assign VGA_DISABLE = 0;
 
-// ── [DDR-scanout] DDR framebuffer address map ────────────────────────────────────────
-// The framework's ascal scans a DDR3 framebuffer this fabric writes. Placed in the 768 KiB
+// ── [DDR-scanout custom-reader] DDR framebuffer base ─────────────────────────────────
+// The custom openbor_video_reader scans a DDR3 double-buffer this fabric writes (comp_fb_dma)
+// and drives VGA directly (VGA_SCALER=0, the timing the TV syncs to). Placed in the 768 KiB
 // region ABOVE the host texture heap, at MF_DEV_TLBUF_OFF (0xF40000) within the 16 MiB
 // blitter window (0x3B000000): the host writes only ctrl(+0)/ring(+0x40)/SRC-heap(+0x80000..
-// +0xF40000) and never above 0xF40000 (raster_backend_mfgpu.cpp), and the RTL has no
-// TL_BUF/FRT/CFT reads — so this slot is disjoint from control block, ring, and heap, and
-// the host never allocates here. No host-constant change needed.
-//   FB byte range: 0x3BF40000 .. 0x3BF40000 + 320*240*2 (0x25800) = 0x3BF65800  (< 0x3C000000)
-localparam [28:0] FB_QW_BASE   = 29'h077E8000;  // 0x3BF40000 >> 3 (qword base; DMA mem_addr = base+qw)
-localparam [31:0] FB_BYTE_BASE = 32'h3BF40000;  // ascal FB_BASE (byte address)
+// +0xF40000) and never above 0xF40000 (raster_backend_mfgpu.cpp), disjoint from control
+// block/ring/heap, and disjoint from gmloader's 0x3A NativeVideoWriter region. Both
+// comp_fb_dma.fb_qw_base AND openbor_video_reader.FB_QW_BASE use this constant.
+//   CTRL @ 0x3BF40000; BUF0 @ +0x40; BUF1 @ +0x40040; region end 0x3BFA5840 (< 0x3C000000)
+localparam [28:0] FB_QW_BASE = 29'h077E8000;  // 0x3BF40000 >> 3
 
-// ── [DDR-scanout] framework framebuffer (FB_EN + ascal) scanout ──────────────────────
-// The fabric writes a 320x240 RGB565 framebuffer to DDR (FB_BASE, via comp_fb_dma) and the
-// framework's ascal scales it to HDMI (VGA_SCALER=1), replacing the retired custom openbor
-// scanout. Triple-buffered by ascal (lowlat=0, framework default). FB_* ports exist only
-// under MISTER_FB (set in Maldita.qsf). CROP/ASPECT — DEVICE-CONFIRM (Task 4): presenting
-// the FULL 320x240 frame (FB_HEIGHT=240); the game's usual 320x224 crop (status[18]) no
-// longer sits on the analog path — VIDEO_ARX/ARY (above) drives the HDMI aspect. If the
-// crop/aspect regresses on device, switch to FB_HEIGHT=224 + adjust FB_BASE/aspect here.
-`ifdef MISTER_FB
-assign VGA_SCALER    = 1'b1;          // route scanout through ascal (HDMI from FB_BASE)
-assign FB_EN         = 1'b1;
-assign FB_FORMAT     = 5'b00100;      // 16bpp RGB565 ([2:0]=100 16bpp, [3]=0 565, [4]=0 RGB)
-assign FB_WIDTH      = 12'd320;
-assign FB_HEIGHT     = 12'd240;
-assign FB_STRIDE     = 14'd640;       // 320 px * 2 B/px, contiguous (matches comp_fb_dma layout)
-assign FB_BASE       = FB_BYTE_BASE;  // 0x3BF40000 (above the host texture heap)
-assign FB_FORCE_BLANK = 1'b0;
-// FB_VBL / FB_LL are framework INPUTS: FB_VBL sources fb_vs (the DMA trigger, above); FB_LL
-// (low-latency select) is framework-driven and observed only — the emu does not drive it.
-`else
-assign VGA_SCALER    = 1'b0;          // FB path disabled build — analog scanout
-`endif
+// [DDR-scanout custom-reader] ascal FB path reverted — analog/VGA scanout (custom reader).
+assign VGA_SCALER = 1'b0;
 
 assign AUDIO_MIX = 0;
 assign HDMI_FREEZE = 0;
@@ -434,21 +414,21 @@ wire  [7:0] bd_be;
 // vram_demux read-data back to the blitter mem_dout path
 wire [63:0] blt_demux_dout;
 wire        blt_demux_dready;
+// [DDR-scanout custom-reader] openbor_video_timing outputs (clk_vid domain), declared here so
+// the WORK->DDR DMA trigger (fb_vs, below) can be sourced from the scanout vblank. Driven by
+// the openbor_video_timing instance near the video output.
+wire        tim_hsync, tim_vsync, tim_hblank, tim_vblank, tim_de, tim_new_frame, tim_new_line;
+wire [9:0]  tim_hcount;
+wire [8:0]  tim_vcount;
+
 // clk_sys-domain vblank for the coherency flush + the WORK->DDR DMA trigger (blitter_top
-// edge-detects the rising edge -> S_SNAP_* pulses fb_dma_start). [DDR-scanout] Sourced from
-// the framework FB_VBL: ascal's framebuffer vblank. Triggering the copy on FB_VBL lands the
-// WORK->DDR write between ascal's reads of FB_BASE (ascal triple-buffers the single FB_BASE,
-// lowlat=0), minimizing tearing; the ~0.2 ms copy fits well inside the vblank. FB_VBL is
-// clk_vid-domain (sys_top registers ascal o_vbl on clk_vid), so double-flop into clk_sys.
-// DEVICE-CONFIRM (Task 4): verify no tear vs ascal's FB_BASE read cadence; if it tears,
-// gate the writer more tightly on FB_VBL width or add a second FB_BASE ping-pong.
-`ifdef MISTER_FB
-wire        fb_vs_src = FB_VBL;
-`else
-wire        fb_vs_src = VSync;   // FB path disabled build — generic-timing fallback
-`endif
+// edge-detects the rising edge -> S_SNAP_* pulses fb_dma_start). [DDR-scanout custom-reader]
+// Sourced from the SCANOUT vblank (tim_vblank): the compositor copies WORK to the INACTIVE
+// DDR buffer + flips the control word during scanout vblank, when the reader is not fetching
+// the displayed (active) buffer -> tear-free double-buffer. tim_vblank is clk_vid-domain, so
+// double-flop into clk_sys.
 reg  [1:0]  fb_vs_sync = 2'b0;
-always @(posedge clk_sys) fb_vs_sync <= {fb_vs_sync[0], fb_vs_src};
+always @(posedge clk_sys) fb_vs_sync <= {fb_vs_sync[0], tim_vblank};
 wire        fb_vs = fb_vs_sync[1];
 
 // [#44] SDRAM source-STAGING write path: the blitter's BLT_OP_STAGE FSM copies atlas
@@ -582,7 +562,7 @@ comp_fb_dma #(.FB_QWORDS(19200), .AW(15), .MAW(32)) u_fb_dma (
 	.rst          (RESET),
 	.start        (fb_dma_start),
 	.busy         (fb_dma_busy),
-	.fb_base_qw   (FB_QW_BASE),
+	.fb_qw_base   (FB_QW_BASE),
 	// WORK read (muxed onto comp_fbram rd_* by fb_dma_busy above)
 	.work_rd_en   (dma_work_rd_en),
 	.work_rd_qw   (dma_work_rd_qw),
@@ -726,21 +706,36 @@ blitter_top blitter
 	.dbg            ()              // #34 debug probe stripped for shipping core
 );
 
+// [DDR-scanout custom-reader] the arbiter reader slot (rdr_*, the DEFAULT/priority owner) is
+// TIME-SHARED: comp_fb_dma WRITES the framebuffer during the scanout vblank (fb_dma_busy), the
+// openbor_video_reader READS the active buffer during active display (!fb_dma_busy). Double-
+// buffering guarantees the writer (inactive buffer) and reader (active buffer) never touch the
+// same bytes; this mux just serializes the single f2h rdr slot. During fb_dma_busy the reader
+// is forced busy (stalls) so comp_fb_dma owns the bus; its own reads resume after the copy
+// (vblank is long vs the ~0.2 ms copy). rd_ddr_* are the reader's ddr_* master (below).
+wire  [7:0] rd_ddr_burstcnt; wire [28:0] rd_ddr_addr; wire rd_ddr_rd;
+wire [63:0] rd_ddr_din;      wire  [7:0] rd_ddr_be;   wire rd_ddr_we;
+wire  [7:0] rdr_burstcnt = fb_dma_busy ? dma_mem_burstcnt   : rd_ddr_burstcnt;
+wire [28:0] rdr_addr     = fb_dma_busy ? dma_mem_addr[28:0] : rd_ddr_addr;
+wire        rdr_rd       = fb_dma_busy ? 1'b0               : rd_ddr_rd;
+wire [63:0] rdr_din      = fb_dma_busy ? dma_mem_din        : rd_ddr_din;
+wire  [7:0] rdr_be       = fb_dma_busy ? dma_mem_be         : rd_ddr_be;
+wire        rdr_we       = fb_dma_busy ? dma_mem_wr         : rd_ddr_we;
+// reader-side handshake: busy=1 (stall) + dout_ready=0 while comp_fb_dma owns the slot.
+wire        rd_ddr_busy       = fb_dma_busy ? 1'b1 : rdr_busy_w;
+wire        rd_ddr_dout_ready = fb_dma_busy ? 1'b0 : (DDRAM_DOUT_READY & use_nv & rdr_grant_w);
+
 ddr_blitter_arb #(.ENABLE(1'b1)) blitter_arb
 (
 	.clk          (clk_sys),
 	.reset        (RESET),
-	// [DDR-scanout] the freed openbor reader slot is repurposed as comp_fb_dma's DDR WRITE
-	// master (WORK->framebuffer). The reader slot is the arbiter's DEFAULT/priority owner, and
-	// the blitter can't borrow while rdr_we is asserted — but there's no contention anyway: the
-	// DMA runs only at vblank while the blitter is parked in S_SNAP_*. rdr_rd tied 0 (write-only);
-	// mem_busy = rdr_busy (write accepted when ~rdr_busy = state==G_READER & ~ddram_busy).
-	.rdr_burstcnt (dma_mem_burstcnt),
-	.rdr_addr     (dma_mem_addr[28:0]),
-	.rdr_rd       (1'b0),
-	.rdr_din      (dma_mem_din),
-	.rdr_be       (dma_mem_be),
-	.rdr_we       (dma_mem_wr),
+	// reader (m0): time-shared reader-read / comp_fb_dma-write master (mux above).
+	.rdr_burstcnt (rdr_burstcnt),
+	.rdr_addr     (rdr_addr),
+	.rdr_rd       (rdr_rd),
+	.rdr_din      (rdr_din),
+	.rdr_be       (rdr_be),
+	.rdr_we       (rdr_we),
 	.rdr_busy     (rdr_busy_w),
 	.rdr_grant    (rdr_grant_w),
 	// blitter DDR side now comes from vram_demux (bd_*), not the raw mem_* bus
@@ -1053,21 +1048,92 @@ cos cos(vvc + {vc>>forced_scandoubler, 2'b00}, cos_out);
 
 wire [7:0] comp_v = (cos_g >= rnd_c) ? {cos_g - rnd_c, 2'b00} : 8'd0;
 
-// --- [DDR-scanout] custom openbor scanout (native_video) RETIRED ---------------------
-// openbor_video_top bundled the custom scanout reader with the FPGA-side audio ring, the
-// ioctl/cart-load handshake, the joystick->DDR3 forward, and a DDR3 reader master. All of
-// that is retired: scanout moves to the framework FB_EN + ascal path from a DDR framebuffer
-// (wired in Task 3), and audio/input/content are owned by the HPS gmloader, not the FPGA.
-// This is a WIP intermediate: there is NO scanout driver until Task 3 drives FB_EN/ascal +
-// instantiates comp_fb_dma (device gate is Task 4). The analog VGA_* outputs are driven from
-// the generic video timing here (they are bypassed once Task 3 sets FB_EN=1 + VGA_SCALER=1).
-// The freed audio/ioctl/reader tie-offs are above; the arbiter reader slot is idled and
-// repurposed for the comp_fb_dma writer in Task 3.
-assign VGA_DE  = ~(HBlank | VBlank);
-assign VGA_HS  = HSync;
-assign VGA_VS  = VSync;
-assign VGA_R   = comp_v;
-assign VGA_G   = comp_v;
-assign VGA_B   = comp_v;
+// --- [DDR-scanout custom-reader] openbor synchronous DDR scanout -> VGA -----------------
+// The custom openbor_video_timing (exact Genesis H40) + openbor_video_reader read the DDR3
+// double-buffer that comp_fb_dma writes and drive VGA_* directly (VGA_SCALER=0 -> video_mixer/
+// analog, the timing the TV syncs to). We instantiate the timing + reader DIRECTLY (NOT
+// openbor_video_top) — its audio/joystick/ioctl HPS-I/O is DEFERRED (tied off; SCANOUT_ONLY
+// gates the reader's out-of-region audio-ring DDR path). The reader's ddr_* master is the
+// rd_ddr_* side of the rdr time-share mux above.
+// OSD CRT position (status[14:12]/[17:15]) -> timing h_adj/v_adj, as openbor_video_top did.
+wire signed [4:0] h_adj = (h_pos == 3'd0) ?  5'sd0 : (h_pos == 3'd1) ?  5'sd4 :
+                          (h_pos == 3'd2) ?  5'sd8 : (h_pos == 3'd3) ?  5'sd12 :
+                          (h_pos == 3'd4) ? -5'sd12 : (h_pos == 3'd5) ? -5'sd8 : -5'sd4;
+wire signed [3:0] v_adj = (v_pos == 3'd0) ?  4'sd0 : (v_pos == 3'd1) ?  4'sd1 :
+                          (v_pos == 3'd2) ?  4'sd2 : (v_pos == 3'd3) ?  4'sd3 :
+                          (v_pos == 3'd4) ? -4'sd3 : (v_pos == 3'd5) ? -4'sd2 : -4'sd1;
+
+openbor_video_timing u_timing (
+	.clk       (CLK_VIDEO),
+	.ce_pix    (ce_pix_gen),
+	.reset     (RESET),
+	.h_adj     (h_adj),
+	.v_adj     (v_adj),
+	.hsync     (tim_hsync),
+	.vsync     (tim_vsync),
+	.hblank    (tim_hblank),
+	.vblank    (tim_vblank),
+	.de        (tim_de),
+	.hcount    (tim_hcount),
+	.vcount    (tim_vcount),
+	.new_frame (tim_new_frame),
+	.new_line  (tim_new_line)
+);
+
+wire [7:0] reader_r, reader_g, reader_b;
+openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
+	// DDR3 master -> rd_ddr_* side of the rdr time-share mux (arbiter reader slot)
+	.ddr_clk        (clk_sys),
+	.ddr_busy       (rd_ddr_busy),
+	.ddr_burstcnt   (rd_ddr_burstcnt),
+	.ddr_addr       (rd_ddr_addr),
+	.ddr_dout       (DDRAM_DOUT),
+	.ddr_dout_ready (rd_ddr_dout_ready),
+	.ddr_rd         (rd_ddr_rd),
+	.ddr_din        (rd_ddr_din),
+	.ddr_be         (rd_ddr_be),
+	.ddr_we         (rd_ddr_we),
+	// pixel clock + timing (from u_timing)
+	.clk_vid        (CLK_VIDEO),
+	.ce_pix         (ce_pix_gen),
+	.reset          (RESET),
+	.de             (tim_de),
+	.hblank         (tim_hblank),
+	.vblank         (tim_vblank),
+	.new_frame      (tim_new_frame),
+	.new_line       (tim_new_line),
+	.vcount         (tim_vcount),
+	// HPS-I/O DEFERRED — tied off (SCANOUT_ONLY gates the audio path internally)
+	.ioctl_download (1'b0),
+	.ioctl_wr       (1'b0),
+	.ioctl_addr     (27'd0),
+	.ioctl_dout     (8'd0),
+	.ioctl_wait     (),
+	.joystick_0     (32'd0),
+	.joystick_1     (32'd0),
+	.joystick_2     (32'd0),
+	.joystick_3     (32'd0),
+	.joystick_l_analog_0 (16'd0),
+	// pixel output
+	.r_out          (reader_r),
+	.g_out          (reader_g),
+	.b_out          (reader_b),
+	// audio DEFERRED
+	.clk_audio      (CLK_AUDIO),
+	.audio_l        (),
+	.audio_r        (),
+	.enable         (NATIVE_VID),
+	.frame_ready    (),
+	.dbg_blt        (32'd0),
+	.dbg_addr       (32'd0),
+	.dbg_diag       (32'd0)
+);
+
+assign VGA_DE  = tim_de;
+assign VGA_HS  = tim_hsync;
+assign VGA_VS  = tim_vsync;
+assign VGA_R   = reader_r;
+assign VGA_G   = reader_g;
+assign VGA_B   = reader_b;
 
 endmodule

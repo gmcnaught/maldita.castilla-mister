@@ -10,17 +10,12 @@
 
 set_global_assignment -name VERILOG_MACRO "MENU_CORE=1"
 set_global_assignment -name VERILOG_MACRO "MALDITA_CORE=1"
-# [DDR-scanout Task 3] MISTER_FB enables the framework FB_EN + ascal path: the fabric
-# writes a DDR3 framebuffer (comp_fb_dma) and ascal scales it to HDMI, replacing the
-# retired custom openbor scanout. This exposes the emu FB_* ports (Maldita.sv drives them).
-# We deliberately DO NOT set MISTER_FB_PALETTE (16bpp RGB565, no palette) and KEEP
-# MISTER_DISABLE_PALETTE1 below so ascal's pal1_mem stays dropped — the STA-motivated
-# palette removal is preserved (only the FB-read datapath is added). STA impact of the FB
-# read path is a Task-4 build watch-item.
-set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
-# ascal's default-on PALETTE generic (pal1_mem) is dead logic that ate routing budget and
-# drove the pll_hdmi divclk domain negative (60fps campaign Phase 3a STA gate, ~-1.0ns
-# across a 10-seed sweep). Drop it (independent of MISTER_FB; RGB565 needs no palette).
+# [DDR-scanout custom-reader] MISTER_FB was reverted: the ascal FB path is dropped in favour
+# of the custom synchronous openbor DDR reader -> video_mixer/VGA path (the timing the TV
+# syncs to). Maldita does NOT set MISTER_FB (video is direct RGB through the FPGA compositor
+# + reader). ascal's default-on PALETTE generic (pal1_mem) is dead logic that ate routing
+# budget and drove the pll_hdmi divclk domain negative (60fps campaign Phase 3a STA gate,
+# ~-1.0ns across a 10-seed sweep). Drop it.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_PALETTE1=1"
 
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top

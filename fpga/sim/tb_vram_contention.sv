@@ -290,6 +290,12 @@ module tb_vram_contention;
       wmem(32'h20000D, 64'd0); wmem(32'h20000E, 64'd0); wmem(32'h20000F, 64'd0);
       submit_n = submit_n + 1;
       wmem(32'h200000, submit_n[63:0]); // bump submit -> compositor renders a frame
+      // [DDR-scanout custom-reader] producer-mock: blitter_top's VCTRL control-word write is
+      // RETIRED (comp_fb_dma is the sole producer now), so the TB mocks it here — bump the
+      // control word at CTRL_ADDR (mem[0]) so the reader detects a new frame and scans (its
+      // ddr_* line-fetch reads BUF0 = mem[8..], contending with the compositor's DDR traffic).
+      // Layout matches the reader: {frame_counter[31:2], 1'b0, active_buffer=0}.
+      wmem(32'h0, {32'd0, submit_n[29:0], 2'd0});
     end
   endtask
 

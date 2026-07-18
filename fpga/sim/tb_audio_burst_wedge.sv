@@ -129,11 +129,7 @@ module tb_audio_burst_wedge;
     .ddr_be          (ddr_be),
     .ddr_we          (ddr_we),
 
-    // SDRAM framebuffer read master (P_SCAN — cache ok protocol)
-    .scan_addr       (scan_addr),
-    .scan_rd         (scan_rd),
-    .scan_dout       (scan_dout),
-    .scan_ok         (scan_ok),
+    // [DDR-scanout custom-reader] SDRAM P_SCAN master retired (display reads DDR via ddr_*).
 
     .clk_vid         (clk_vid),
     .ce_pix          (ce_pix),

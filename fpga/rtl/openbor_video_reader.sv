@@ -35,7 +35,17 @@
 //
 //============================================================================
 
-module openbor_video_reader (
+module openbor_video_reader #(
+    // [DDR-scanout custom-reader] the control-word + double-buffer region base (qword addr).
+    // Default = the legacy 0x3A000000 base; the fabric build sets it to 0x077E8000
+    // (0x3BF40000) so the framebuffer lives above the host texture heap, disjoint from
+    // gmloader's 0x3A region. CTRL @ base, BUF0 @ base+8, BUF1 @ base+0x8008 stay relative.
+    parameter [28:0] FB_QW_BASE   = 29'h07400000,
+    // SCANOUT_ONLY=1 gates the deferred HPS-side audio-ring DDR path (its ring lives at
+    // base+0xD0000, which falls OUTSIDE the 16 MiB window once repointed). Scanout + the
+    // in-region joystick/cart writes are unaffected.
+    parameter        SCANOUT_ONLY = 1'b0
+)(
     // DDR3 Avalon-MM master
     input  wire        ddr_clk,
     input  wire        ddr_busy,
@@ -48,11 +58,8 @@ module openbor_video_reader (
     output wire  [7:0] ddr_be,
     output reg         ddr_we,
 
-    // SDRAM framebuffer read master (P_SCAN) — per-qword cache ok protocol
-    output reg  [26:0] scan_addr,
-    output reg         scan_rd,
-    input  wire [63:0] scan_dout,
-    input  wire        scan_ok,
+    // [DDR-scanout custom-reader] the SDRAM P_SCAN master is RETIRED — the display line-fetch
+    // reads the DDR double-buffer directly via ddr_* (BUF0/BUF1 by active_buffer).
 
     // Pixel output (clk_vid domain)
     input  wire        clk_vid,
@@ -135,23 +142,25 @@ assign ddr_be  = 8'hFF;
 // = 19,200 qwords. The next buffer starts 256KB later (0x40000 bytes
 // = 0x8000 qwords) leaving plenty of headroom. Cart data lives well
 // past the end of BUF1 to allow hot-swap during gameplay without overlap.
-localparam [28:0] CTRL_ADDR      = 29'h07400000;  // 0x3A000000 >> 3
-localparam [28:0] JOY0_ADDR      = 29'h07400001;  // 0x3A000008 >> 3
-localparam [28:0] CART_CTRL_ADDR = 29'h07400002;  // 0x3A000010 >> 3
-localparam [28:0] JOY1_ADDR      = 29'h07400003;  // 0x3A000018 >> 3
-localparam [28:0] JOY2_ADDR      = 29'h07400004;  // 0x3A000020 >> 3
-localparam [28:0] JOY3_ADDR      = 29'h07400005;  // 0x3A000028 >> 3
-localparam [28:0] AUDIO_WR_ADDR   = 29'h07400006;  // 0x3A000030 >> 3
-localparam [28:0] AUDIO_RD_ADDR   = 29'h07400007;  // 0x3A000038 >> 3
-localparam [28:0] BUF0_ADDR      = 29'h07400008;  // 0x3A000040 >> 3
-localparam [28:0] BUF1_ADDR      = 29'h07408008;  // 0x3A040040 >> 3
-localparam [28:0] CART_DATA_ADDR = 29'h07410000;  // 0x3A080000 >> 3
-localparam [28:0] AUDIO_RING_ADDR = 29'h0741A000; // 0x3A0D0000 >> 3
+// [DDR-scanout custom-reader] all region addresses are now RELATIVE to FB_QW_BASE so the
+// framebuffer moves as a block (default base 0x07400000 reproduces the legacy 0x3A map).
+localparam [28:0] CTRL_ADDR      = FB_QW_BASE + 29'h00000;  // control word (frame_counter|active)
+localparam [28:0] JOY0_ADDR      = FB_QW_BASE + 29'h00001;  // joystick P1 (in-region, harmless)
+localparam [28:0] CART_CTRL_ADDR = FB_QW_BASE + 29'h00002;
+localparam [28:0] JOY1_ADDR      = FB_QW_BASE + 29'h00003;
+localparam [28:0] JOY2_ADDR      = FB_QW_BASE + 29'h00004;
+localparam [28:0] JOY3_ADDR      = FB_QW_BASE + 29'h00005;
+localparam [28:0] AUDIO_WR_ADDR   = FB_QW_BASE + 29'h00006;
+localparam [28:0] AUDIO_RD_ADDR   = FB_QW_BASE + 29'h00007;
+localparam [28:0] BUF0_ADDR      = FB_QW_BASE + 29'h00008;  // Buffer 0 (+0x40 bytes)
+localparam [28:0] BUF1_ADDR      = FB_QW_BASE + 29'h08008;  // Buffer 1 (+0x40040 bytes)
+localparam [28:0] CART_DATA_ADDR = FB_QW_BASE + 29'h10000;  // cart path gated off (ioctl deferred)
+localparam [28:0] AUDIO_RING_ADDR = FB_QW_BASE + 29'h1A000; // audio path gated by SCANOUT_ONLY
 // VSYNC writeback (anti-tearing): the scanout writes an incrementing counter here at
 // the start of EACH displayed frame (vblank) so the ARM/engine can vsync-PACE its
 // producer — produce exactly one frame per scan into the non-displayed buffer instead
 // of free-running at ~60fps and racing the buffer switch (which tore the analog output).
-localparam [28:0] VSYNC_ADDR      = 29'h0740E000; // 0x3A070000 >> 3 (free gap post-buffers)
+localparam [28:0] VSYNC_ADDR      = FB_QW_BASE + 29'h0E000; // debug vblank-counter writeback (in-region)
 localparam [31:0] AUDIO_RING_BYTES = 32'h00010000; // 64 KiB
 localparam [31:0] AUDIO_RING_MASK  = 32'h0000FFFF;
 
@@ -319,18 +328,11 @@ reg  [31:0] ctrl_word;
 reg  [29:0] prev_frame_counter;
 reg         active_buffer;
 reg  [31:0] vsync_count;      // increments each displayed frame; written to VSYNC_ADDR
-reg  [26:0] buf_base_addr;   // SDRAM byte base (27-bit)
+reg  [28:0] buf_base_addr;   // [DDR-scanout custom-reader/Option A] DDR qword base of the ACTIVE
+                             // display buffer, latched at ST_CHECK_CTRL (BUF0/BUF1 by active_buffer)
 reg  [8:0]  display_line;     // 0..239 (output display line, also = source line)
 reg  [6:0]  beat_count;
-// [#44] The P_SCAN cache asserts scan_ok for TWO consecutive cycles per served
-// qword (verified in sim, tb_scan_qworddup). The line-fill capture/advance below
-// keyed off the scan_ok LEVEL, so it captured each qword twice (2nd capture sees
-// the still-unchanged dout) and advanced scan_addr twice — dropping every odd
-// qword and duplicating every even one (the "A,B,C,D drawn as A,A,C,C" banding).
-// scan_ok_d lets us act only on the RISING edge of scan_ok: exactly one accept
-// per serve.
-reg         scan_ok_d;
-// [#39 probe] OR-accumulate every scan_dout (FB data read from SDRAM ch4) over a
+// [#39 probe] OR-accumulate every ddr_dout (FB data read) over a
 // frame; published in the VSYNC writeback high word (0x3A070004). Non-zero ->
 // the FB IS in SDRAM and the reader reads it (so a black screen is a reader-data/
 // display bug); zero -> the FB never landed in the SDRAM region we read
@@ -395,7 +397,9 @@ wire        audio_fifo_low = (audio_fifo_wrusedw < AUDIO_REFILL_THRESHOLD);
 
 // Audio fetch eligibility (combinational)
 wire [31:0] audio_bytes_avail = (audio_wr_ptr - audio_rd_ptr) & AUDIO_RING_MASK;
-wire        audio_wake        = enable_ddr && audio_fifo_low && (audio_backoff == 20'd0);
+// [DDR-scanout custom-reader] SCANOUT_ONLY gates the audio-ring DDR path (its ring at
+// base+0xD0000 is out-of-window once repointed; HPS audio is deferred).
+wire        audio_wake        = !SCANOUT_ONLY && enable_ddr && audio_fifo_low && (audio_backoff == 20'd0);
 
 // Burst planning (combinational, used in ST_PLAN_AUDIO).
 wire [31:0] audio_plan_cand_a  = (audio_bytes_avail > 32'd256) ? 32'd256 : audio_bytes_avail;
@@ -421,10 +425,7 @@ always @(posedge ddr_clk) begin
         prev_frame_counter <= 30'd0;
         active_buffer      <= 1'b0;
         vsync_count        <= 32'd0;
-        buf_base_addr      <= 27'd0;
-        scan_addr          <= 27'd0;
-        scan_rd            <= 1'b0;
-        scan_ok_d          <= 1'b0;
+        buf_base_addr      <= 29'd0;
         display_line       <= 9'd0;
         beat_count         <= 7'd0;
         scan_acc           <= 32'd0;
@@ -465,26 +466,24 @@ always @(posedge ddr_clk) begin
         if (fifo_aclr_cnt != 4'd0) fifo_aclr_cnt <= fifo_aclr_cnt - 4'd1;
         if (!ddr_busy) ddr_rd <= 1'b0;
         if (!ddr_busy) ddr_we <= 1'b0;
-        scan_rd <= 1'b0;
-        scan_ok_d <= scan_ok;   // [#44] for rising-edge detect of the 2-cycle scan_ok
 
         // Latch new_frame pulse so cart writes can't cause it to be missed
         if (new_frame_ddr) new_frame_pending <= 1'b1;
 
         // Beat capture -> back line buffer. Line L fills buffer L%2 at word=beat.
         // (display_line is the line being fetched; it increments in ST_LINE_DONE.)
-        // Line fetch now comes from the P_SCAN cache channel (scan_dout/scan_ok).
-        // [#44] Capture on the RISING edge of scan_ok only — scan_ok is asserted
-        // for 2 cycles per served qword; the 2nd cycle carries the SAME (stale)
-        // dout, so capturing on the level duplicated qwords (A,A,C,C).
-        if (state == ST_WAIT_LINE && scan_ok && !scan_ok_d) begin
+        // [DDR-scanout custom-reader / Option A] The display line-fetch is now a ddr_* BURST
+        // read of the active DDR buffer (BUF0/BUF1 by active_buffer) — the SCAN cache path is
+        // gone. Each ddr_dout_ready is exactly one qword (no 2-cycle stale like scan_ok), so
+        // capture on the level.
+        if (state == ST_WAIT_LINE && ddr_dout_ready) begin
             lb_we      <= 1'b1;
             lb_waddr   <= {display_line[0], beat_count};
-            lb_wdata   <= scan_dout;
+            lb_wdata   <= ddr_dout;
             beat_count <= beat_count + 7'd1;
             timeout_cnt<= 20'd0;
 `ifdef SOLARUS_DBG_PROBES
-            scan_acc   <= scan_acc | scan_dout[63:32] | scan_dout[31:0];  // [#39 probe]
+            scan_acc   <= scan_acc | ddr_dout[63:32] | ddr_dout[31:0];  // [#39 probe]
 `endif
         end
 
@@ -548,7 +547,10 @@ always @(posedge ddr_clk) begin
                 // new_frame_pending is latched so it can't be missed.
                 if (enable_ddr && new_frame_pending) begin
                     new_frame_pending <= 1'b0;  // consumed
-                    state <= ST_WRITE_JOY0;
+                    // [DDR-scanout custom-reader] SCANOUT_ONLY skips the joystick-write +
+                    // vsync-writeback DDR path (deferred HPS-I/O) and goes straight to the
+                    // control-word poll -> line-fetch scanout.
+                    state <= SCANOUT_ONLY ? ST_POLL_CTRL : ST_WRITE_JOY0;
                 end
                 else if (cart_write_pending)
                     state <= ST_WRITE_CART;
@@ -694,11 +696,10 @@ always @(posedge ddr_clk) begin
                     prev_frame_counter <= ctrl_word[31:2];
                     active_buffer      <= ctrl_word[0];
                     stale_vblank_count <= 5'd0;
-                    // [FB-in-BRAM] Single on-chip framebuffer (comp_fbram): the scan
-                    // fetch addresses one buffer at base 0, so scan_addr = line*640 +
-                    // beat*8 and the fbram_scan_adapter maps scan_addr[17:3] -> qword.
-                    // (active_buffer is still tracked but no longer selects a base.)
-                    buf_base_addr      <= 27'd0;
+                    // [DDR-scanout custom-reader/Option A] latch the ACTIVE buffer's DDR base
+                    // for the whole frame (tear-free: a mid-frame comp_fb_dma flip cannot move
+                    // the displayed buffer). Proven MiSTer_OpenBOR_7533 reader idiom.
+                    buf_base_addr      <= ctrl_word[0] ? BUF1_ADDR : BUF0_ADDR;
                     display_line       <= 9'd0;
                     preloading         <= 1'b1;
                     fifo_aclr_cnt      <= 4'd8;
@@ -723,15 +724,17 @@ always @(posedge ddr_clk) begin
             end
 
             ST_READ_LINE: begin
-                if (!fifo_aclr_ddr_active) begin
-                    // No vertical doubling -- source line == display line.
-                    // Each scanline is 640 bytes (SDRAM_FB_STRIDE), 80 qwords.
-                    // Issue first per-qword cache read (scan_rd=1 with scan_addr).
-                    // The cache ok protocol requires no sdram_busy check — there
-                    // is no sdram_busy in the P_SCAN channel; the reader just
-                    // pulses scan_rd and waits for scan_ok before advancing.
-                    scan_addr    <= buf_base_addr + ({18'd0, display_line} * `SDRAM_FB_STRIDE);
-                    scan_rd      <= 1'b1;
+                // [DDR-scanout custom-reader / Option A] Issue ONE ddr_* BURST read of the
+                // whole scanline (LINE_BURST=80 qwords = 640 bytes) from the ACTIVE DDR buffer,
+                // selected by active_buffer (latched at ST_CHECK_CTRL, held for the whole frame
+                // -> tear-free; a mid-frame comp_fb_dma flip cannot switch the displayed buffer
+                // mid-scan). ddr_rd is held-until-accepted by the top-of-always default; gate on
+                // !ddr_busy so we only ask when the rdr slot is free (arbiter default-owner model,
+                // and comp_fb_dma is not writing during active display).
+                if (!fifo_aclr_ddr_active && !ddr_busy) begin
+                    ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
+                    ddr_burstcnt <= LINE_BURST;      // 80-beat burst
+                    ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;
                     timeout_cnt  <= 20'd0;
                     state        <= ST_WAIT_LINE;
@@ -739,31 +742,13 @@ always @(posedge ddr_clk) begin
             end
 
             ST_WAIT_LINE: begin
+                // Collect the 80 burst beats (captured into linebuf in the shared block above,
+                // which increments beat_count on each ddr_dout_ready). The f2h auto-increments
+                // the burst address; the reader just counts beats. TIMEOUT_MAX guards a hang.
                 if (beat_count == LINE_BURST[6:0]) begin
-                    // All 80 qwords captured; scan_rd already cleared by the
-                    // default clear above (fires the cycle after the last ok).
                     state <= ST_LINE_DONE;
                 end
-                // P_SCAN ok protocol with HOLD-until-ok backpressure: scan_rd is
-                // held high while the request is outstanding (the else branch),
-                // dropped for one cycle on the accepted (rising-edge) scan_ok, then
-                // re-asserted for the next qword's address. A starve only DELAYS
-                // scan_ok; the held request completes when it lifts.
-                // [#44] Advance on the RISING edge of scan_ok only (one accept per
-                // served qword) — see scan_ok_d. The 2nd scan_ok cycle now falls to
-                // the else branch (re-assert/hold), NOT a second advance, so no qword
-                // is skipped.
-                else if (scan_ok && !scan_ok_d) begin
-                    // Beat captured in the shared block above; advance to the next
-                    // qword. After beat 79 do NOT advance/re-issue — beat_count
-                    // reaches 80 next cycle and we go to ST_LINE_DONE.
-                    if (beat_count != (LINE_BURST[6:0] - 7'd1))
-                        scan_addr <= scan_addr + 27'd8;   // next qword (8 bytes)
-                end
-                else begin
-                    // Request outstanding (or the 2nd, stale scan_ok cycle): hold
-                    // scan_rd until the next fresh serve.
-                    scan_rd <= 1'b1;
+                else if (!ddr_dout_ready) begin
                     if (timeout_cnt == TIMEOUT_MAX)
                         state <= ST_IDLE;          // safety: avoid a true hang
                     else
