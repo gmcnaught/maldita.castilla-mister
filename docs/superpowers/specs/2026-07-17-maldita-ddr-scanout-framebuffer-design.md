@@ -58,21 +58,40 @@ Confirmed against four cores (research clones in `scratchpad/research/`):
   (`sdram1.sv` deterministic controller, `ddram.sv` line-cache) if we ever
   wanted to avoid `ascal`.
 
-## Chosen approach
+## Revision (2026-07-18): pivot from `ascal` to a custom DDR reader
 
-**Framework `FB_EN` + `ascal`, triple-buffered.** (Decided over a custom DDR
-scanout reader — least new RTL, complete worked example in ao486, deletes the
-most M10K, and the hard latency/arbitration code is shipped framework code we
-don't have to bit-exact-verify. Accepted tradeoff: `ascal` owns pixel
-timing/scaling — fine for a GPU-offload core that needs no beam accuracy.)
+The original approach — framework `FB_EN` + `ascal` (triple-buffered) — was
+built (RTL Tasks 1–3) and **fit the device (M10K 415/553)**, confirming the
+M10K goal. But on hardware it produced **screen noise + TV no-sync**, and a
+DDR peek showed the framebuffer address held stale ARM code, not a frame:
+`comp_fb_dma` was **not landing the frame in DDR**. Root cause direction: the
+WORK→DDR copy was triggered off `ascal`'s **output** vblank (`FB_VBL`),
+coupling the producer to the asynchronous consumer — a backwards dependency
+that also stalls if `ascal` never locks. More broadly, `ascal` is an
+**asynchronous scaler** (framerate conversion + triple-buffer + its own video
+mode negotiation) — over-featured for a fixed-rate fabric, it changed the
+HDMI mode (→ TV no-sync), added load to the fragile `pll_hdmi` clock, and
+**entangled validation** (couldn't separate "frame not written" from "ascal
+mis-presenting"). Decision: keep the DDR-framebuffer relocation (it frees the
+M10K), but replace `ascal` with a **custom synchronous DDR reader → the
+core's existing `video_mixer`/VGA path** (the timing the TV already synced
+to). Everything below is the revised (current) design; the `ascal` sections
+above ("Chosen approach" rationale, ao486 reference) are retained as the
+decision trail.
 
-**Triple-buffering by `ascal`** (`lowlat=0`) over a self-managed
-double-buffer: less core logic — `ascal` owns the 3 presentation buffers and
-the swap; the core just writes its composited frame and drives `FB_*`.
+## Chosen approach (custom DDR reader)
 
-**One combined RBF** (surface wired + scanout moved together), not a
-sequenced two-step: the device is already non-functional (black centre), so
-there is no working state to protect by isolating the changes.
+**Adapt the existing `openbor_video_reader`** — already a DDR3-framebuffer,
+double-buffered, raster-scanout reader that outputs `VGA_R/G/B/HS/VS/DE`
+directly (Genesis H40 timing, no scaling) via `openbor_video_timing`. It was
+originally set aside as "designed for HPS-delivered frames" — but this pivot
+*deliberately writes the frame to DDR*, so at scanout time the frame **is** in
+DDR, exactly its use case. Reuse its DDR-read + double-buffer + known-good
+timing; the only change is that the **fabric** (not the HPS) writes the frame
+and flips `active_buffer`. Chosen over a clean-sheet reader: far less new RTL,
+proven TV-syncable timing, and it drops `ascal` entirely. `openbor_video_top`'s
+audio/joystick/ioctl wrapper stays **out** (deferred — see Out of scope);
+re-instantiate only the reader + timing.
 
 ## Architecture & data flow
 
@@ -80,91 +99,94 @@ there is no working state to protect by isolating the changes.
 blitter_top (draw-order rasterizer)
   ├─ renders → comp_fbram WORK    (BRAM, 160 M10K)   unchanged
   ├─ renders → comp_fbram SURFACE (BRAM, 160 M10K)   connected (2a78462)
-  └─ at vblank: burst-DMA WORK → DDR3 framebuffer (via existing arb_ddr_* f2h)
-DDR3 framebuffer (RGB565, reserved slot in the 16 MB blitter window)
-  └─ ascal reads FB_BASE, triple-buffers, scales → HDMI          framework
+  └─ at COMPOSITOR vblank: comp_fb_dma bursts WORK → the DDR *inactive* buffer,
+     then writes the control word (frame_counter++, active_buffer=just-written)
+DDR3 framebuffer (RGB565, 2 ping-pong buffers + control word, in the 16 MB window)
+  └─ openbor_video_reader reads control word → active_buffer → streams that
+     buffer in raster order → openbor_video_timing → VGA_R/G/B/HS/VS/DE
+     → framework video path (VGA_SCALER=0)
 ```
 
-The framework contract (verified in `sys/sys_top.v` + `sys/ascal.vhd`): the
-core's `FB_*` outputs feed `ascal`; `ascal`'s buffering mode is `~lowlat`
-(`ascal.vhd:89-90`: `lowlat=0` → triple-buffering, `RAMSIZE ×3`, `ascal`
-detects end-of-frame and rotates its own 3 presentation buffers at
-`RAMBASE`, separate from the core's `FB_BASE`). The core drives `FB_EN=1`,
-`FB_FORMAT=5'b00100` (`[2:0]=100` 16bpp, `[3]=0` 565, `[4]=0` RGB),
-`FB_WIDTH=320`, `FB_HEIGHT=240`, `FB_STRIDE=640`, `FB_BASE=<fb addr>`,
-`VGA_SCALER=1`, and observes `FB_VBL`.
+Producer (compositor-vblank writes) and consumer (reader streams) are
+**decoupled** by the double buffer: `comp_fb_dma` writes the inactive buffer
+and flips `active_buffer`; the reader always reads the active buffer. No
+`FB_VBL`, no `ascal`, no circular trigger. DDR layout mirrors the reader's
+existing map: control word @ `+0x000` (`frame_counter[31:2]`,
+`active_buffer[1:0]`), Buffer 0 @ `+0x040`, Buffer 1 @ `+0x40040`.
 
 ## Components
 
-**`comp_fbram.sv`** — Remove SCAN banks (`sbank0-3`) and the WORK→SCAN
-`snap_*` port; keep WORK + SURFACE and their ports. This is the −160 M10K.
-One clear responsibility: the two on-chip render-target framebuffers.
+**`comp_fbram.sv`** — (done, Task 2) SCAN banks removed; WORK + SURFACE kept.
+The −160 M10K.
 
-**`blitter_top.sv`** — Retarget the existing vblank `u_snap` path (today
-WORK→SCAN BRAM) into a **WORK→DDR burst-writer**: at vblank, read WORK in
-raster order and burst-write it to the DDR framebuffer via the `arb_ddr_*`
-arbiter, then signal frame-ready (coordinated with `FB_VBL`). No change to
-the rasterizer or the surface path.
+**`comp_fb_dma.sv`** — (Task 1 core stands) extend from single-buffer to
+**double-buffer**: write the inactive buffer (`+0x040` / `+0x40040`), then the
+control word; trigger off the **compositor vblank** (the blitter's existing
+`fb_dma_start`/`vs` path), **not** `FB_VBL`.
 
-**`Maldita.sv`** — Drive the `FB_*` registers + `VGA_SCALER=1` + `lowlat=0`
-path; add the FB-writer as a client on the existing DDR arbiter; **delete**
-`openbor_video_top`, `fbram_scan_adapter`, the `scn_*` wiring, and the
-stale-frame watchdog. Retain only the `CLK_VIDEO`/`CE_PIXEL` the framework
-still requires under `FB_EN`.
+**Scanout reader** — re-instantiate `openbor_video_reader` +
+`openbor_video_timing` directly (skip `openbor_video_top`), repoint the base
+from `0x3A…` to the fabric framebuffer, wire its `ddr_*` master onto the
+arbiter `rdr_*` slot, output → `VGA_*`. Tie off its unused SDRAM `scan_*` path.
+
+**`Maldita.sv`** — `VGA_SCALER=0`; instantiate reader + timing → `VGA_*`;
+**revert** the Task-3 `FB_*`/`ascal` drives and the comp_fb_dma-as-sole-rdr-
+writer wiring; wire the `rdr_*` arbiter slot to carry reader reads (active
+display) and `comp_fb_dma` writes (vblank).
+
+**`Maldita.qsf`** — drop `MISTER_FB=1` (revert Task 3). Keep
+`MISTER_DISABLE_PALETTE1` as it was pre-Task-3.
 
 ## DDR framebuffer placement
 
-Reserve a fixed framebuffer slot inside the 16 MB blitter window
-(`0x3B000000`), not overlapping the control block (`+0x00`), ring (`+0x40`),
-or texture heap (`+0x80000`, ~14.62 MB). One source buffer is
-320×240×2 = 153,600 B (~150 KB); round up to a 512 KB reserved slot.
-`ascal`'s 3 presentation buffers live in the framework's `RAMBASE`, not this
-slot. The framebuffer is **fabric-internal** — written by `blitter_top`, read
-by `ascal`; the host (`gmloader`) never touches it. The host texture-heap cap
-(`MF_DEV_SRC_CAP`) must exclude the reserved slot (a small host-side constant
-trim), or the slot is placed above the heap so no host change is needed —
-lock the exact address map in the plan.
+Two 320×240×2 = 153,600 B buffers + a control word, in the reserved slot at
+the top of the 16 MB blitter window (`0x3B000000`), above the texture heap
+(host writes ≤ `0xF40000`), matching the reader's `+0x000`/`+0x040`/`+0x40040`
+offsets. Fabric-internal (written by `comp_fb_dma`, read by the reader; the
+host never touches it). No host change (slot sits above the heap).
 
-## Video-path details (locked in the plan)
+## Video-path details
 
-- Under `VGA_SCALER=1` + `FB_EN`, the analog `VGA_R/G/B` path and
-  `video_freak` are bypassed; scanout is entirely `ascal`-from-DDR.
-- **320×224 crop** (`status[18]`) must be re-expressed via `FB_HEIGHT` /
-  lines-DMA'd or aspect reporting. Initial approach: carry the full 320×240
-  composited frame and confirm crop/aspect against the framework FB+`ascal`
-  behaviour; adjust `FB_HEIGHT`/aspect if the crop regresses.
-- `CLK_VIDEO`/`CE_PIXEL` custom Genesis timing is no longer the scanout
-  clock; retain only what the framework still requires.
+- `VGA_SCALER=0`; the reader + `openbor_video_timing` drive `VGA_R/G/B/HS/VS/DE`
+  → the framework's normal video/HDMI path (the timing the TV already synced
+  to). `video_freak` / the 320×224 crop (`status[18]`) path is preserved as it
+  was before the ascal detour.
+- `CLK_VIDEO`/`CE_PIXEL` = the existing Genesis H40 timing (`ce_pix_gen`),
+  restored as the scanout clock.
 
 ## Verification
 
-- **Sim (bit-exact gate where it applies):** a new bench for the
-  **WORK→DDR DMA byte-correctness** — the burst-writer emits the correct
-  RGB565 bytes at the correct `FB_STRIDE`/layout for a known WORK image.
-  Existing blitter/`comp_fbram`/surface sims updated for the SCAN removal:
-  `tb_scanout_fbram` (pre-existing failure, tied to the scan path) retired or
-  rewritten; surface benches (`tb_surfram`, `tb_blitter_surface_src`,
-  `tb_blitter_system_pipe`) stay green.
-- **Device (the real gate — `ascal` is not sim-able):** RBF **fits** (M10K
-  ≤ 553); `C_SUBMIT` climbs, `C_DONE` tracks; screenshots **change over time**
-  and reach the **Cursed Castilla title screen** (centre fills in, not black);
-  no stale-frame blank; tear-free.
+- **Sim:** extend `tb_fb_dma` for the **double-buffer + control-word write** —
+  assert both buffers and the control word land at the right offsets/bytes for
+  a known WORK image. Surface benches stay green (`tb_surfram`,
+  `tb_blitter_surface_src`, `tb_blitter_system_pipe`); `tb_scanout_fbram`
+  stays retired. The reader is legacy-proven; add a focused sim only if it is
+  changed materially.
+- **Device (directly validatable now):** peek DDR at the buffers to confirm
+  `comp_fb_dma` wrote a **coherent RGB565 frame** (structure, not ARM code)
+  *before* trusting the reader; then confirm the reader displays it. RBF fits
+  (M10K ≤ 553); `C_SUBMIT` climbs, `C_DONE` tracks; **TV syncs** (known-good
+  timing); screenshots change over time and reach the **Cursed Castilla title
+  screen** (centre fills in); tear-free (double buffer).
 
 ## Known risks
 
-- **`FB_VBL`/swap handshake** — the one implementation unknown: whether
-  tear-free needs the core to time writes against `FB_VBL` / rotate source
-  buffers, or whether `ascal` absorbs it from a single fixed `FB_BASE`. Lock
-  against `ascal.vhd` + a reference triple-buffered core during
-  implementation. Architecture-neutral (a few lines of writer swap logic).
+- **`rdr_*` slot read/write time-sharing** — the reader's line-prefetch reads
+  and `comp_fb_dma`'s vblank burst share the single f2h `rdr_*` slot.
+  Double-buffering prevents same-buffer races (reader = active buffer,
+  writer = inactive); the open question is arbitration/starvation on the port.
+  Reader reads during active display, writer bursts during vblank — largely
+  disjoint in time. Saturn's `ddram.sv` line-cache is the reference if the
+  reader's prefetch depth needs tuning. Confirm on device (no stale-frame /
+  underflow).
 - **Latent app-surface UV bug** — once the surface displays, the app-surface
   (288×216 rendered into a 512×256 texture) vs. the RTL fixed-320×240 sample
   clamp may render scaled/offset. Host-side (`raster_backend_mfgpu.cpp`
   `src_is_appsurf` UV scale); folded into title-screen verification, likely a
   small `impl-engine` follow-up.
-- **STA (emu clock)** — removing SCAN (160 M10K) + `openbor` *reduces*
-  congestion on the placement-fragile emu clock; net M10K drops to ~460/553,
-  which should help rather than hurt. Confirm slack post-build.
+- **STA (emu clock)** — the custom reader adds no ascal FB-read path and no
+  `pll_hdmi` load; net M10K stays low (~415–460/553). Should be **healthier**
+  than the ascal build (emu −0.557). Confirm slack post-build.
 
 ## Out of scope
 
@@ -173,12 +195,13 @@ lock the exact address map in the plan.
   targets.
 - Any change to the sub-region texture residency work (Tasks 1–3, landed and
   verified on device) or the host protocol / reference model.
-- **Audio and joystick integration to the MiSTer framework output.** Deleting
-  the `openbor` scanout also removes its incidental (vestigial in the
-  `--preset fabric` config) `AUDIO_L/R` drain and joystick→ARM path — tied off
-  this plan. The game currently has no FPGA audio (gmloader never writes the
-  DDR audio pointers; device has only a Dummy ALSA card) and takes input via
-  Linux SDL, so nothing working regresses. Proper audio/input framework
-  integration is deferred future work; like `openbor` it will likely need HPS
-  I/O, so `openbor`'s mechanisms (preserved in git at the pre-deletion commit)
-  are the reference starting point — not a permanent capability loss.
+- **Audio and joystick integration to the MiSTer framework output.** The pivot
+  re-instantiates only `openbor_video_reader` + `openbor_video_timing` (the
+  scanout), **not** `openbor_video_top`'s incidental `AUDIO_L/R` drain and
+  joystick→ARM path — those stay tied off (vestigial in the `--preset fabric`
+  config: the game has no FPGA audio — gmloader never writes the DDR audio
+  pointers, device has only a Dummy ALSA card — and takes input via Linux SDL,
+  so nothing working regresses). Proper audio/input framework integration is
+  deferred future work; like `openbor` it will likely need HPS I/O, so
+  `openbor_video_top`'s mechanisms (in git / still in-tree) are the reference
+  starting point — not a permanent capability loss.
