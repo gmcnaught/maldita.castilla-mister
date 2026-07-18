@@ -173,3 +173,12 @@ lock the exact address map in the plan.
   targets.
 - Any change to the sub-region texture residency work (Tasks 1–3, landed and
   verified on device) or the host protocol / reference model.
+- **Audio and joystick integration to the MiSTer framework output.** Deleting
+  the `openbor` scanout also removes its incidental (vestigial in the
+  `--preset fabric` config) `AUDIO_L/R` drain and joystick→ARM path — tied off
+  this plan. The game currently has no FPGA audio (gmloader never writes the
+  DDR audio pointers; device has only a Dummy ALSA card) and takes input via
+  Linux SDL, so nothing working regresses. Proper audio/input framework
+  integration is deferred future work; like `openbor` it will likely need HPS
+  I/O, so `openbor`'s mechanisms (preserved in git at the pre-deletion commit)
+  are the reference starting point — not a permanent capability loss.
