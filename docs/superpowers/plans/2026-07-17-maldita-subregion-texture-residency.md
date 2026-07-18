@@ -127,12 +127,13 @@ Cover the non-fast-path cases so nothing renders wrong or silently re-overflows.
 **Interfaces:**
 - Consumes: Task 2's quad path.
 - Produces: a fallback in `mf_draw` — when `triCount` is not an even number of tri-pairs, or a quad's cropped rect ≥ ~90% of the page, stage/emit the whole (cropped-to-bbox) page as before.
+- Produces: a **pin-aware cache insert** (Task-2 reviewer-mandated). Task 2's `mf_upload_and_cache` slot-finder frees the **global-LRU** slot when the table is full, ignoring the frame pin (`lru > g_lru_frame_floor`) that `evict_one_lru` respects — so when >`MF_TEX_CACHE_N` (256) distinct sub-regions are reached in one frame (plausible at title-screen sprite-quad counts), a still-emitted in-frame entry's heap can be freed+reused mid-frame → **intra-frame texture ALIAS** (wrong texture sampled). Fix: when the full-table LRU victim is itself frame-pinned, do NOT free-and-reuse — set the emitter overflow / drop the frame (same graceful path as heap overflow), so a busy frame degrades to a dropped frame, never a wrong-pixel frame.
 
-- [ ] **Step 1: Write failing tests.** Add `case_fallback_odd_tricount` (a `tris=3` draw renders bit-exact vs whole-page), `case_nearfullpage` (a quad whose UV bbox covers ~the whole page renders bit-exact and doesn't crop-thrash), and `case_edge_sprite` (a sprite whose UV bbox touches the texture's max row/col — verifies the +1-texel margin/clamp so the edge texel isn't dropped). Assert bit-exact for all.
+- [ ] **Step 1: Write failing tests.** Add `case_fallback_odd_tricount` (a `tris=3` draw renders bit-exact vs whole-page), `case_nearfullpage` (a quad whose UV bbox covers ~the whole page renders bit-exact and doesn't crop-thrash), and `case_edge_sprite` (a sprite whose UV bbox touches the texture's max row/col — verifies the +1-texel margin/clamp so the edge texel isn't dropped). Also add `case_pin_aware_insert`: with a small `MF_TEX_CACHE_N` (or a scene that forces >table-size distinct sub-regions in one frame), assert the frame either renders every quad correctly OR drops (overflow) — and NEVER produces an aliased (wrong-texture) pixel vs the SW oracle. Assert bit-exact / no-alias for all.
 
-- [ ] **Step 2: Run, verify they fail** (fallback/margin not handled). Command as Task 2 Step 2.
+- [ ] **Step 2: Run, verify they fail** (fallback/margin/pin-aware-insert not handled). Command as Task 2 Step 2.
 
-- [ ] **Step 3: Implement the fallback + margin.** In `mf_draw`: if `triCount % 2 != 0` (or a quad's bbox area ≥ 0.9·page), route that quad/draw through the original whole-page `stage_texture` path (which Task 2 must leave intact). Ensure the crop-rect margin/clamp from Task 2 Step 3 handles max-edge texels.
+- [ ] **Step 3: Implement the fallback + margin + pin-aware insert.** In `mf_draw`: if `triCount % 2 != 0` (or a quad's bbox area ≥ 0.9·page), route that quad/draw through the original whole-page `stage_texture` path (which Task 2 must leave intact). Ensure the crop-rect margin/clamp from Task 2 Step 3 handles max-edge texels. In `mf_upload_and_cache`'s full-table slot-finder: when the global-LRU victim is frame-pinned (`lru > g_lru_frame_floor`), set overflow / drop the frame instead of freeing+reusing its slot (mirror the existing heap-overflow graceful path; do NOT alias).
 
 - [ ] **Step 4: Run, verify PASS + full suite green.** Command as Task 2 Step 6.
 
@@ -140,7 +141,7 @@ Cover the non-fast-path cases so nothing renders wrong or silently re-overflows.
 
 ```bash
 cd gmloader-next && git add gmloader/mister/raster_backend_mfgpu.cpp gmloader/mister/raster_backend_test.cpp
-git commit -m "mfgpu: sub-region fallback (non-quad / near-full-page) + edge-texel margin"
+git commit -m "mfgpu: sub-region fallback (non-quad / near-full-page) + edge-texel margin + pin-aware cache insert"
 ```
 
 ---
