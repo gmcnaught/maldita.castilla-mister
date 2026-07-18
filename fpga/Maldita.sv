@@ -418,7 +418,6 @@ wire        blt_demux_dready;
 // the WORK->DDR DMA trigger (fb_vs, below) can be sourced from the scanout vblank. Driven by
 // the openbor_video_timing instance near the video output.
 wire        tim_hsync, tim_vsync, tim_hblank, tim_vblank, tim_de, tim_new_frame, tim_new_line;
-wire [9:0]  tim_hcount;
 wire [8:0]  tim_vcount;
 
 // clk_sys-domain vblank for the coherency flush + the WORK->DDR DMA trigger (blitter_top
@@ -475,7 +474,7 @@ sdram_fb_cache #(.SDRAM_AW(25)) fbcache
 	.dst_dout   (dst_dout),
 	.dst_ok     (dst_ok),
 	// P_SCAN (ch4) DEAD: SDRAM-cache scanout channel retired [DDR-scanout] — scanout is the
-	// framework FB_EN + ascal path from DDR (Task 3). This cache channel stays tied idle.
+	// custom openbor_video_reader reading the DDR3 double-buffer. This cache channel stays idle.
 	.scan_addr  (27'd0),
 	.scan_rd    (1'b0),
 	.scan_dout  (),
@@ -519,8 +518,8 @@ sdram_fb_cache #(.SDRAM_AW(25)) fbcache
 // [DDR-scanout] The on-chip SCAN buffer + WORK->SCAN snapshot + custom openbor scanout
 // are RETIRED. comp_fbram now holds only WORK (bank0-3) + the off-screen APPSURF SURFACE
 // (surf_*). blitter_top (comp_pipeline) writes/reads WORK via wr_*/rd_*; the vblank
-// WORK->DDR copy (external comp_fb_dma) reads WORK via the same rd_* port (wired in Task 3).
-// Scanout is now the framework FB_EN + ascal path from a DDR framebuffer (Task 3).
+// WORK->DDR copy (external comp_fb_dma) reads WORK via the same rd_* port (muxed by fb_dma_busy).
+// Scanout is the custom openbor_video_reader reading the DDR3 double-buffer comp_fb_dma writes.
 wire        fb_wr_en;  wire [14:0] fb_wr_qw; wire [1:0] fb_wr_lane; wire [15:0] fb_wr_pix;
 // WORK read port (comp_fbram rd_*): time-shared between the compositor (blt_fb_rd_*) and
 // the vblank WORK->DDR DMA (dma_work_rd_*). They are mutually exclusive in time — the DMA
@@ -605,9 +604,9 @@ ddram ddr
 	.ready()
 );
 
-// [DDR-scanout] The custom openbor video reader (native_video) is retired, so its DDR3
-// reader master is gone. The arbiter's reader slot is tied IDLE below; the blitter is the
-// sole DDR master. Task 3 repurposes this freed reader slot for the comp_fb_dma writer.
+// [DDR-scanout] The arbiter's reader (m0) slot is TIME-SHARED (mux below): the
+// openbor_video_reader READS the active DDR buffer during display, and comp_fb_dma WRITES the
+// inactive buffer during vblank (fb_dma_busy). The blitter is the borrowing master on blt_*.
 wire use_nv = NATIVE_VID;
 
 // --- Blitter arbiter + blitter_top (fpga-hw-blitter #003 iteration 5) ---
@@ -687,8 +686,8 @@ blitter_top blitter
 	.fb_rd_qw       (blt_fb_rd_qw),
 	.fb_rd_qword    (fb_rd_qword),
 	// [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake -> comp_fb_dma (u_fb_dma).
-	// S_SNAP_* pulses fb_dma_start at vblank (fb_vs = ascal FB_VBL) and waits on fb_dma_busy
-	// while comp_fb_dma streams WORK out to the DDR framebuffer.
+	// S_SNAP_* pulses fb_dma_start at vblank (fb_vs = tim_vblank, the reader's scanout vblank)
+	// and waits on fb_dma_busy while comp_fb_dma streams WORK out to the DDR framebuffer.
 	.vs             (fb_vs),
 	.osd_restart    (osd_restart),
 	.osd_fps_on     (osd_fps_on),
@@ -962,8 +961,9 @@ video_freak video_freak
 (
 	.CLK_VIDEO    (CLK_VIDEO),
 	.CE_PIXEL     (ce_pix_gen),
-	// [DDR-scanout] nv_vs/nv_de (native_video) retired -> generic video timing (WIP; the
-	// crop/aspect path is bypassed once Task 3 sets FB_EN=1 + VGA_SCALER=1).
+	// [DDR-scanout custom-reader] nv_vs/nv_de (native_video) retired -> generic video timing.
+	// video_freak drives VIDEO_ARX/ARY (HDMI aspect); its vga_de_cropped is unused (VGA_DE
+	// comes from the reader/timing tim_de). VGA_SCALER=0 (custom reader -> video_mixer path).
 	.VGA_VS       (VSync),
 	.HDMI_WIDTH   (HDMI_WIDTH),
 	.HDMI_HEIGHT  (HDMI_HEIGHT),
@@ -1074,7 +1074,7 @@ openbor_video_timing u_timing (
 	.hblank    (tim_hblank),
 	.vblank    (tim_vblank),
 	.de        (tim_de),
-	.hcount    (tim_hcount),
+	.hcount    (),                 // unused (reader uses vcount + new_line/new_frame)
 	.vcount    (tim_vcount),
 	.new_frame (tim_new_frame),
 	.new_line  (tim_new_line)
