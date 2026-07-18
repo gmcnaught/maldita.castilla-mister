@@ -285,7 +285,9 @@ wire [26:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire [15:0] ioctl_index;
 wire        ioctl_wait;
-assign ioctl_wait = nv_ioctl_wait;
+// [DDR-scanout] ioctl_wait was driven by native_video (retired); no FPGA-side cart-load
+// backpressure in the gmloader-GPU core — the HPS loader owns content. Tie idle.
+assign ioctl_wait = 1'b0;
 
 // SC0 mounted image — config file created instantly, no ioctl streaming.
 // We only need the filename (from .s0 config). No disk I/O needed.
@@ -390,11 +392,7 @@ assign dst_wr   = vd_sd_wr;
 assign dst_addr = vd_sd_addr;
 assign dst_din  = vd_sd_din;
 assign dst_wdsn = vd_sd_wdsn;
-// P_SCAN (ch4, read-only): scanout reader line fetch.
-wire [26:0] scn_addr;
-wire        scn_rd;
-wire [63:0] scn_dout;
-wire        scn_ok;
+// [DDR-scanout] P_SCAN (ch4) scanout-reader fetch retired with the custom openbor scanout.
 // vram_demux DDR side -> ddr_blitter_arb blt_*
 wire [28:0] bd_addr;
 wire        bd_rd, bd_wr;
@@ -403,11 +401,12 @@ wire  [7:0] bd_be;
 // vram_demux read-data back to the blitter mem_dout path
 wire [63:0] blt_demux_dout;
 wire        blt_demux_dready;
-// clk_sys-domain vsync for the cache coherency flush (sequencer edge-detects the
-// rising edge -> flush ch0 then invalidate ch0/4/5). nv_vs is clk_vid-domain, so
-// double-flop it into clk_sys.
+// clk_sys-domain vsync for the coherency flush + the vblank WORK->DDR DMA trigger
+// (blitter_top edge-detects the rising edge). [DDR-scanout] nv_vs (native_video) is retired;
+// sourced from the generic video-timing VSync (clk_vid-domain) here, double-flopped into
+// clk_sys. WIP: Task 3 finalizes the vblank source against the framework FB_VBL contract.
 reg  [1:0]  fb_vs_sync = 2'b0;
-always @(posedge clk_sys) fb_vs_sync <= {fb_vs_sync[0], nv_vs};
+always @(posedge clk_sys) fb_vs_sync <= {fb_vs_sync[0], VSync};
 wire        fb_vs = fb_vs_sync[1];
 
 // [#44] SDRAM source-STAGING write path: the blitter's BLT_OP_STAGE FSM copies atlas
@@ -453,7 +452,8 @@ sdram_fb_cache #(.SDRAM_AW(25)) fbcache
 	.dst_wdsn   (dst_wdsn),
 	.dst_dout   (dst_dout),
 	.dst_ok     (dst_ok),
-	// P_SCAN (ch4) DEAD [FB-in-BRAM]: scanout now reads comp_fbram (see u_fbram_scan).
+	// P_SCAN (ch4) DEAD: SDRAM-cache scanout channel retired [DDR-scanout] — scanout is the
+	// framework FB_EN + ascal path from DDR (Task 3). This cache channel stays tied idle.
 	.scan_addr  (27'd0),
 	.scan_rd    (1'b0),
 	.scan_dout  (),
@@ -494,17 +494,13 @@ sdram_fb_cache #(.SDRAM_AW(25)) fbcache
 );
 
 // --- [FB-in-BRAM] on-chip framebuffer (comp_fbram) -------------------------
-// The compositor's destination + the scanout source now live on-chip in M10K,
-// not the SDRAM FB. blitter_top (comp_pipeline) writes the composite port; the
-// scanout reader reads the 2nd (scan) port via fbram_scan_adapter. The SDRAM
-// cache's P_DST (ch0) + P_SCAN (ch4) channels above are now DEAD (kept wired but
-// idle this iteration; their deletion + the dst_barrier coherency removal is a
-// follow-up cleanup). ch1 STAGE + ch5 P_SRC (atlas source) stay live.
+// [DDR-scanout] The on-chip SCAN buffer + WORK->SCAN snapshot + custom openbor scanout
+// are RETIRED. comp_fbram now holds only WORK (bank0-3) + the off-screen APPSURF SURFACE
+// (surf_*). blitter_top (comp_pipeline) writes/reads WORK via wr_*/rd_*; the vblank
+// WORK->DDR copy (external comp_fb_dma) reads WORK via the same rd_* port (wired in Task 3).
+// Scanout is now the framework FB_EN + ascal path from a DDR framebuffer (Task 3).
 wire        fb_wr_en;  wire [14:0] fb_wr_qw; wire [1:0] fb_wr_lane; wire [15:0] fb_wr_pix;
 wire        fb_rd_en;  wire [14:0] fb_rd_qw; wire [63:0] fb_rd_qword;
-wire        fb_scan_rd_en; wire [14:0] fb_scan_rd_qw; wire [63:0] fb_scan_rd_qword;
-// [FB-in-BRAM double-buffer] vblank work->scan snapshot (blitter_top u_snap -> comp_fbram)
-wire        fb_snap_we; wire [14:0] fb_snap_qw; wire [63:0] fb_snap_qword;
 
 // [app-surface v1] off-screen APP-SURFACE render-target port: blitter_top routes the
 // composite write/read here (instead of the WORK banks) when SET_TARGET binds APPSURF,
@@ -517,23 +513,9 @@ comp_fbram u_fbram (
 	.clk        (clk_sys),
 	.wr_en      (fb_wr_en),  .wr_qw(fb_wr_qw),  .wr_lane(fb_wr_lane), .wr_pix(fb_wr_pix),
 	.rd_en      (fb_rd_en),  .rd_qw(fb_rd_qw),  .rd_qword(fb_rd_qword),
-	.scan_rd_en (fb_scan_rd_en), .scan_rd_qw(fb_scan_rd_qw), .scan_rd_qword(fb_scan_rd_qword),
-	.snap_we    (fb_snap_we), .snap_qw(fb_snap_qw), .snap_qword(fb_snap_qword),
 	// app-surface v1: off-screen APPSURF render target
 	.surf_wr_en (surf_wr_en), .surf_wr_qw(surf_wr_qw), .surf_wr_lane(surf_wr_lane), .surf_wr_pix(surf_wr_pix),
 	.surf_rd_en (surf_rd_en), .surf_rd_qw(surf_rd_qw), .surf_rd_qword(surf_rd_qword)
-);
-
-// Bridge the scanout reader's P_SCAN cache-ok protocol -> comp_fbram's scan port.
-fbram_scan_adapter u_fbram_scan (
-	.clk        (clk_sys),
-	.scn_addr   (scn_addr),
-	.scn_rd     (scn_rd),
-	.scn_dout   (scn_dout),
-	.scn_ok     (scn_ok),
-	.scan_rd_en (fb_scan_rd_en),
-	.scan_rd_qw (fb_scan_rd_qw),
-	.scan_rd_qword (fb_scan_rd_qword)
 );
 
 // --- DDR3 port sharing: old ddram (SDRAM clear) + native video reader ---
@@ -565,16 +547,9 @@ ddram ddr
 	.ready()
 );
 
-// Native video DDR3 signals
-wire  [7:0] nv_ddr_burstcnt;
-wire [28:0] nv_ddr_addr;
-wire        nv_ddr_rd;
-wire [63:0] nv_ddr_din;
-wire  [7:0] nv_ddr_be;
-wire        nv_ddr_we;
-wire        nv_ioctl_wait;
-
-// Native video reader always owns DDR3 when enabled
+// [DDR-scanout] The custom openbor video reader (native_video) is retired, so its DDR3
+// reader master is gone. The arbiter's reader slot is tied IDLE below; the blitter is the
+// sole DDR master. Task 3 repurposes this freed reader slot for the comp_fb_dma writer.
 wire use_nv = NATIVE_VID;
 
 // --- Blitter arbiter + blitter_top (fpga-hw-blitter #003 iteration 5) ---
@@ -653,13 +628,14 @@ blitter_top blitter
 	.fb_rd_en       (fb_rd_en),
 	.fb_rd_qw       (fb_rd_qw),
 	.fb_rd_qword    (fb_rd_qword),
-	// [FB-in-BRAM double-buffer] vblank work->scan snapshot + the vblank trigger
+	// [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake. Task 3 wires these to the
+	// external comp_fb_dma; until then fb_dma_start dangles and fb_dma_busy is tied idle
+	// (the vblank FSM parks in S_SNAP_BUSY — harmless: this WIP has no scanout driver yet).
 	.vs             (fb_vs),
 	.osd_restart    (osd_restart),
 	.osd_fps_on     (osd_fps_on),
-	.fb_snap_we     (fb_snap_we),
-	.fb_snap_qw     (fb_snap_qw),
-	.fb_snap_qword  (fb_snap_qword),
+	.fb_dma_start   (),
+	.fb_dma_busy    (1'b0),
 	// [app-surface v1] off-screen APPSURF render-target port -> comp_fbram u_fbram
 	.surf_wr_en     (surf_wr_en),
 	.surf_wr_qw     (surf_wr_qw),
@@ -676,12 +652,13 @@ ddr_blitter_arb #(.ENABLE(1'b1)) blitter_arb
 (
 	.clk          (clk_sys),
 	.reset        (RESET),
-	.rdr_burstcnt (nv_ddr_burstcnt),
-	.rdr_addr     (nv_ddr_addr),
-	.rdr_rd       (nv_ddr_rd),
-	.rdr_din      (nv_ddr_din),
-	.rdr_be       (nv_ddr_be),
-	.rdr_we       (nv_ddr_we),
+	// [DDR-scanout] reader master IDLE (openbor reader retired; Task 3 repurposes this slot)
+	.rdr_burstcnt (8'd0),
+	.rdr_addr     (29'd0),
+	.rdr_rd       (1'b0),
+	.rdr_din      (64'd0),
+	.rdr_be       (8'd0),
+	.rdr_we       (1'b0),
 	.rdr_busy     (rdr_busy_w),
 	.rdr_grant    (rdr_grant_w),
 	// blitter DDR side now comes from vram_demux (bd_*), not the raw mem_* bus
@@ -781,12 +758,11 @@ end
 reg [15:0] mt32_i2s_r, mt32_i2s_l;
 wire midi_rx;
 
-// Native audio: DDR3 ring buffer populated by ARM via /dev/mem,
-// drained by openbor_video_reader at 48 kHz. MT32pi I2S capture is
-// preserved below for future MIDI support but no longer wired to
-// AUDIO_L/R -- the FPGA now owns the audio path.
-assign AUDIO_L = nv_audio_l;
-assign AUDIO_R = nv_audio_r;
+// [DDR-scanout] The FPGA-side native audio (openbor_video_reader's DDR3 ring / MT32pi I2S)
+// is retired with native_video. Audio in the gmloader-GPU core is owned by the HPS loader,
+// not the FPGA, so the emu audio outputs are tied silent.
+assign AUDIO_L = 16'd0;
+assign AUDIO_R = 16'd0;
 assign AUDIO_S = 1;
 
 assign USER_OUT[0]   = 1;
@@ -909,14 +885,16 @@ video_freak video_freak
 (
 	.CLK_VIDEO    (CLK_VIDEO),
 	.CE_PIXEL     (ce_pix_gen),
-	.VGA_VS       (nv_vs),
+	// [DDR-scanout] nv_vs/nv_de (native_video) retired -> generic video timing (WIP; the
+	// crop/aspect path is bypassed once Task 3 sets FB_EN=1 + VGA_SCALER=1).
+	.VGA_VS       (VSync),
 	.HDMI_WIDTH   (HDMI_WIDTH),
 	.HDMI_HEIGHT  (HDMI_HEIGHT),
 	.VGA_DE       (vga_de_cropped),
 	.VIDEO_ARX    (freak_arx),
 	.VIDEO_ARY    (freak_ary),
 
-	.VGA_DE_IN    (nv_de),
+	.VGA_DE_IN    (~(HBlank | VBlank)),
 	.ARX          (12'd4),
 	.ARY          (12'd3),
 	.CROP_SIZE    (freak_crop_size),
@@ -993,82 +971,21 @@ cos cos(vvc + {vc>>forced_scandoubler, 2'b00}, cos_out);
 
 wire [7:0] comp_v = (cos_g >= rnd_c) ? {cos_g - rnd_c, 2'b00} : 8'd0;
 
-// --- Native video module ---
-wire [7:0] nv_r, nv_g, nv_b;
-wire       nv_hs, nv_vs, nv_de;
-wire       nv_active;
-wire [15:0] nv_audio_l, nv_audio_r;
-
-openbor_video_top native_video
-(
-	.clk_sys        (clk_sys),
-	.clk_vid        (CLK_VIDEO),
-	.ce_pix         (ce_pix_gen),
-	.reset          (RESET),
-
-	// DDR3 interface (directly to mux)
-	.ddr_busy       (use_nv ? rdr_busy_w : DDRAM_BUSY),
-	.ddr_burstcnt   (nv_ddr_burstcnt),
-	.ddr_addr       (nv_ddr_addr),
-	.ddr_dout       (DDRAM_DOUT),
-	.ddr_dout_ready (DDRAM_DOUT_READY & use_nv & rdr_grant_w),
-	.ddr_rd         (nv_ddr_rd),
-	.ddr_din        (nv_ddr_din),
-	.ddr_be         (nv_ddr_be),
-	.ddr_we         (nv_ddr_we),
-
-	// SDRAM framebuffer read master (P_SCAN -> arbiter scan_*)
-	.scan_addr      (scn_addr),
-	.scan_rd        (scn_rd),
-	.scan_dout      (scn_dout),
-	.scan_ok        (scn_ok),
-
-	// Video output
-	.vga_r          (nv_r),
-	.vga_g          (nv_g),
-	.vga_b          (nv_b),
-	.vga_hs         (nv_hs),
-	.vga_vs         (nv_vs),
-	.vga_de         (nv_de),
-
-	// Control
-	.enable         (use_nv),
-	.active         (nv_active),
-	.vsync_out      (),
-
-	// CRT position adjustment
-	.h_offset       (h_pos),
-	.v_offset       (v_pos),
-
-	// Joystick (from hps_io, written to DDR3 for ARM)
-	.joystick_0     (joystick_0),
-	.joystick_1     (joystick_1),
-	.joystick_2     (joystick_2),
-	.joystick_3     (joystick_3),
-	.joystick_l_analog_0 (joystick_l_analog_0),
-
-	// Cart loading
-	.ioctl_download (ioctl_download),
-	.ioctl_wr       (ioctl_wr),
-	.ioctl_addr     (ioctl_addr),
-	.ioctl_dout     (ioctl_dout),
-	.ioctl_wait     (nv_ioctl_wait),
-
-	// Native audio (DDR3 ring buffer -> AUDIO_L/R)
-	.clk_audio      (CLK_AUDIO),
-	.audio_l        (nv_audio_l),
-	.audio_r        (nv_audio_r),
-	.dbg_blt        (32'd0),        // #34 debug probe stripped for shipping core
-	.dbg_addr       (32'd0),
-	.dbg_diag       (32'd0)
-);
-
-// H/V position now handled inside timing module via FP/BP adjustment
-assign VGA_DE  = NATIVE_VID_ACTIVE ? vga_de_cropped : ~(HBlank | VBlank);
-assign VGA_HS  = NATIVE_VID_ACTIVE ? nv_hs    : HSync;
-assign VGA_VS  = NATIVE_VID_ACTIVE ? nv_vs    : VSync;
-assign VGA_R   = nv_active ? nv_r     : (NATIVE_VID_ACTIVE ? 8'd0 : comp_v);
-assign VGA_G   = nv_active ? nv_g     : (NATIVE_VID_ACTIVE ? 8'd0 : comp_v);
-assign VGA_B   = nv_active ? nv_b     : (NATIVE_VID_ACTIVE ? 8'd0 : comp_v);
+// --- [DDR-scanout] custom openbor scanout (native_video) RETIRED ---------------------
+// openbor_video_top bundled the custom scanout reader with the FPGA-side audio ring, the
+// ioctl/cart-load handshake, the joystick->DDR3 forward, and a DDR3 reader master. All of
+// that is retired: scanout moves to the framework FB_EN + ascal path from a DDR framebuffer
+// (wired in Task 3), and audio/input/content are owned by the HPS gmloader, not the FPGA.
+// This is a WIP intermediate: there is NO scanout driver until Task 3 drives FB_EN/ascal +
+// instantiates comp_fb_dma (device gate is Task 4). The analog VGA_* outputs are driven from
+// the generic video timing here (they are bypassed once Task 3 sets FB_EN=1 + VGA_SCALER=1).
+// The freed audio/ioctl/reader tie-offs are above; the arbiter reader slot is idled and
+// repurposed for the comp_fb_dma writer in Task 3.
+assign VGA_DE  = ~(HBlank | VBlank);
+assign VGA_HS  = HSync;
+assign VGA_VS  = VSync;
+assign VGA_R   = comp_v;
+assign VGA_G   = comp_v;
+assign VGA_B   = comp_v;
 
 endmodule

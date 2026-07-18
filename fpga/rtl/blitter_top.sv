@@ -76,15 +76,17 @@ module blitter_top #(
     output wire [14:0]   fb_wr_qw,
     output wire [1:0]    fb_wr_lane,
     output wire [15:0]   fb_wr_pix,
-    output wire          fb_rd_en,        // muxed: comp_pipeline RMW read, OR the snapshot source read
+    output wire          fb_rd_en,        // comp_pipeline RMW read of the WORK framebuffer
     output wire [14:0]   fb_rd_qw,
     input  wire [63:0]   fb_rd_qword,
-    // ---- snapshot (work->scan) write port to comp_fbram [FB-in-BRAM double-buffer] ----
-    // Once per frame, during vblank, the entire WORK buffer is copied to the SCAN buffer
-    // so the scanout reads a stable (tear-free) image. Driven by u_snap (fbram_snapshot).
-    output wire          fb_snap_we,
-    output wire [14:0]   fb_snap_qw,
-    output wire [63:0]   fb_snap_qword,
+    // ---- vblank WORK->DDR framebuffer-DMA handshake [DDR-scanout] ----------------------
+    // The SCAN buffer + WORK->SCAN snapshot are retired: scanout now reads a DDR3
+    // framebuffer written by the external comp_fb_dma. Once per frame, during vblank, the
+    // S_SNAP_* FSM pulses fb_dma_start and waits on fb_dma_busy for comp_fb_dma to copy the
+    // completed WORK buffer out to DDR (which the framework's ascal then scans). The WORK
+    // read during the copy is comp_fb_dma's own port, muxed onto comp_fbram at the emu top.
+    output reg           fb_dma_start,    // 1-cyc pulse: kick the WORK->DDR framebuffer copy
+    input  wire          fb_dma_busy,     // comp_fb_dma is mid-copy (WORK held stable meanwhile)
     // ---- off-screen APP-SURFACE render-target port to comp_fbram (app-surface v1) ----
     // When BLT_OP_SET_TARGET binds APPSURF, the composite write/read is routed to this
     // independent off-screen surface instead of the WORK banks. The surface is never
@@ -225,18 +227,25 @@ module blitter_top #(
     wire          pipe_fb_rd_en; wire [14:0] pipe_fb_rd_qw;  // comp_pipeline's work-read (pre-mux)
     // comp_pipeline's composite-write outputs (pre-mux); muxed with tri_fb_wr_* below.
     wire          pipe_fb_wr_en; wire [14:0] pipe_fb_wr_qw; wire [1:0] pipe_fb_wr_lane; wire [15:0] pipe_fb_wr_pix;
-    wire          snap_busy, snap_rd_en; wire [14:0] snap_rd_qw;
     // [app-surface v1] composite RMW-read result seen by the renderer: the off-screen
     // surface when compositing APPSURF, else the WORK framebuffer. Assigned in the
     // target-routing mux at the bottom; fed to comp_pipeline + the TRILIST dst read.
     wire [63:0]   comp_rd_qword;
-    reg           snap_start;    // 1-cycle work->scan snapshot trigger
+    // fb_dma_start (the vblank WORK->DDR trigger) is a top-level output reg, driven by the
+    // S_SNAP_* FSM below (declared in the port list); fb_dma_busy is its return handshake.
     // [#104] Synchronize vs (scanout vblank; may cross from the video clock) through a
     // 3-FF chain BEFORE the rising-edge detect, detecting between the two RESOLVED stages
     // ([2]&[1]). The old single vs_q edge-detected a still-async vs -> a metastable sample
     // could mis-time the WORK->SCAN snapshot trigger (S_SNAP_WAIT). +1-2 clk latency is
     // negligible for a per-frame vblank.
     reg   [2:0]   vs_sync;
+    // [DDR-scanout] S_SNAP_BUSY guard: bounded wait for comp_fb_dma to acknowledge fb_dma_start.
+    // The real comp_fb_dma raises fb_dma_busy at start+1 (guard reaches 1). If NO DMA engine
+    // responds — sim benches with no comp_fb_dma, or the Task-2 WIP core where fb_dma_busy is
+    // tied idle — the FSM proceeds after SNAP_GUARD cycles instead of wedging. Purely a
+    // no-DMA fallback; invisible whenever a DMA engine is present.
+    localparam [5:0] SNAP_GUARD = 6'd32;
+    reg   [5:0]   snap_guard;
     wire          vs_rise = ~vs_sync[2] & vs_sync[1];
     always @(posedge clk or posedge rst) begin
         if (rst) vs_sync <= 3'b0;
@@ -672,7 +681,8 @@ module blitter_top #(
             src_sdram_we<=1'b0; src_sdram_din<=16'd0; stage_waddr_fsm<=27'd0;
             stage_we_burst_fsm<=1'b0; stage_din64_fsm<=64'd0;
             stage_barrier<=1'b0; barrier_seen_busy<=1'b0;
-            snap_start<=1'b0;   // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
+            fb_dma_start<=1'b0; // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
+            snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
@@ -690,7 +700,7 @@ module blitter_top #(
             stage_barrier<=1'b0;  // single-cycle barrier request unless re-asserted in S_STAGE_BARRIER
             src_sdram_we<=1'b0;   // single-cycle write request unless re-asserted (held in S_STAGE_WR_WAIT)
             stage_we_burst_fsm<=1'b0; // single-cycle burst-write request unless re-asserted
-            snap_start<=1'b0;     // single-cycle work->scan snapshot trigger
+            fb_dma_start<=1'b0;   // single-cycle vblank WORK->DDR framebuffer-DMA trigger
             // [#104] vs_rise now comes from the dedicated vs_sync 3-FF synchronizer
 
             // per-frame perf accumulation (idle=1 only while polling between frames;
@@ -1419,14 +1429,19 @@ module blitter_top #(
                 state<=S_WR_WAIT;
             end
 
-            // Wait for vblank to start (scanout not fetching scan-buffer lines), then
-            // trigger the work->scan copy.
-            S_SNAP_WAIT: if (vs_rise) begin snap_start<=1'b1; state<=S_SNAP_BUSY; end
-            // snap_start pulsed; wait for the controller to raise busy.
-            S_SNAP_BUSY: if (snap_busy) state<=S_SNAP_DRAIN;
+            // Wait for vblank to start (scanout not fetching the DDR framebuffer), then
+            // trigger the WORK->DDR copy (external comp_fb_dma).
+            S_SNAP_WAIT: if (vs_rise) begin fb_dma_start<=1'b1; snap_guard<=6'd0; state<=S_SNAP_BUSY; end
+            // fb_dma_start pulsed; wait for comp_fb_dma to raise busy — but bounded by
+            // SNAP_GUARD so an absent DMA engine (sim/WIP, fb_dma_busy never asserts) proceeds
+            // instead of wedging. The real comp_fb_dma asserts busy at start+1 (well inside).
+            S_SNAP_BUSY:
+                if      (fb_dma_busy)             state<=S_SNAP_DRAIN;
+                else if (snap_guard==SNAP_GUARD)  state<=S_POLL_SUBMIT;
+                else                              snap_guard<=snap_guard+6'd1;
             // hold here (not compositing, so the work buffer is stable) until the copy
             // completes, then resume polling for the next frame.
-            S_SNAP_DRAIN: if (!snap_busy) state<=S_POLL_SUBMIT;
+            S_SNAP_DRAIN: if (!fb_dma_busy) state<=S_POLL_SUBMIT;
 
             // Backpressure-safe generic read: hold bm_rd until the bus accepts
             // it (~mem_busy), then await dout_ready. (mem_busy = ddram busy OR not
@@ -1495,21 +1510,19 @@ module blitter_top #(
         .p0_addr(p_src_sdram_addr), .p0_rd(p_src_sdram_rd),
         .p0_dout(p0_dout), .p0_ok(p0_ok),
         // on-chip framebuffer (comp_fbram) dest port — threaded straight out [FB-in-BRAM].
-        // The work WRITE port is comp_pipeline's alone; the work READ port is shared with
-        // the snapshot controller (mux below), so comp_pipeline drives pipe_fb_rd_*.
+        // The work WRITE port is comp_pipeline's alone; the work READ port is comp_pipeline's
+        // RMW read (the WORK->DDR copy uses comp_fb_dma's own read port at the emu top).
         .fb_wr_en(pipe_fb_wr_en), .fb_wr_qw(pipe_fb_wr_qw), .fb_wr_lane(pipe_fb_wr_lane), .fb_wr_pix(pipe_fb_wr_pix),
         .fb_rd_en(pipe_fb_rd_en), .fb_rd_qw(pipe_fb_rd_qw), .fb_rd_qword(comp_rd_qword),
         .blit_done(p_blit_done));
 
-    // ── work->scan snapshot controller [FB-in-BRAM double-buffer] ────────────────
-    // Streams the completed WORK buffer into the SCAN buffer once per frame during
-    // vblank (state S_SNAP_* sequences it). It borrows comp_fbram's work read port, so
-    // fb_rd_* is muxed: the snapshot owns it while snap_busy (comp_pipeline is idle
-    // between frames), otherwise comp_pipeline's RMW read drives it.
-    fbram_snapshot #(.FB_QWORDS(`FB_QWORDS), .AW(15)) u_snap (   // [#97] single-source from blitter_defs.vh
-        .clk(clk), .rst(rst), .start(snap_start), .busy(snap_busy),
-        .rd_en(snap_rd_en), .rd_qw(snap_rd_qw), .rd_qword(fb_rd_qword),
-        .snap_we(fb_snap_we), .snap_qw(fb_snap_qw), .snap_qword(fb_snap_qword));
+    // ── vblank WORK->DDR framebuffer copy [DDR-scanout] ──────────────────────────
+    // The on-chip WORK->SCAN snapshot controller (u_snap/fbram_snapshot) is retired. The
+    // completed WORK buffer is now streamed to a DDR3 framebuffer by the external
+    // comp_fb_dma (instantiated at the emu top), which the framework's ascal scans out.
+    // The S_SNAP_* FSM above pulses fb_dma_start / waits on fb_dma_busy; comp_fb_dma reads
+    // WORK via its own port (muxed onto comp_fbram at the emu top while fb_dma_busy), so
+    // blitter_top no longer borrows the WORK read port for the copy.
     // [gmloader-GPU slim] OP_BGPLANE_WRITE + its fbram_to_sdram/bgplane_coverage
     // bake stream are retired: the STAGE burst-write outputs are now driven
     // unconditionally by the OP_STAGE atlas FSM's stage_*_fsm regs (the bake's
@@ -1521,10 +1534,10 @@ module blitter_top #(
     // ── composite target routing [app-surface v1] ───────────────────────────────
     // The compositor's write + RMW-read (from the TRILIST walk while tri_busy, else
     // comp_pipeline FILL/BLIT) is steered to the WORK framebuffer or the off-screen
-    // APPSURF surface by comp_target. The work->scan snapshot ALWAYS targets WORK and
-    // keeps priority on the WORK read port. When comp_target==WORK (every frame that
-    // never emits SET_TARGET) the WORK paths are byte-identical to before and the
-    // surface ports are idle.
+    // APPSURF surface by comp_target. When comp_target==WORK (every frame that never emits
+    // SET_TARGET) the WORK paths are byte-identical to before and the surface ports are
+    // idle. The vblank WORK->DDR copy runs while the compositor is idle (S_SNAP_*), so it
+    // needs no share of the WORK read port here — comp_fb_dma reads WORK at the emu top.
 
     // shared composite write (tri owns while rasterizing; else comp_pipeline)
     wire        cw_en   = tri_busy ? tri_fb_wr_en   : pipe_fb_wr_en;
@@ -1546,21 +1559,20 @@ module blitter_top #(
     assign surf_wr_lane = cw_lane;
     assign surf_wr_pix  = cw_pix;
 
-    // WORK read port: snapshot (always WORK) wins; else the compositor when target==WORK.
-    assign fb_rd_en = snap_busy ? snap_rd_en : (appsurf_active ? 1'b0 : cr_en);
-    assign fb_rd_qw = snap_busy ? snap_rd_qw : cr_qw;
+    // WORK read port: the compositor's RMW read when compositing into WORK.
+    assign fb_rd_en = appsurf_active ? 1'b0 : cr_en;
+    assign fb_rd_qw = cr_qw;
     // SURFACE read port: two mutually-exclusive users, selected by comp_target.
     //  - APPSURF (compositing INTO the surface): the composite RMW read (Task 6).
     //  - WORK (compositing into WORK): the TRILIST surface texel sample (Task 7,
     //    BLT_F_SRC_SURFACE) — the tri walk reads the surface as its texture. These
     //    never overlap (target is one or the other), so one 1W1R read port suffices.
-    assign surf_rd_en = appsurf_active ? (snap_busy ? 1'b0 : cr_en) : tri_surf_rd_en;
+    assign surf_rd_en = appsurf_active ? cr_en : tri_surf_rd_en;
     assign surf_rd_qw = appsurf_active ? cr_qw : tri_surf_rd_qw;
 
     // Read result back to the renderer: surface when compositing APPSURF, else WORK.
     // comp_target is stable across a whole blit (it only moves at SET_TARGET, between
     // fully-drained blits), so the 1-cycle read latency never straddles a target change.
-    // The snapshot reads fb_rd_qword directly and is unaffected by this mux.
     assign comp_rd_qword = appsurf_active ? surf_rd_qword : fb_rd_qword;
 
     // owner mux: comp_pipeline drives the bus only while pipe_busy; otherwise the

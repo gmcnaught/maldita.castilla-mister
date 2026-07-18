@@ -32,8 +32,7 @@ module tb_blitter_clear_pipe;
   wire fb_rd_en; wire [14:0] fb_rd_qw; wire [63:0] fb_rd_qword;
   comp_fbram fbram(.clk(clk),
     .wr_en(fb_wr_en), .wr_qw(fb_wr_qw), .wr_lane(fb_wr_lane), .wr_pix(fb_wr_pix),
-    .rd_en(fb_rd_en), .rd_qw(fb_rd_qw), .rd_qword(fb_rd_qword),
-    .scan_rd_en(1'b0), .scan_rd_qw(15'd0), .scan_rd_qword());
+    .rd_en(fb_rd_en), .rd_qw(fb_rd_qw), .rd_qword(fb_rd_qword));
 
   blitter_top blt(.clk(clk), .rst(rst), .vs(vs),
     .mem_addr(bt_addr), .mem_rd(b_rd), .mem_wr(b_we), .mem_burstcnt(bt_burst),
