@@ -331,6 +331,29 @@ module blitter_top #(
     // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
     assign dbg = {dbg_stuck[23:16], rd_issued, 8'd0, 9'd0, state};
 
+`ifdef SOLARUS_DBG_PROBES
+    // [S_SNAP wedge probe] Persistent worst-stuck snapshot: latch {state, snap_guard} at the peak
+    // of dbg_stuck (the longest any state has stayed frozen since boot). The fabric stall wedges
+    // the blitter in the S_SNAP_* region (device: C_DONE freezes, comp_fb_dma proven NOT the cause
+    // via peak_copy_cyc) — but a stuck blitter writes nothing, so we can't publish DURING the
+    // stall. Instead we latch the worst-stuck state persistently and publish it on the NEXT
+    // control-block write after recovery. Routed into C_SRCSEL's high word (host reads 0x3B00003C):
+    //   [5:0]=state_at_peak  [13:8]=guard_at_peak  [31:16]=peak_stuck[23:8] (severity; 0xFF00=saturated).
+    // A stall shows state_at_peak = S_SNAP_WAIT(42)/S_SNAP_BUSY(43)/S_SNAP_DRAIN(44) -> pins the wedge.
+    reg  [23:0] peak_stuck;
+    reg  [5:0]  state_at_peak;
+    reg  [5:0]  guard_at_peak;
+    always @(posedge clk) begin
+        if (rst) begin peak_stuck<=24'd0; state_at_peak<=6'd0; guard_at_peak<=6'd0; end
+        else if (dbg_stuck > peak_stuck) begin
+            peak_stuck    <= dbg_stuck;
+            state_at_peak <= dbg_state_q;
+            guard_at_peak <= snap_guard;
+        end
+    end
+    wire [31:0] wedge_snap = {peak_stuck[23:8], 2'b0, guard_at_peak, 2'b0, state_at_peak};
+`endif
+
     // ---- OSD Restart Quest: sticky pulse latch ----------------------------------
     // status[19] (T[19] CONF_STR type) is a MOMENTARY TRIGGER: Main_MiSTer pulses it
     // briefly then clears it — it is not held as a persistent level. S_WR_STATUS only
@@ -1421,7 +1444,13 @@ module blitter_top #(
                 // low 32 (throttle_cfg[15:8]) preserved via byte-enable. Host reads at
                 // C_SRCSEL+4. Then proceed to the vblank work->scan snapshot as before.
                 bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_SRCSEL;
+`ifdef SOLARUS_DBG_PROBES
+                // [S_SNAP wedge probe] publish the persistent worst-stuck snapshot instead of
+                // perf_tri_cyc (debug build only). Host reads at C_SRCSEL+4 = 0x3B00003C.
+                bm_din<={wedge_snap, 32'd0};
+`else
                 bm_din<={perf_tri_cyc, 32'd0};
+`endif
                 // [FB-in-BRAM double-buffer] after the frame, snapshot the completed work
                 // buffer into the scan buffer (during vblank). C_DONE was already written
                 // (S_WR_DONE), so the engine's handshake completes and its next-frame prep

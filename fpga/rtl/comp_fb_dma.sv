@@ -99,6 +99,21 @@ module comp_fb_dma #(
     reg [31:0]   copy_cyc;
     reg [31:0]   peak_copy_cyc;
 
+    // [startup-deadlock watchdog] The `disp_active == published` start gate deadlocks at boot
+    // when the reader never swaps onto our first publish (stale DDR ctrl frame-counter collides
+    // with our fc=0 first write — see the scanout-startup-deadlock analysis): we wait for an ack
+    // that never comes. skip_cnt counts consecutive `start` pulses we DROP because the gate is
+    // closed; after SKIP_MAX we force a control-word-only RE-PUBLISH of `published` (no recopy —
+    // the buffer is already valid), which bumps frame_counter and thus guarantees the reader sees
+    // a change and swaps onto `published`, restoring disp_active==published. Self-healing, and
+    // safe vs legitimate fast-producer frame-drop: on hardware `start` is gated by the scanout
+    // vblank (vs_rise), so the reader adopts within ~1 frame and consecutive skips stay tiny; a
+    // TRUE deadlock skips UNBOUNDEDLY. SKIP_MAX is set FAR above any legit skip-run (incl. the
+    // decoupled faster-producer the sim models) so the watchdog only fires on a real wedge —
+    // ~32 blocked frames (~0.5s @ 60Hz) of heal latency, negligible for a one-time boot recovery.
+    localparam [7:0] SKIP_MAX = 8'd32;
+    reg [7:0]    skip_cnt;
+
     // ── read-latency pipeline (2-cycle) ────────────────────────────────────────────
     reg          rd_busy;
     reg          rd_v1, rd_v2;
@@ -151,6 +166,7 @@ module comp_fb_dma #(
             ctrl_pending  <= 1'b0;
             copy_cyc      <= 32'd0;
             peak_copy_cyc <= 32'd0;
+            skip_cnt      <= 8'd0;
         end else begin
             work_rd_en <= 1'b0;   // default: single-cycle read strobe
 `ifdef SOLARUS_DBG_PROBES
@@ -171,9 +187,23 @@ module comp_fb_dma #(
                     wcnt <= {(AW+1){1'b0}};
                     // latch the BACK buffer (~ the reader's displayed buffer) for the whole copy.
                     wr_target <= ~disp_active;
+                    skip_cnt  <= 8'd0;                 // [watchdog] gate open -> reset the stall counter
 `ifdef SOLARUS_DBG_PROBES
                     copy_cyc <= 32'd0;   // [wedge probe] restart the current-copy duration counter
 `endif
+                end else if (start) begin
+                    // [startup-deadlock watchdog] gate CLOSED (disp_active != published): the reader
+                    // hasn't adopted our last publish. Count the dropped frames; after SKIP_MAX,
+                    // force a control-word-only re-publish of `published` to nudge the reader.
+                    if (skip_cnt >= SKIP_MAX) begin
+                        busy         <= 1'b1;
+                        ctrl_phase   <= 1'b1;          // skip the buffer copy: `published` is already valid
+                        ctrl_pending <= 1'b1;
+                        wr_target    <= published;     // re-publish the SAME buffer (bumps fc -> reader swaps)
+                        skip_cnt     <= 8'd0;
+                    end else begin
+                        skip_cnt <= skip_cnt + 8'd1;
+                    end
                 end
             end else if (!ctrl_phase) begin
                 // ─── BUFFER phase: raster-copy WORK into buffer `wr_target` ─────────
