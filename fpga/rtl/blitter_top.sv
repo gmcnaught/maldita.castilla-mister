@@ -330,29 +330,8 @@ module blitter_top #(
     // the per-pixel renderer; comp_pipeline owns per-pixel progress now, so those
     // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
     assign dbg = {dbg_stuck[23:16], rd_issued, 8'd0, 9'd0, state};
-
-`ifdef SOLARUS_DBG_PROBES
-    // [S_SNAP wedge probe] Persistent worst-stuck snapshot: latch {state, snap_guard} at the peak
-    // of dbg_stuck (the longest any state has stayed frozen since boot). The fabric stall wedges
-    // the blitter in the S_SNAP_* region (device: C_DONE freezes, comp_fb_dma proven NOT the cause
-    // via peak_copy_cyc) — but a stuck blitter writes nothing, so we can't publish DURING the
-    // stall. Instead we latch the worst-stuck state persistently and publish it on the NEXT
-    // control-block write after recovery. Routed into C_SRCSEL's high word (host reads 0x3B00003C):
-    //   [5:0]=state_at_peak  [13:8]=guard_at_peak  [31:16]=peak_stuck[23:8] (severity; 0xFF00=saturated).
-    // A stall shows state_at_peak = S_SNAP_WAIT(42)/S_SNAP_BUSY(43)/S_SNAP_DRAIN(44) -> pins the wedge.
-    reg  [23:0] peak_stuck;
-    reg  [5:0]  state_at_peak;
-    reg  [5:0]  guard_at_peak;
-    always @(posedge clk) begin
-        if (rst) begin peak_stuck<=24'd0; state_at_peak<=6'd0; guard_at_peak<=6'd0; end
-        else if (dbg_stuck > peak_stuck) begin
-            peak_stuck    <= dbg_stuck;
-            state_at_peak <= dbg_state_q;
-            guard_at_peak <= snap_guard;
-        end
-    end
-    wire [31:0] wedge_snap = {peak_stuck[23:8], 2'b0, guard_at_peak, 2'b0, state_at_peak};
-`endif
+    // [wedge probe v2] declared/defined AFTER the tri sub-FSM regs (pa/pb/fill_busy/tri_maxx/y),
+    // since `default_nettype none` forbids forward references — see the block below ~L590.
 
     // ---- OSD Restart Quest: sticky pulse latch ----------------------------------
     // status[19] (T[19] CONF_STR type) is a MOMENTARY TRIGGER: Main_MiSTer pulses it
@@ -564,6 +543,53 @@ module blitter_top #(
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
     reg  [TEXQ_TW-1:0] fill_tag;            // tag the in-flight fill will stamp
+
+`ifdef SOLARUS_DBG_PROBES
+    // [wedge probe v2] The fabric stall was PINNED to S_TRI_PIX (state 50) — the rasterizer's
+    // per-pixel coverage-walk + texel-fetch umbrella state — NOT S_SNAP/comp_fb_dma. This probe
+    // captures WHY S_TRI_PIX wedges: the sub-FSM states (pa/pb), the texel-fetch stall severity
+    // (max continuous fill_busy), and the bbox (runaway-walk check), all latched at the peak of
+    // dbg_stuck (deepest dwell) and published on the NEXT control-block write after recovery
+    // (a stuck blitter writes nothing, so we can't publish DURING the stall — latch + defer).
+    //   word A -> C_SRCSEL.hi  (host 0x3B00003C): [5:0]=state_at_peak [8:6]=pa [12:9]=pb
+    //             [13]=fill_busy_at_peak [31:16]=max_fill_run[23:8] (texel-fetch-stall severity)
+    //   word B -> C_STATUS.hi  (host 0x3B000034): [15:0]=tri_maxx_at_peak [31:16]=tri_maxy_at_peak
+    // Read: max_fill_run large & fill_busy_at_peak=1 => TEXEL-FETCH STALL (fill_busy waits on
+    // p0_ok, the SDRAM texel path ~L1212). Small max_fill_run + huge bbox => RUNAWAY WALK (bad
+    // geometry). pa/pb name the exact sub-state (A_*/B_* enums; A_PIX=0.., B_IDLE=0..).
+    // Placed AFTER pa/pb/fill_busy/tri_max* decls: `default_nettype none` forbids forward refs.
+    reg  [23:0] peak_stuck;
+    reg  [5:0]  state_at_peak;
+    reg  [2:0]  pa_at_peak;
+    reg  [3:0]  pb_at_peak;
+    reg         fill_at_peak;
+    reg  [15:0] maxx_at_peak, maxy_at_peak;
+    reg  [23:0] fill_run;        // current continuous fill_busy duration
+    reg  [23:0] max_fill_run;    // persistent max continuous fill_busy (texel-fetch-stall severity)
+    always @(posedge clk) begin
+        if (rst) begin
+            peak_stuck<=24'd0; state_at_peak<=6'd0; pa_at_peak<=3'd0; pb_at_peak<=4'd0;
+            fill_at_peak<=1'b0; maxx_at_peak<=16'd0; maxy_at_peak<=16'd0;
+            fill_run<=24'd0; max_fill_run<=24'd0;
+        end else begin
+            if (fill_busy) begin
+                if (fill_run != 24'hFFFFFF) fill_run <= fill_run + 24'd1;
+                if (fill_run >= max_fill_run) max_fill_run <= fill_run + 24'd1;
+            end else fill_run <= 24'd0;
+            if (dbg_stuck > peak_stuck) begin
+                peak_stuck    <= dbg_stuck;
+                state_at_peak <= dbg_state_q;
+                pa_at_peak    <= pa;
+                pb_at_peak    <= pb;
+                fill_at_peak  <= fill_busy;
+                maxx_at_peak  <= tri_maxx;
+                maxy_at_peak  <= tri_maxy;
+            end
+        end
+    end
+    wire [31:0] wedge_snap  = {max_fill_run[23:8], 2'b0, fill_at_peak, pb_at_peak, pa_at_peak, state_at_peak};
+    wire [31:0] wedge_snap2 = {maxy_at_peak, maxx_at_peak};
+`endif
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
 
@@ -1435,7 +1461,13 @@ module blitter_top #(
                 // [profiling] high32 repurposed perf_pipe_cyc -> perf_texwait_cyc (the
                 // per-pixel texel-fetch stall). perf_pipe_cyc (~2.45ms) is already known.
                 bm_wr<=1; bm_be<=8'hFF; bm_addr<=`BLTCTRL_QW+`C_STATUS;
+`ifdef SOLARUS_DBG_PROBES
+                // [wedge probe v2] high32 = wedge_snap2 (bbox at peak stuck: maxx|maxy<<16) for the
+                // runaway-walk check; low32 OSD bits preserved. Host reads bbox at C_STATUS+4 = 0x3B000034.
+                bm_din<={wedge_snap2, 30'd0, osd_fps_on, osd_restart_pending};
+`else
                 bm_din<={perf_texwait_cyc, 30'd0, osd_fps_on, osd_restart_pending};
+`endif
                 wr_ret<=S_WR_PERF;
                 state<=S_WR_WAIT;
             end
