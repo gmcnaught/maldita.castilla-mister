@@ -810,7 +810,7 @@ always @(posedge ddr_clk) begin
                     // [device-fix: vertical (Y) flip] fetch the REVERSED source line
                     // (239 - display_line), so display row 0 (top) shows framebuffer row 239
                     // (bottom) — un-flips the upside-down (Y-up vs Y-down) frame. X stays forward.
-                    ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
+                    ddr_addr     <= buf_base_addr + ((V_ACTIVE - 9'd1 - display_line) * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // 80-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;
