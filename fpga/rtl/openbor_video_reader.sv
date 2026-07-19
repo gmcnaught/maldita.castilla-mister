@@ -166,6 +166,12 @@ localparam [28:0] AUDIO_RING_ADDR = FB_QW_BASE + 29'h1A000; // audio path gated 
 // producer — produce exactly one frame per scan into the non-displayed buffer instead
 // of free-running at ~60fps and racing the buffer switch (which tore the analog output).
 localparam [28:0] VSYNC_ADDR      = FB_QW_BASE + 29'h0E000; // debug vblank-counter writeback (in-region)
+// [reader-health instrument] SOLARUS_DBG_PROBES-only per-frame reader-health record.
+// Placed in the tail (byte 0x3BFF0000) that device sentinels proved clean/unused —
+// well above BUF1-end (0x3BFA5840), clear of ctrl/joy/buffers, so a devmem peek can
+// never be confused with framebuffer data (the cart path that nominally owns this
+// range is gated off — no writes during play).
+localparam [28:0] DIAG_ADDR       = FB_QW_BASE + 29'h16000; // = byte 0x3BFF0000
 localparam [31:0] AUDIO_RING_BYTES = 32'h00010000; // 64 KiB
 localparam [31:0] AUDIO_RING_MASK  = 32'h0000FFFF;
 
@@ -352,6 +358,26 @@ reg  [6:0]  beat_count;
 // and this sticks below 239, the vcount-anchored fetch skips past line 239 (never
 // completes a frame -> frame_ready never asserts -> pure black).
 reg  [8:0]  max_dline;
+// [reader-health instrument — device tear diag] Per-frame counters of line-fetch
+// UNDERFLOW (a re-anchor firing in ST_WAIT_DISPLAY = the fetch fell behind the live
+// scan; that is the exact condition that risks the tolerated single-line linebuf
+// dual-port collision — i.e. the device tear). Written to VSYNC_ADDR high word each
+// frame (SOLARUS_DBG_PROBES only), reset per frame at ST_WRITE_VSYNC:
+//   underflow_cnt  = # of underflow events this frame (saturating 0..31) = severity;
+//   first/last_uf_line = the scan line (vcount_ddr) of the first/last underflow
+//     (511 = none). LOW + clustered => copy overruns vblank into early active lines
+//     (H-A); spread / high => blitter DDR-read contention across the frame (H-A').
+reg  [4:0]  underflow_cnt;
+reg  [8:0]  first_uf_line;
+reg  [8:0]  last_uf_line;
+// [reader-health instrument] max consecutive cycles the line-fetch was STALLED waiting
+// for the shared f2h slot (ST_READ_LINE with ddr_busy high) in a frame = the severity
+// of f2h-slot starvation. A copy overrunning vblank into active display shows as ONE
+// huge stall at frame start (source (i)); blitter DDR-read contention shows as many
+// moderate stalls (source (ii)). Reader-internal proxy for copy-duration (no fb_dma_busy
+// port needed). Reset per frame at the diag writeback.
+reg  [15:0] max_fetch_stall;
+reg  [15:0] cur_stall;
 reg         first_frame_loaded;
 reg  [4:0]  stale_vblank_count;
 reg         preloading;
@@ -438,6 +464,11 @@ always @(posedge ddr_clk) begin
         beat_count         <= 7'd0;
         scan_acc           <= 32'd0;
         max_dline          <= 9'd0;
+        underflow_cnt      <= 5'd0;
+        first_uf_line      <= 9'd511;
+        last_uf_line       <= 9'd511;
+        max_fetch_stall    <= 16'd0;
+        cur_stall          <= 16'd0;
         first_frame_loaded <= 1'b0;
         frame_ready_reg    <= 1'b0;
         stale_vblank_count <= 5'd0;
@@ -477,6 +508,18 @@ always @(posedge ddr_clk) begin
 
         // Latch new_frame pulse so cart writes can't cause it to be missed
         if (new_frame_ddr) new_frame_pending <= 1'b1;
+
+`ifdef SOLARUS_DBG_PROBES
+        // [reader-health instrument] track the longest line-fetch STALL this frame:
+        // consecutive cycles blocked in ST_READ_LINE (wants the f2h slot but ddr_busy
+        // high — the copy or the blitter owns it). Peak captured into max_fetch_stall.
+        if (state == ST_READ_LINE && ddr_busy) begin
+            cur_stall <= (cur_stall == 16'hFFFF) ? cur_stall : cur_stall + 16'd1;
+            if (cur_stall >= max_fetch_stall) max_fetch_stall <= cur_stall + 16'd1;
+        end
+        else
+            cur_stall <= 16'd0;
+`endif
 
         // Beat capture -> back line buffer. Line L fills buffer L%2 at word=beat.
         // (display_line is the line being fetched; it increments in ST_LINE_DONE.)
@@ -558,7 +601,16 @@ always @(posedge ddr_clk) begin
                     // [DDR-scanout custom-reader] SCANOUT_ONLY skips the joystick-write +
                     // vsync-writeback DDR path (deferred HPS-I/O) and goes straight to the
                     // control-word poll -> line-fetch scanout.
+                    // [reader-health instrument] a SOLARUS_DBG_PROBES build routes even the
+                    // SCANOUT_ONLY frame-start through ST_WRITE_VSYNC first so the per-frame
+                    // underflow diag lands at VSYNC_ADDR (ST_WRITE_VSYNC falls through to
+                    // ST_POLL_CTRL). Costs one extra 1-qword DDR write per frame at frame
+                    // start — negligible vs the ~19200-qword copy, and debug-only.
+`ifdef SOLARUS_DBG_PROBES
+                    state <= SCANOUT_ONLY ? ST_WRITE_VSYNC : ST_WRITE_JOY0;
+`else
                     state <= SCANOUT_ONLY ? ST_POLL_CTRL : ST_WRITE_JOY0;
+`endif
                 end
                 else if (cart_write_pending)
                     state <= ST_WRITE_CART;
@@ -617,23 +669,38 @@ always @(posedge ddr_clk) begin
                 // counter so the ARM/engine can vsync-pace its producer (one frame per
                 // scan into the non-displayed buffer) instead of racing the buffer swap.
                 if (!ddr_busy) begin
-                    ddr_addr     <= VSYNC_ADDR;
-                    // low 32 = vsync_count (engine pacing, 0x3A070000);
-                    // [#39 probe v2] high 32 (0x3A070004) = reader display-side state:
-                    //   [31]=first_frame_loaded [30]=frame_ready_reg [29]=synced
-                    //   [28]=preloading [27:9]=scan_acc[18:0](FB-read activity)
-                    //   [8:0]=max_dline (peak display_line ever fetched; 239 = full frame).
+                    // [reader-health instrument] SOLARUS_DBG_PROBES: publish the per-frame
+                    // reader-health record to DIAG_ADDR (byte 0x3BFF0000, sentinel-clean
+                    // tail — never confused with framebuffer). FULL 64-bit qword:
+                    //   [8:0]   = max_dline       (peak display_line; 239 = frame completed)
+                    //   [17:9]  = first_uf_line   (scan line of FIRST underflow; 511 = none)
+                    //   [26:18] = last_uf_line    (scan line of LAST underflow; 511 = none)
+                    //   [31:27] = underflow_cnt   (saturating 0..31 underflow events this frame)
+                    //   [47:32] = max_fetch_stall (longest ST_READ_LINE stall cyc; f2h starvation)
+                    //   [63:48] = vsync_count[15:0] (liveness; climbs ~60/s)
+                    // Read: clean => underflow_cnt≈0, first/last=511, small stall. Flicker =>
+                    // underflow_cnt spikes; LOW+clustered uf + ONE huge stall => copy overruns
+                    // vblank (H-A); spread uf + many moderate stalls => blitter DDR contention
+                    // (H-A'); max_dline<239 => deep starvation.
+                    // SHIP path (no probes): unchanged vsync-pacing writeback to VSYNC_ADDR.
 `ifdef SOLARUS_DBG_PROBES
-                    ddr_din      <= {first_frame_loaded, frame_ready_reg, synced,
-                                     preloading, scan_acc[18:0], max_dline, vsync_count};
+                    ddr_addr     <= DIAG_ADDR;
+                    ddr_din      <= {vsync_count[15:0], max_fetch_stall, underflow_cnt,
+                                     last_uf_line, first_uf_line, max_dline};
 `else
+                    ddr_addr     <= VSYNC_ADDR;
                     ddr_din      <= {32'd0, vsync_count};   // ship: low word = engine vsync pacing
 `endif
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
                     vsync_count  <= vsync_count + 32'd1;
 `ifdef SOLARUS_DBG_PROBES
-                    scan_acc     <= 32'd0;   // [#39 probe] reset for the next frame
+                    scan_acc        <= 32'd0;   // [#39 probe] reset for the next frame
+                    underflow_cnt   <= 5'd0;    // [reader-health instrument] reset per frame
+                    first_uf_line   <= 9'd511;
+                    last_uf_line    <= 9'd511;
+                    max_fetch_stall <= 16'd0;
+                    cur_stall       <= 16'd0;
 `endif
                     state        <= ST_POLL_CTRL;
                 end
@@ -796,8 +863,17 @@ always @(posedge ddr_clk) begin
                     // operation display_line is already == vcount+1, so this only
                     // fires after the fill has fallen behind the display. Clamped so
                     // we never target a line past the active region.
-                    if (display_line < (vcount_ddr + 9'd1) && (vcount_ddr + 9'd1) < V_ACTIVE)
+                    if (display_line < (vcount_ddr + 9'd1) && (vcount_ddr + 9'd1) < V_ACTIVE) begin
                         display_line <= vcount_ddr + 9'd1;
+`ifdef SOLARUS_DBG_PROBES
+                        // [reader-health instrument] this re-anchor = the fetch fell
+                        // behind the live scan (underflow) — count it and record WHERE
+                        // (the live scan line vcount_ddr) it hit, this frame.
+                        if (underflow_cnt != 5'd31) underflow_cnt <= underflow_cnt + 5'd1;
+                        if (first_uf_line == 9'd511) first_uf_line <= vcount_ddr;
+                        last_uf_line <= vcount_ddr;
+`endif
+                    end
                     state <= ST_READ_LINE;
                 end
             end
