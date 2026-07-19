@@ -89,6 +89,16 @@ module comp_fb_dma #(
     reg          ctrl_phase;    // 1 while writing the control word (after the buffer copy)
     reg          ctrl_pending;  // the control-word write is issued and awaiting acceptance
 
+    // [wedge probe — SOLARUS_DBG_PROBES] copy-duration instrument. copy_cyc counts cycles
+    // busy is held for the CURRENT copy (start -> control-word accepted); peak_copy_cyc is the
+    // saturating max across copies, persistent. A normal copy is ~FB_QWORDS (~19200) cycles;
+    // a value orders of magnitude larger means comp_fb_dma is STALLING mid-copy on the shared
+    // f2h slot (the S_SNAP_DRAIN hard-stall hypothesis) rather than the stall living elsewhere
+    // (blitter S_SNAP_WAIT / arbiter). Published into the control qword's otherwise-unused high
+    // 32 bits (host reads at ctrl_addr+4 = 0x3BF40004); ship path leaves the high word 0.
+    reg [31:0]   copy_cyc;
+    reg [31:0]   peak_copy_cyc;
+
     // ── read-latency pipeline (2-cycle) ────────────────────────────────────────────
     reg          rd_busy;
     reg          rd_v1, rd_v2;
@@ -107,8 +117,15 @@ module comp_fb_dma #(
     assign mem_wr       = busy & (ctrl_phase ? ctrl_pending : hold_valid);
     assign mem_addr     = ctrl_phase ? ctrl_addr
                                      : (buf_base + {{(MAW-(AW+1)){1'b0}}, wcnt});
+`ifdef SOLARUS_DBG_PROBES
+    // [wedge probe] carry peak_copy_cyc in the control qword's high 32 bits (be=0xFF). The
+    // reader only consumes ctrl_word[31:0], so the low half is byte-identical to ship.
+    assign mem_din      = ctrl_phase ? {peak_copy_cyc, ctrl_word} : hold_data;
+    assign mem_be       = ctrl_phase ? 8'hFF : 8'hFF;
+`else
     assign mem_din      = ctrl_phase ? {32'd0, ctrl_word} : hold_data;
     assign mem_be       = ctrl_phase ? 8'h0F : 8'hFF;
+`endif
     assign mem_burstcnt = 8'd1;
 
     // buffer-phase pipeline control (naturally idle in ctrl_phase: hold_valid/rd_busy=0, rptr=NQW)
@@ -132,8 +149,14 @@ module comp_fb_dma #(
             frame_counter <= 30'd0;
             ctrl_phase    <= 1'b0;
             ctrl_pending  <= 1'b0;
+            copy_cyc      <= 32'd0;
+            peak_copy_cyc <= 32'd0;
         end else begin
             work_rd_en <= 1'b0;   // default: single-cycle read strobe
+`ifdef SOLARUS_DBG_PROBES
+            // [wedge probe] tick the current-copy duration while busy (saturating).
+            if (busy && copy_cyc != 32'hFFFFFFFF) copy_cyc <= copy_cyc + 32'd1;
+`endif
 
             if (!busy) begin
                 rd_busy <= 1'b0; rd_v1 <= 1'b0; rd_v2 <= 1'b0; hold_valid <= 1'b0;
@@ -148,6 +171,9 @@ module comp_fb_dma #(
                     wcnt <= {(AW+1){1'b0}};
                     // latch the BACK buffer (~ the reader's displayed buffer) for the whole copy.
                     wr_target <= ~disp_active;
+`ifdef SOLARUS_DBG_PROBES
+                    copy_cyc <= 32'd0;   // [wedge probe] restart the current-copy duration counter
+`endif
                 end
             end else if (!ctrl_phase) begin
                 // ─── BUFFER phase: raster-copy WORK into buffer `wr_target` ─────────
@@ -189,6 +215,10 @@ module comp_fb_dma #(
                     published     <= wr_target;
                     frame_counter <= frame_counter + 30'd1;
                     busy          <= 1'b0;                 // whole frame (buffer + control) complete
+`ifdef SOLARUS_DBG_PROBES
+                    // [wedge probe] this copy just finished: fold its duration into the peak.
+                    if (copy_cyc > peak_copy_cyc) peak_copy_cyc <= copy_cyc;
+`endif
                 end
             end
         end
