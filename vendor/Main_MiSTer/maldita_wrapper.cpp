@@ -4,9 +4,11 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
+#include "maldita_wrapper.h"
 #include "maldita_child.h"
 #include "maldita_joy_shm.h"
 #include "maldita_osd.h"
@@ -57,7 +59,12 @@ pid_t spawn_engine(int argc, char *argv[]) {
 
 void return_to_menu(void) {
     input_switch(0);
-    fpga_load_rbf_no_restart((char*)kMenuCore);
+    // Stock fpga_load_rbf() at the pinned commit takes cfg=nullptr by default
+    // and, unlike sonic-mania's hand-patched fpga_io.cpp, does NOT call
+    // app_restart() in that path -- it just programs the FPGA and returns.
+    // That is exactly "load without restart"; no upstream
+    // fpga_load_rbf_no_restart() exists at this commit.
+    fpga_load_rbf(kMenuCore);
     // Falls through to MiSTer's normal menu exec path via the outer program exit.
 }
 } // namespace
