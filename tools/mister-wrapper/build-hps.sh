@@ -24,14 +24,18 @@ LD_BIN="${TOOLCHAIN_PREFIX}-ld"
 STRIP_BIN="${TOOLCHAIN_PREFIX}-strip"
 UPSTREAM_URL="${MISTER_WRAPPER_HPS_UPSTREAM_URL:-https://github.com/MiSTer-devel/Main_MiSTer.git}"
 UPSTREAM_COMMIT="${MISTER_WRAPPER_HPS_UPSTREAM_COMMIT:-3380931329b8acb442bd3d35a24d89f88641b7cf}"
-# NOTE: unlike sonic-mania-mister, vendor/Main_MiSTer here is an OVERLAY
-# (Task 1), not a full vendored copy, so it has no .devcontainer. The
-# .devcontainer only exists in the on-demand fetched upstream tree
-# (BUILD_SRC_DIR, populated by prepare_source()) — point there instead.
-DOCKER_CONTEXT_DIR="${BUILD_SRC_DIR}/.devcontainer"
-DOCKERFILE_PATH="${DOCKER_CONTEXT_DIR}/Dockerfile"
+# Native debian:bullseye-slim + Debian's own arm-linux-gnueabihf cross
+# toolchain (see tools/mister-wrapper/Dockerfile.wrapper), mirroring the
+# gmloader-next / solarus-mister recipe. This replaces the upstream
+# .devcontainer, which downloads an x86_64-hosted ARM-vendor toolchain and
+# therefore forces `--platform linux/amd64` (full QEMU emulation on arm64
+# hosts). The Debian cross-toolchain's binary prefix differs from the
+# Makefile's default BASE (arm-none-linux-gnueabihf, the ARM-vendor prefix),
+# so the docker build path overrides BASE explicitly (see run_make_in_docker).
+DOCKER_CONTEXT_DIR="${ROOT_DIR}/tools/mister-wrapper"
+DOCKERFILE_PATH="${DOCKER_CONTEXT_DIR}/Dockerfile.wrapper"
 DOCKER_IMAGE="${MISTER_WRAPPER_HPS_IMAGE:-maldita-mister-wrapper-hps}"
-DOCKER_PLATFORM="${MISTER_WRAPPER_HPS_DOCKER_PLATFORM:-linux/amd64}"
+DOCKER_TOOLCHAIN_PREFIX="${MISTER_WRAPPER_HPS_DOCKER_TOOLCHAIN_PREFIX:-arm-linux-gnueabihf}"
 CONTAINER_ROOT="${MISTER_WRAPPER_HPS_CONTAINER_ROOT:-/workspaces/maldita-castilla-mister}"
 CONTAINER_BUILD_SRC_DIR="${CONTAINER_ROOT}/build/mister-wrapper-hps/src"
 
@@ -119,21 +123,23 @@ check_compiler_stack() {
 
 build_docker_image() {
     docker build \
-        --platform "${DOCKER_PLATFORM}" \
         -t "${DOCKER_IMAGE}" \
         -f "${DOCKERFILE_PATH}" \
         "${DOCKER_CONTEXT_DIR}"
 }
 
 run_make_in_docker() {
-    local toolchain_bin_expr='$(echo /usr/local/bin/gcc-arm-*/bin)'
+    # Native arm64 (no --platform): the Debian arm-linux-gnueabihf
+    # cross-toolchain baked into DOCKER_IMAGE targets armhf regardless of
+    # host arch, so this never touches QEMU. BASE is overridden to the
+    # Debian prefix -- the Makefile default (arm-none-linux-gnueabihf) is the
+    # ARM-vendor prefix, which this image does not install.
     docker run --rm \
-        --platform "${DOCKER_PLATFORM}" \
         -u "$(id -u):$(id -g)" \
         -v "${ROOT_DIR}:${CONTAINER_ROOT}" \
         -w "${CONTAINER_ROOT}" \
         "${DOCKER_IMAGE}" \
-        bash -lc "TOOLCHAIN_BIN=${toolchain_bin_expr}; export PATH=\"\$PATH:\${TOOLCHAIN_BIN}\"; make -C \"${CONTAINER_BUILD_SRC_DIR}\" -f Makefile.maldita BASE=\"${TOOLCHAIN_PREFIX}\""
+        make -C "${CONTAINER_BUILD_SRC_DIR}" -f Makefile.maldita BASE="${DOCKER_TOOLCHAIN_PREFIX}" -j"$(nproc)"
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -151,7 +157,7 @@ if [ "${1:-}" = "--check-env" ]; then
     elif [ "${mode}" = "docker" ]; then
         echo "build_mode=docker"
         echo "docker_image=${DOCKER_IMAGE}"
-        echo "docker_platform=${DOCKER_PLATFORM}"
+        echo "docker_toolchain_prefix=${DOCKER_TOOLCHAIN_PREFIX}"
     else
         echo "missing required toolchain: install ${TOOLCHAIN_PREFIX} on PATH or use Docker with ${DOCKERFILE_PATH}" >&2
         exit 1
