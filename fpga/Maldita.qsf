@@ -17,11 +17,6 @@ set_global_assignment -name VERILOG_MACRO "MALDITA_CORE=1"
 # budget and drove the pll_hdmi divclk domain negative (60fps campaign Phase 3a STA gate,
 # ~-1.0ns across a 10-seed sweep). Drop it.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_PALETTE1=1"
-# [reader-health instrument — TEMPORARY device tear diag] Enables openbor_video_reader's
-# per-frame line-fetch UNDERFLOW writeback to VSYNC_ADDR high word (byte 0x3BFB0004).
-# REVERT THIS LINE once the scanout tear/tilemap root cause is pinned — it costs one
-# extra 1-qword DDR write per frame and is diagnostic-only (no fix).
-set_global_assignment -name VERILOG_MACRO "SOLARUS_DBG_PROBES=1"
 
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
