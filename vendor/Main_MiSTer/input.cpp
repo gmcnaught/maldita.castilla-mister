@@ -6008,6 +6008,7 @@ int input_poll(int getchar)
 				joy_mask_prev[i] = joy_mask[i];
 				user_io_digital_joystick(i, joy_mask[i], newdir);
 			}
+			joy_mask_export[i] = joy_mask[i];
 		}
 	}
 	else if (input_joy_passthrough)
@@ -6016,7 +6017,7 @@ int input_poll(int getchar)
 			joy_mask_export[i] = joy_mask[i] | autofire_mask[i];
 	}
 
-	if (!grabbed || user_io_osd_is_visible())
+	if ((!grabbed || user_io_osd_is_visible()) && !input_joy_passthrough)
 	{
 		for (int i = 0; i < NUMPLAYERS; i++)
 		{
