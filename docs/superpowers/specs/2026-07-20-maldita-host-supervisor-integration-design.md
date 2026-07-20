@@ -194,13 +194,18 @@ correction is a versioned change.
 
 ## Existing plumbing this obsoletes
 
-`fpga/Maldita.sv:942` `osd_restart = status[19] // mirrored to ARM` and the
-`blitter_top.sv` `S_WR_STATUS` → `C_STATUS` low32 mirror were built to carry the Restart
-trigger to the ARM side over the fabric control block. With the wrapper in place, the T-bit
-is taken directly via `user_io_status_trigger_take()` — earlier and more reliably than the
-fabric round-trip. **#4 should treat the `status[19]` mirror as dead plumbing for Reset**
-and may remove it. Note `status[20]` (FPS overlay) may still want the mirror — verify
-before deleting the whole `S_WR_STATUS` path.
+`fpga/Maldita.sv:942` `osd_restart = status[19] // mirrored to ARM` reaches the ARM side
+over the fabric control block: `blitter_top.sv:1480/1482` packs the OSD mirror into
+`C_STATUS` low32 as **`bit0 = osd_restart_pending`, `bit1 = osd_fps_on`**. With the wrapper
+in place, the Reset T-bit is taken directly via `user_io_status_trigger_take()` — earlier
+and more reliably than the fabric round-trip — so **the host stops consuming bit0**.
+
+**The RTL `S_WR_STATUS` path MUST stay.** Verified against `blitter_top.sv:1480/1482`: the
+FPS overlay (`status[20]` → bit1) is delivered live to the engine over this same word and
+has no other transport. #4's change is host-side only — stop reading bit0 for Reset; leave
+the RTL mirror and bit1 untouched. (A later, out-of-scope cleanup could migrate FPS-overlay
+to `user_io` too and retire the whole word, but that changes FPS from live to
+next-spawn semantics and is not part of this work.)
 
 ## Testing & verification
 
