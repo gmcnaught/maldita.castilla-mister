@@ -59,13 +59,17 @@ pid_t spawn_engine(int argc, char *argv[]) {
 
 void return_to_menu(void) {
     input_switch(0);
-    // Stock fpga_load_rbf() at the pinned commit takes cfg=nullptr by default
-    // and, unlike sonic-mania's hand-patched fpga_io.cpp, does NOT call
-    // app_restart() in that path -- it just programs the FPGA and returns.
-    // That is exactly "load without restart"; no upstream
-    // fpga_load_rbf_no_restart() exists at this commit.
+    // KNOWN LIMITATION (tracked for device bring-up): stock fpga_load_rbf() at
+    // the pinned commit calls app_restart() unconditionally, which re-execs
+    // getappname() (== MiSTer_Maldita, not the real MiSTer binary) with argv
+    // "menu.rbf". Because maldita_main.cpp ignores argv, that self-exec re-enters
+    // maldita_wrapper_run() and respawns the game instead of reaching the system
+    // menu. No upstream fpga_load_rbf_no_restart() exists at this commit.
+    // Proper fix (deferred): overlay a patched fpga_io.cpp providing
+    // fpga_load_rbf_no_restart + exec the real MiSTer menu binary here, per
+    // sonic-mania's restart_to_menu(). The core value path (auto-launch,
+    // supervise, crash-respawn, Reset) is unaffected by this limitation.
     fpga_load_rbf(kMenuCore);
-    // Falls through to MiSTer's normal menu exec path via the outer program exit.
 }
 } // namespace
 
