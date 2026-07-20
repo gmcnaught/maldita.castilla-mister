@@ -1,4 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include "maldita_child.h"
 
 static int fails = 0;
@@ -33,11 +38,84 @@ static void test_count_update(void) {
     CHECK(maldita_crash_count_update(0, 0, 10000) == 1);
 }
 
+static void test_spawn(void) {
+    // Spawn a child that exits cleanly with code 42.
+    char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 42", NULL };
+    char *envp[] = { NULL };
+    pid_t pid = maldita_child_spawn(argv, envp);
+    CHECK(pid > 0);  // Valid PID
+
+    // Poll for reap (up to 1 second, sleeping 10ms between polls).
+    bool reaped = false;
+    int exit_code = -1;
+    for (int i = 0; i < 100; i++) {
+        if (maldita_child_reap(pid, &exit_code)) {
+            reaped = true;
+            break;
+        }
+        usleep(10000);  // 10 ms
+    }
+    CHECK(reaped);           // Should have reaped within 1 second
+    CHECK(exit_code == 42);  // Correct exit code
+}
+
+static void test_spawn_zero_exit(void) {
+    // Spawn a child that exits with code 0 (clean exit).
+    char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 0", NULL };
+    char *envp[] = { NULL };
+    pid_t pid = maldita_child_spawn(argv, envp);
+    CHECK(pid > 0);
+
+    // Poll for reap.
+    bool reaped = false;
+    int exit_code = -1;
+    for (int i = 0; i < 100; i++) {
+        if (maldita_child_reap(pid, &exit_code)) {
+            reaped = true;
+            break;
+        }
+        usleep(10000);
+    }
+    CHECK(reaped);
+    CHECK(exit_code == 0);  // Clean exit
+}
+
+static void test_signal(void) {
+    // Spawn a child that sleeps for 30 seconds.
+    char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"sleep 30", NULL };
+    char *envp[] = { NULL };
+    pid_t pid = maldita_child_spawn(argv, envp);
+    CHECK(pid > 0);
+
+    // Give the child time to start.
+    usleep(100000);  // 100 ms
+
+    // Send SIGTERM.
+    maldita_child_signal(pid, SIGTERM);
+
+    // Poll for reap (up to 1 second).
+    bool reaped = false;
+    int exit_code = -1;
+    for (int i = 0; i < 100; i++) {
+        if (maldita_child_reap(pid, &exit_code)) {
+            reaped = true;
+            break;
+        }
+        usleep(10000);
+    }
+    CHECK(reaped);
+    // Signal termination: 128 + signal_number
+    CHECK(exit_code == (128 + SIGTERM));  // 128 + 15 = 143
+}
+
 int main(void) {
     test_decide();
     test_backoff();
     test_count_update();
+    test_spawn();
+    test_spawn_zero_exit();
+    test_signal();
     if (fails) { printf("%d checks FAILED\n", fails); return 1; }
-    printf("maldita_child crash-policy OK\n");
+    printf("maldita_child spawn/reap/signal OK\n");
     return 0;
 }
