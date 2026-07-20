@@ -8,5 +8,7 @@ maldita_joy_shm.h
 maldita_osd.cpp
 maldita_osd.h
 mister_joy_shm.h
+input.cpp
+input.h
 user_io.cpp
 user_io.h
