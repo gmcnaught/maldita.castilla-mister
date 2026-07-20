@@ -1445,13 +1445,26 @@ module blitter_top #(
                 // second (stale, 0x3A) control word here would race that. This state no longer
                 // touches DDR — it only bumps the perf/debug frame_counter, then signals C_DONE.
                 frame_counter<=frame_counter+1;
-                state<=S_WR_DONE;
+                // [publish order] C_DONE is the host's RELEASE barrier — it must be written
+                // LAST, after the perf words it releases. Enter the writeback chain at
+                // S_WR_STATUS; S_WR_DONE is now the tail. See S_WR_DONE below.
+                state<=S_WR_STATUS;
             end
             S_WR_DONE: begin
                 // low32 = done_seq (handshake); high32 = fabric-busy cyc this frame.
+                // [publish order] TAIL of the writeback chain (was the head). The host
+                // (raster_backend_mfgpu.cpp mf_device_submit) returns the instant C_DONE
+                // matches submit_seq and then reads C_STATUS.hi (perf_texwait_cyc) and
+                // C_SRCSEL.hi (perf_tri_cyc). Publishing C_DONE first left an 8-cycle window
+                // in which those reads returned the PREVIOUS frame's counters, making the
+                // derived ovhd = frame - tri mix two frames. Ringing the bell last closes it
+                // — the same "doorbell LAST after a barrier" discipline the host uses on
+                // submit. Guarded by tb_perf_publish_order.
+                // Still ahead of S_SNAP_WAIT, so the engine's next-frame prep continues to
+                // overlap the WORK->scan snapshot; this costs only the two qword writes.
                 bm_wr<=1; bm_be<=8'hFF; bm_addr<=`BLTCTRL_QW+`C_DONE;
                 bm_din<={perf_frame_cyc, submit_reg};
-                wr_ret<=S_WR_STATUS; state<=S_WR_WAIT;
+                wr_ret<=S_SNAP_WAIT; state<=S_WR_WAIT;
             end
             S_WR_STATUS: begin
                 // low32 = OSD mirror bits (bit0=osd_restart_pending, the sticky-latched
@@ -1483,11 +1496,14 @@ module blitter_top #(
 `else
                 bm_din<={perf_tri_cyc, 32'd0};
 `endif
+                // [publish order] proceed to S_WR_DONE, which rings the C_DONE doorbell now
+                // that both perf words are in DDR, and then falls through to S_SNAP_WAIT.
                 // [FB-in-BRAM double-buffer] after the frame, snapshot the completed work
-                // buffer into the scan buffer (during vblank). C_DONE was already written
-                // (S_WR_DONE), so the engine's handshake completes and its next-frame prep
-                // overlaps the snapshot; we hold off polling the next submit until it ends.
-                wr_ret<=S_SNAP_WAIT;
+                // buffer into the scan buffer (during vblank). C_DONE is written just ahead
+                // of the snapshot, so the engine's handshake still completes and its
+                // next-frame prep overlaps the snapshot; we hold off polling the next
+                // submit until it ends.
+                wr_ret<=S_WR_DONE;
                 state<=S_WR_WAIT;
             end
 
