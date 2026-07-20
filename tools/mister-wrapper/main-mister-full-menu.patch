@@ -1,0 +1,6 @@
+# Maldita Castilla MiSTer wrapper: menu.cpp patch (placeholder).
+#
+# Intentionally empty for the initial wrapper. The sonic-mania "hide Core entry"
+# hunk (prevent hot-swapping cores under the running game) is deferred polish
+# (spec § "no main-mister-full-menu.patch initially"). build-hps.sh applies this
+# with `git apply --allow-empty`, so an empty patch is a valid no-op.
