@@ -5,11 +5,11 @@
 // frame_counter and sets active_buffer.
 //
 // Checks:
-//   (a) FETCH address (Y): each 80-beat read == buf_base + (239 - display_line)*80.
+//   (a) FETCH address (Y): each 80-beat read == buf_base + display_line*80 (FORWARD).
 //   (b) FETCH data 1:1: every line-buffer qword == the active buffer's qword at the fetched
 //       (Y-reversed) line.
 //   (c) OUTPUT orientation (Y only): during active display, the output pixel cur_pix at screen
-//       (hcol, vcount) == the active buffer's pixel at STORAGE (hcol UNCHANGED, 239 - vcount).
+//       (hcol, vcount) == the active buffer's pixel at STORAGE (hcol AND vcount UNCHANGED).
 // (c) is the make-or-break: it catches a wrong-axis fix (an accidental X reversal, or none).
 //
 // Copyright (C) 2026 — GPL-3.0
@@ -130,27 +130,27 @@ module tb_reader_ddr;
     integer addr_errs = 0, data_errs = 0, orient_errs = 0, active_err = 0;
     integer addr_checks = 0, data_checks = 0, orient_checks = 0;
 
-    // (a) burst address: Y-reversed source line (239 - display_line).
+    // (a) burst address: FORWARD source line (display_line).
     wire burst_issue = r_rd && (r_burstcnt == 8'd80) && !serving;
     always @(posedge clk) begin
         if (!reset && burst_issue) begin
             if (r_addr !== ((u_reader.active_buffer ? BUF1 : BUF0)
-                            + ((9'd239 - u_reader.display_line) * STRIDE))) begin
+                            + (u_reader.display_line * STRIDE))) begin
                 if (addr_errs < 8) $display("  ADDR MISMATCH line=%0d active=%0b got=%h exp=%h",
                     u_reader.display_line, u_reader.active_buffer, r_addr,
-                    (u_reader.active_buffer ? BUF1 : BUF0) + ((9'd239 - u_reader.display_line) * STRIDE));
+                    (u_reader.active_buffer ? BUF1 : BUF0) + (u_reader.display_line * STRIDE));
                 addr_errs = addr_errs + 1;
             end
             addr_checks = addr_checks + 1;
         end
     end
 
-    // (b) fetch data 1:1 vs the fetched (Y-reversed) source line.
+    // (b) fetch data 1:1 vs the fetched (forward) source line.
     always @(posedge clk) begin
         if (!reset && u_reader.lb_we) begin
             if (u_reader.lb_wdata !== (u_reader.active_buffer
-                    ? mem1[(239 - u_reader.display_line) * STRIDE + u_reader.lb_waddr[6:0]]
-                    : mem0[(239 - u_reader.display_line) * STRIDE + u_reader.lb_waddr[6:0]])) begin
+                    ? mem1[u_reader.display_line * STRIDE + u_reader.lb_waddr[6:0]]
+                    : mem0[u_reader.display_line * STRIDE + u_reader.lb_waddr[6:0]])) begin
                 if (data_errs < 8) $display("  DATA MISMATCH line=%0d beat=%0d",
                     u_reader.display_line, u_reader.lb_waddr[6:0]);
                 data_errs = data_errs + 1;
@@ -159,7 +159,7 @@ module tb_reader_ddr;
         end
     end
 
-    // (c) OUTPUT orientation (Y-flip ONLY): cur_pix at screen (col c,row d) == buffer pixel (col c, row 239-d).
+    // (c) OUTPUT orientation (NO flip): cur_pix at screen (col c,row d) == buffer pixel (col c, row d).
     //     Gated to STABLE (non-flip) frames via orient_arm — the reader tolerates a single-line
     //     re-anchor glitch at a buffer flip (documented; tear-free on device), which is not an
     //     orientation error, so we measure orientation only on settled frames.
@@ -167,20 +167,20 @@ module tb_reader_ddr;
     // display_line == vcount+1). In this single-clock bench the fetch can transiently lag the
     // display right after frame_ready asserts (startup phase), which reads a stale linebuf
     // line — a sim pacing artifact, not an orientation error. On correctly-paced lines the
-    // linebuf[vcount%2] holds the line fetched for display_line=vcount (source 239-vcount).
+    // linebuf[vcount%2] holds the line fetched for display_line=vcount (source vcount).
     reg orient_arm = 1'b0;
     always @(posedge clk) begin
         if (!reset && orient_arm && ce_pix && tim_de && u_reader.frame_ready_vid
             && (u_reader.display_line == (tim_vc + 9'd1))
             && u_reader.hcol < HACT && tim_vc < (VACT-1)) begin
-            // [device-fix: vertical (Y) flip ONLY] display (col c, row d) must show framebuffer
-            // pixel (col c UNCHANGED, row 239-d). An accidental X reversal (col 319-c) or a
-            // no-op (row d) both fail this.
-            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, VACT-1 - tim_vc)) begin
+            // Display (col c, row d) must show framebuffer pixel (col c, row d) UNCHANGED:
+            // comp_fb_dma publishes a top-down frame, so scanout must not re-order it. Both an
+            // X reversal (col 319-c) and a Y reversal (row 239-d) fail this.
+            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc)) begin
                 if (orient_errs < 8) $display("  ORIENT MISMATCH screen(%0d,%0d) got=%h exp=%h (buf px %0d,%0d)",
                     u_reader.hcol, tim_vc, u_reader.cur_pix,
-                    bufpix(u_reader.active_buffer, u_reader.hcol, VACT-1 - tim_vc),
-                    u_reader.hcol, VACT-1 - tim_vc);
+                    bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc),
+                    u_reader.hcol, tim_vc);
                 orient_errs = orient_errs + 1;
             end
             orient_checks = orient_checks + 1;
@@ -252,7 +252,7 @@ module tb_reader_ddr;
                      addr_errs, data_errs, orient_errs, active_err);
             $fatal;
         end
-        $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; VERTICAL flip correct — screen(c,d)=buf(c,239-d), X unchanged, both buffers");
+        $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; FORWARD scanout — screen(c,d)=buf(c,d), no re-ordering, both buffers");
         $display("RESULT: PASS");
         $finish;
     end

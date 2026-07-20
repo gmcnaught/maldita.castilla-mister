@@ -807,10 +807,28 @@ always @(posedge ddr_clk) begin
                 // !ddr_busy so we only ask when the rdr slot is free (arbiter default-owner model,
                 // and comp_fb_dma is not writing during active display).
                 if (!fifo_aclr_ddr_active && !ddr_busy) begin
-                    // [device-fix: vertical (Y) flip] fetch the REVERSED source line
-                    // (239 - display_line), so display row 0 (top) shows framebuffer row 239
-                    // (bottom) — un-flips the upside-down (Y-up vs Y-down) frame. X stays forward.
-                    ddr_addr     <= buf_base_addr + ((V_ACTIVE - 9'd1 - display_line) * LINE_STRIDE);
+                    // FORWARD fetch: display row N shows framebuffer row N. The framebuffer
+                    // that comp_fb_dma publishes is ALREADY top-down, so scanout must not
+                    // re-order it.
+                    //
+                    // This line has flipped three times (25af92b 180deg -> 94fc48d forward ->
+                    // dd06c2b reversed) because the inversion was being compensated here
+                    // instead of at its source. It is not here: the blitter writes
+                    // tri_dpidx = tpy*FB_W + tpx with tpy a top-down screen row, so WORK is
+                    // top-down by construction. The real bottom-origin input is GameMaker's
+                    // app-surface COMPOSITE quad (GL FBO convention, measured on device:
+                    // v@top=0.8438 > v@bot=0.0000, 801/801 draws), and that is now flipped
+                    // where it enters, in raster_backend_mfgpu.cpp's src_is_appsurf branch.
+                    // With that fixed, WORK holds a correct frame and a reversed fetch here
+                    // simply mirrors it again — which is exactly the whole-frame inversion
+                    // seen on device.
+                    //
+                    // Reversing here was also subtly wrong independent of the above: the
+                    // pivot uses this module's V_ACTIVE=240 while openbor_video_timing.sv
+                    // displays 224 lines, so display_line only reaches ~223 and the reversed
+                    // fetch showed FB rows 239..16 — a 16-row offset with rows 0-15 never
+                    // displayed. Forward addressing does not depend on the pivot at all.
+                    ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // 80-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;
