@@ -6,6 +6,7 @@
 #include <signal.h>
 #ifdef __linux__
 #include <sys/prctl.h>
+#include <sched.h>
 #endif
 
 extern char **environ;
@@ -57,6 +58,16 @@ pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cw
         }
 #ifdef __linux__
         prctl(PR_SET_PDEATHSIG, SIGTERM);  /* die if parent dies */
+        /* Reset CPU affinity: maldita_main pins the WRAPPER to CPU 1, but the
+         * engine must use all cores (inheriting the single-core pin halves its
+         * framerate). Mirrors sonic-mania's child fork. */
+        {
+            cpu_set_t all_cpus;
+            CPU_ZERO(&all_cpus);
+            CPU_SET(0, &all_cpus);
+            CPU_SET(1, &all_cpus);
+            sched_setaffinity(0, sizeof(all_cpus), &all_cpus);
+        }
 #endif
         execve(argv[0], argv, envp ? envp : environ);
         _exit(127);  /* execve failed */
