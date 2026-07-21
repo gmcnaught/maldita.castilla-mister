@@ -20,7 +20,7 @@ int maldita_crash_backoff_ms(int consecutive_crashes);
 int maldita_crash_count_update(int prev_count, long ms_since_last_crash, long window_ms);
 
 /* ---- syscall wrappers (Task 3) ---- */
-pid_t maldita_child_spawn(char *const argv[], char *const envp[]);
+pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cwd);
 bool  maldita_child_reap(pid_t pid, int *exit_code_out); /* WNOHANG; true if state changed */
 void  maldita_child_signal(pid_t pid, int sig);
 

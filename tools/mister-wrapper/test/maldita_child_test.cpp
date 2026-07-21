@@ -42,7 +42,7 @@ static void test_spawn(void) {
     // Spawn a child that exits cleanly with code 42.
     char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 42", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp);
+    pid_t pid = maldita_child_spawn(argv, envp, NULL);
     CHECK(pid > 0);  // Valid PID
 
     // Poll for reap (up to 1 second, sleeping 10ms between polls).
@@ -63,7 +63,7 @@ static void test_spawn_zero_exit(void) {
     // Spawn a child that exits with code 0 (clean exit).
     char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 0", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp);
+    pid_t pid = maldita_child_spawn(argv, envp, NULL);
     CHECK(pid > 0);
 
     // Poll for reap.
@@ -84,7 +84,7 @@ static void test_signal(void) {
     // Spawn a child that sleeps for 30 seconds.
     char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"sleep 30", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp);
+    pid_t pid = maldita_child_spawn(argv, envp, NULL);
     CHECK(pid > 0);
 
     // Give the child time to start.
@@ -108,6 +108,23 @@ static void test_signal(void) {
     CHECK(exit_code == (128 + SIGTERM));  // 128 + 15 = 143
 }
 
+static void test_spawn_cwd(void) {
+    // Child runs from cwd="/"; exit 7 iff $PWD is / (symlink-free, unlike /tmp
+    // which resolves to /private/tmp on macOS), else 8. The test process runs
+    // from the worktree dir, so reaching / proves chdir(cwd) took effect.
+    char *argv[] = { (char *)"/bin/sh", (char *)"-c",
+                     (char *)"[ \"$(pwd)\" = / ] && exit 7 || exit 8", NULL };
+    char *envp[] = { NULL };
+    pid_t pid = maldita_child_spawn(argv, envp, "/");
+    CHECK(pid > 0);
+    int exit_code = -1;
+    for (int i = 0; i < 100; i++) {
+        if (maldita_child_reap(pid, &exit_code)) break;
+        usleep(10000);
+    }
+    CHECK(exit_code == 7);  // chdir(cwd) took effect before exec
+}
+
 int main(void) {
     test_decide();
     test_backoff();
@@ -115,6 +132,7 @@ int main(void) {
     test_spawn();
     test_spawn_zero_exit();
     test_signal();
+    test_spawn_cwd();
     if (fails) { printf("%d checks FAILED\n", fails); return 1; }
     printf("maldita_child spawn/reap/signal OK\n");
     return 0;
