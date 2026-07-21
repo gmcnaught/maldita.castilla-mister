@@ -36,7 +36,7 @@ int maldita_crash_count_update(int prev_count, long ms_since_last_crash, long wi
 
 /* ---- syscall wrappers ---- */
 
-pid_t maldita_child_spawn(char *const argv[], char *const envp[])
+pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cwd)
 {
     pid_t pid = fork();
     if (pid < 0) {
@@ -44,6 +44,11 @@ pid_t maldita_child_spawn(char *const argv[], char *const envp[])
     }
     if (pid == 0) {
         /* Child process */
+        /* Working directory: the engine resolves gmloader.json/game paths
+         * relative to CWD, so it must run from the game dir. */
+        if (cwd && chdir(cwd) != 0) {
+            _exit(126);  /* chdir failed */
+        }
         /* Redirect stdin to /dev/null */
         int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (devnull >= 0) {

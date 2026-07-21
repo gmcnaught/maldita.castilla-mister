@@ -25,6 +25,9 @@ extern char **environ;
 
 namespace {
 constexpr const char *kEngineBinary = "/media/fat/games/gmloader/gmloader";
+constexpr const char *kGameDir      = "/media/fat/games/gmloader";
+constexpr const char *kEngineConfig = "gmloader.json";
+constexpr const char *kEngineLibPath = "/media/fat/games/gmloader/mesa:/media/fat/games/gmloader";
 constexpr const char *kMenuCore     = "menu.rbf";
 constexpr const char *kLogPath      = "/media/fat/games/gmloader/logs/osd-wrapper.log";
 constexpr int  kMaxCrashes = 3;
@@ -44,17 +47,21 @@ void set_engine_env(void) {
     setenv("SDL_VIDEODRIVER", "dummy", 1);
     setenv("GMLOADER_BLITTER", "2", 1);   // fabric path (CLAUDE.md device section)
     setenv("GMLOADER_RASTER", "mfgpu", 1);
+    setenv("LD_LIBRARY_PATH", kEngineLibPath, 1);  // GLES-sw / mesa libs
     // GMLOADER_JOY_SHM is exported by maldita_joy_open() (feat #2) when it succeeds.
 }
 
-// Spawn the engine; child sets affinity/env, execs. Returns pid or -1.
+// Spawn the engine; child runs from the game dir (so gmloader.json + game
+// paths resolve), with the config arg and library path the launcher provides.
 pid_t spawn_engine(int argc, char *argv[]) {
     (void)argc; (void)argv;
     std::vector<char*> child_argv;
     child_argv.push_back(const_cast<char*>(kEngineBinary));
+    child_argv.push_back(const_cast<char*>("-c"));
+    child_argv.push_back(const_cast<char*>(kEngineConfig));
     child_argv.push_back(nullptr);
     set_engine_env();
-    return maldita_child_spawn(child_argv.data(), environ);
+    return maldita_child_spawn(child_argv.data(), environ, kGameDir);
 }
 
 void return_to_menu(void) {
