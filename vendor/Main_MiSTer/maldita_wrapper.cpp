@@ -83,16 +83,10 @@ void return_to_menu(void) {
     fpga_load_rbf(kMenuCore);
 }
 
-// Boot handshake (fabric-wedge mitigation). gmloader already zeros the fabric
-// control block, but only on its first frame (~10s in) — long after the fabric
-// has polled the DDR at core load. An RBF reload does NOT clear HPS DDR3
-// residue, so a stale/unbalanced control block (C_SUBMIT != C_DONE) makes the
-// fabric latch a garbage frame and wedge (C_DONE stuck 0, black screen). Zero
-// the control block (+ first ring qwords) here — BEFORE user_io_init, which
-// resets/re-polls the core — so the fabric's poll sees a clean submit==done==0
-// state. This is the host-side mitigation; the durable fix is an RTL first-poll
-// gate / B_WAIT watchdog (tracked, next session).
-void reset_fabric_ctrl(void) {
+// Zero the fabric control block (+ first ring qwords) at 0x3B000000 so no stale
+// doorbell/command survives a reload. gmloader also zeros it, but only on its
+// first frame (~10s in) — long after the fabric polled the DDR at core load.
+void zero_fabric_ctrl(void) {
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd < 0) return;
     // Blitter DDR region base 0x3B000000: 8-qword control block @ +0, ring @ +0x40.
@@ -100,10 +94,24 @@ void reset_fabric_ctrl(void) {
     close(fd);
     if (m == MAP_FAILED) return;
     volatile uint32_t *p = (volatile uint32_t *)m;
-    // Zero the 8-qword control block (0x00..0x3F) + the first 8 ring qwords
-    // (0x40..0x7F) so no stale doorbell/command survives the reload.
-    for (int i = 0; i < 0x80 / 4; i++) p[i] = 0;
+    for (int i = 0; i < 0x80 / 4; i++) p[i] = 0;   // control block 0x00..0x3F + ring 0x40..0x7F
     munmap(m, 0x1000);
+}
+
+// Fabric-wedge recovery. The blitter can hang mid-frame (C_DONE stuck 0, black
+// screen) latching stale HPS DDR3 residue, and once wedged its FSM no longer
+// re-reads DDR — a clean control block alone cannot un-stick it. The blitter's
+// reset is the framework RESET (blitter_top.rst = emu RESET = gp_out[31:30]),
+// which fpga_core_reset() drives. So: zero the control block, THEN pulse the
+// core reset — the fabric FSM restarts and re-polls the now-clean block
+// (submit==done==0) instead of the stale/hung state. Used at boot and by the
+// OSD Reset. Durable self-healing fix is an RTL B_WAIT watchdog (next session).
+void recover_fabric(void) {
+    zero_fabric_ctrl();
+    fpga_core_reset(1);   // assert  (gp_out[31:30]=1) — hold blitter in reset
+    usleep(20000);
+    fpga_core_reset(0);   // release (gp_out[31:30]=2) — blitter re-polls clean block
+    usleep(20000);
 }
 } // namespace
 
@@ -117,12 +125,14 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     // video output settings (vga_sog / vga_mode / composite_sync); without it
     // the analog output never gets sync-on-green, so the CRT can't lock and the
     // green channel (carrying sync) is corrupted (purple-ish image).
-    // Clean the fabric control block BEFORE user_io_init resets/re-polls the
-    // core, so the fabric's boot poll can't latch stale DDR3 residue (wedge).
-    reset_fabric_ctrl();
-
     FindStorage();
     user_io_init((argc > 1) ? argv[1] : "", (argc > 2) ? argv[2] : NULL);
+
+    // Boot fabric recovery: zero the control block + pulse the core reset so the
+    // blitter restarts from a clean submit==done==0 state instead of latching
+    // stale DDR3 residue at boot (fabric-wedge / black-screen mitigation). Done
+    // after user_io_init so the video config is applied first.
+    recover_fabric();
 
     (void)maldita_joy_open();   // inert until feat #2; success exports GMLOADER_JOY_SHM
 
@@ -161,9 +171,10 @@ int maldita_wrapper_run(int argc, char *argv[]) {
         g_child_pid = -1;
 
         // ---- decide what to do with the exit ----
-        // OSD Reset: respawn in place immediately. Do NOT count it as a crash
-        // (otherwise pressing Reset 3x would trip the halt threshold).
-        if (deliberate_restart) { consecutive_crashes = 0; continue; }
+        // OSD Reset: recover the fabric (zero control block + pulse core reset —
+        // also un-wedges a hung blitter) and respawn the engine in place. Do NOT
+        // count it as a crash (otherwise pressing Reset 3x would trip halt).
+        if (deliberate_restart) { consecutive_crashes = 0; recover_fabric(); continue; }
 
         if (g_signal) { return_to_menu(); return 0; }  // core unload / kill → menu
 
