@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <vector>
 
 #include "maldita_wrapper.h"
@@ -79,6 +82,29 @@ void return_to_menu(void) {
     // supervise, crash-respawn, Reset) is unaffected by this limitation.
     fpga_load_rbf(kMenuCore);
 }
+
+// Boot handshake (fabric-wedge mitigation). gmloader already zeros the fabric
+// control block, but only on its first frame (~10s in) — long after the fabric
+// has polled the DDR at core load. An RBF reload does NOT clear HPS DDR3
+// residue, so a stale/unbalanced control block (C_SUBMIT != C_DONE) makes the
+// fabric latch a garbage frame and wedge (C_DONE stuck 0, black screen). Zero
+// the control block (+ first ring qwords) here — BEFORE user_io_init, which
+// resets/re-polls the core — so the fabric's poll sees a clean submit==done==0
+// state. This is the host-side mitigation; the durable fix is an RTL first-poll
+// gate / B_WAIT watchdog (tracked, next session).
+void reset_fabric_ctrl(void) {
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) return;
+    // Blitter DDR region base 0x3B000000: 8-qword control block @ +0, ring @ +0x40.
+    void *m = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0x3B000000);
+    close(fd);
+    if (m == MAP_FAILED) return;
+    volatile uint32_t *p = (volatile uint32_t *)m;
+    // Zero the 8-qword control block (0x00..0x3F) + the first 8 ring qwords
+    // (0x40..0x7F) so no stale doorbell/command survives the reload.
+    for (int i = 0; i < 0x80 / 4; i++) p[i] = 0;
+    munmap(m, 0x1000);
+}
 } // namespace
 
 int maldita_wrapper_run(int argc, char *argv[]) {
@@ -91,6 +117,10 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     // video output settings (vga_sog / vga_mode / composite_sync); without it
     // the analog output never gets sync-on-green, so the CRT can't lock and the
     // green channel (carrying sync) is corrupted (purple-ish image).
+    // Clean the fabric control block BEFORE user_io_init resets/re-polls the
+    // core, so the fabric's boot poll can't latch stale DDR3 residue (wedge).
+    reset_fabric_ctrl();
+
     FindStorage();
     user_io_init((argc > 1) ? argv[1] : "", (argc > 2) ? argv[2] : NULL);
 
