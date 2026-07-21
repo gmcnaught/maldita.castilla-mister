@@ -20,6 +20,7 @@
 #include "menu.h"
 #include "osd.h"
 #include "frame_timer.h"
+#include "file_io.h"
 
 extern char **environ;
 
@@ -85,6 +86,14 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     signal(SIGHUP,  on_signal);
     signal(SIGTERM, on_signal);
 
+    // Initialise the MiSTer framework for the loaded core exactly as stock
+    // main() does. user_io_init reads the core config and applies the analog
+    // video output settings (vga_sog / vga_mode / composite_sync); without it
+    // the analog output never gets sync-on-green, so the CRT can't lock and the
+    // green channel (carrying sync) is corrupted (purple-ish image).
+    FindStorage();
+    user_io_init((argc > 1) ? argv[1] : "", (argc > 2) ? argv[2] : NULL);
+
     (void)maldita_joy_open();   // inert until feat #2; success exports GMLOADER_JOY_SHM
 
     int consecutive_crashes = 0;
@@ -103,11 +112,13 @@ int maldita_wrapper_run(int argc, char *argv[]) {
             if (maldita_child_reap(child, &exit_code)) break;
             if (g_signal) { /* forwarded to child in handler; keep reaping */ }
 
-            if (is_fpga_ready(1)) {
-                frame_timer();
-                input_poll(0);
-                maldita_joy_publish(user_io_osd_is_visible());  // inert until feat #2
-            }
+            // Drive the MiSTer framework main loop (stock main.cpp order) so the
+            // video/OSD/input state stays maintained while the engine renders.
+            if (!is_fpga_ready(1)) fpga_wait_to_reset();
+            user_io_poll();
+            frame_timer();
+            input_poll(0);
+            maldita_joy_publish(user_io_osd_is_visible());  // inert until feat #2
 
             int restart = 0;
             maldita_osd_poll(child, &restart);                   // inert until feat #4
