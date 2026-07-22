@@ -268,14 +268,13 @@ assign LED_POWER[0]= FB ? led[2] : act_cnt2[26] ? act_cnt2[25:18] > act_cnt2[7:0
 `include "build_id.v"
 localparam CONF_STR = {
 	"Maldita Castilla;;",
-	"SC0,SOL,Load Quest;",
 	"-;",
 	"OCE,H Position (CRT),0,+1,+2,+3,-3,-2,-1;",
 	"OFH,V Position (CRT),0,+1,+2,+3,-3,-2,-1;",
 	"OI,Vertical Crop (224p),Disabled,Enabled;",
 	"-;",
 	"OK,FPS Overlay,Off,On;",
-	"TJ,Restart Quest;",
+	"TJ,Reset;",
 	"-;",
 	"J1,Sword,Action,Item 1,Item 2,Pause;",
 	"jn,A,B,X,Y,Start;",
@@ -302,11 +301,6 @@ wire        ioctl_wait;
 // backpressure in the gmloader-GPU core — the HPS loader owns content. Tie idle.
 assign ioctl_wait = 1'b0;
 
-// SC0 mounted image — config file created instantly, no ioctl streaming.
-// We only need the filename (from .s0 config). No disk I/O needed.
-wire        img_mounted;
-wire [63:0] img_size;
-
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
 	.clk_sys(clk_sys),
@@ -324,15 +318,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
 	.ioctl_index(ioctl_index),
-	.ioctl_wait(ioctl_wait),
-	// SC0 mount signals
-	.img_mounted(img_mounted),
-	.img_size(img_size),
-	// Tie off disk I/O — we never read/write sectors
-	.sd_lba('{32'd0}),
-	.sd_rd(1'b0),
-	.sd_wr(1'b0),
-	.sd_buff_din('{8'd0})
+	.ioctl_wait(ioctl_wait)
 );
 
 ////////////////////   CLOCKS   ///////////////////
@@ -939,7 +925,7 @@ wire [2:0] led = status[8:6];
 wire [2:0] h_pos = status[14:12];  // OSD H Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
 wire [2:0] v_pos = status[17:15];  // OSD V Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
 wire       crop_on     = status[18];  // OSD Vertical Crop (224p): 0=off, 1=on (Task 2: video_freak)
-wire       osd_restart = status[19];  // OSD Restart Quest (momentary toggle); mirrored to ARM
+wire       osd_restart = status[19];  // OSD Reset (momentary toggle); taken by the wrapper (feat #4)
                                        // via C_STATUS low32 bit0 (blitter_top S_WR_STATUS below)
 wire       osd_fps_on  = status[20];  // OSD FPS Overlay: 0=off, 1=on; mirrored to ARM via
                                        // C_STATUS low32 bit1 (blitter_top S_WR_STATUS below)
