@@ -1,0 +1,31 @@
+# Base image for the Maldita Castilla MiSTer HPS wrapper (MiSTer_Maldita)
+# armhf cross-build.
+#
+# Same pattern as ../../Dockerfile.solarus-build and
+# ../../../gmloader-next/Dockerfile.gmloader-build: build host-native (arm64
+# on Apple Silicon) using Debian's own arm-linux-gnueabihf cross-toolchain
+# package, NOT the ARM-vendor x86_64-hosted toolchain the upstream
+# Main_MiSTer .devcontainer downloads. The vendor toolchain only ships an
+# x86_64 host build, which forces `docker run --platform linux/amd64` and
+# therefore full x86 QEMU emulation on arm64 hosts -- 30+ minutes at ~0% CPU
+# for a build that otherwise takes seconds. Debian's cross-compiler package
+# targets armhf regardless of host arch, so running this image NATIVE (no
+# --platform) avoids QEMU entirely.
+#
+# NOTE: the Makefile's default BASE is `arm-none-linux-gnueabihf` (the
+# ARM-vendor prefix, absent here) -- callers MUST override with
+# `BASE=arm-linux-gnueabihf` (the Debian prefix installed below) when
+# building against this image.
+#
+# Build the image (once; from the repo root or any worktree):
+#   docker build -f tools/mister-wrapper/Dockerfile.wrapper \
+#       -t maldita-mister-wrapper-hps tools/mister-wrapper
+FROM debian:bullseye-slim
+
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+      make git rsync ca-certificates \
+      binutils-arm-linux-gnueabihf gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

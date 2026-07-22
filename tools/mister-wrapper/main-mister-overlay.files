@@ -1,0 +1,12 @@
+maldita_main.cpp
+maldita_wrapper.cpp
+maldita_wrapper.h
+maldita_child.cpp
+maldita_child.h
+maldita_joy_shm.cpp
+maldita_joy_shm.h
+maldita_osd.cpp
+maldita_osd.h
+mister_joy_shm.h
+user_io.cpp
+user_io.h

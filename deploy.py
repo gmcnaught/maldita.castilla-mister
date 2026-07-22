@@ -28,6 +28,7 @@ lays them into the device gmloader tree:
 Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
   /media/fat/games/gmloader/
     gmloader            engine binary (this deploy)             <- ENGINE
+    MiSTer_Maldita      HPS wrapper binary (this deploy)         <- WRAPPER
     gmloader.json       apk_path = "mygame.apk"                 <- ENGINE
     mygame.apk          PortMaster malditacastilla.apk          <- CONTENT
     saves/game.droid    49MB game data                          <- CONTENT
@@ -36,6 +37,11 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
     mesa/               surfaceless Mesa closure                 <- runtime (opt-in)
     libGLES_sw.so       = mesa libGLESv2.so.2                    <- runtime (opt-in)
   /media/fat/_Other/MalditaCastilla_*.rbf                        <- RBF
+
+One-time device setup so stock MiSTer hands off to the wrapper on core load,
+add to MiSTer.ini:
+  [Maldita Castilla]
+  main=/media/fat/games/gmloader/MiSTer_Maldita
 
 Usage:
   ./deploy.py                      RBF + engine + content (the moving pieces)
@@ -61,6 +67,7 @@ GAMEDIR = "/media/fat/games/gmloader"
 
 # ── Source paths (sibling repos). Override any with the matching CLI flag. ──────
 ENGINE_DEFAULT  = SIBLINGS / "gmloader-next/build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
+WRAPPER_DEFAULT = REPO / "build/mister-wrapper-hps/MiSTer_Maldita"
 JSON_DEFAULT    = SIBLINGS / "gmloader-next/games/gmloader/gmloader.json"
 PORTMASTER      = SIBLINGS / "PortMaster-New/ports/maldita.castilla/maldita.castilla"
 APK_DEFAULT     = PORTMASTER / "malditacastilla.apk"
@@ -101,6 +108,8 @@ def main():
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--engine", type=Path, default=ENGINE_DEFAULT,
                     help="gmloader armhf binary (default: gmloader-next build)")
+    ap.add_argument("--wrapper", type=Path, default=WRAPPER_DEFAULT,
+                    help="MiSTer_Maldita HPS wrapper binary (default: build/mister-wrapper-hps)")
     ap.add_argument("--no-rbf", action="store_true", help="skip the FPGA core RBF")
     ap.add_argument("--no-content", action="store_true",
                     help="skip the APK + 49MB game.droid + options.ini")
@@ -115,15 +124,17 @@ def main():
 
     # ── Resolve + verify sources present ──────────────────────────────────────
     engine = args.engine
+    wrapper = args.wrapper
     gmjson = JSON_DEFAULT
-    need = [engine, gmjson]
+    need = [engine, wrapper, gmjson]
     if not args.no_content:
         need += [APK_DEFAULT, DROID_DEFAULT, OPTIONS_DEFAULT]
     missing = [p for p in need if not p.exists()]
     if missing:
         for p in missing:
             print(f"MISSING: {p}", file=sys.stderr)
-        print("\n(build the engine in gmloader-next, or pass --engine / --no-content)",
+        print("\n(build the engine in gmloader-next, the wrapper via "
+              "tools/mister-wrapper/build-hps.sh, or pass --engine / --wrapper / --no-content)",
               file=sys.stderr)
         sys.exit(1)
 
@@ -161,6 +172,9 @@ def main():
     scp_verified(host, engine, f"{GAMEDIR}/gmloader")
     scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
 
+    print("\n-- Uploading HPS wrapper binary (sha1-verified) --")
+    scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
+
     if not args.no_content:
         print("\n-- Uploading content (APK + game.droid + options.ini, sha1-verified) --")
         scp_verified(host, APK_DEFAULT, f"{GAMEDIR}/mygame.apk")
@@ -190,8 +204,8 @@ def main():
         print(f"\n-- Uploading RBF {rbf.name} (sha1-verified) --")
         scp_verified(host, rbf, f"/media/fat/_Other/{rbf.name}")
 
-    print("\n-- Fixing exec bit on the engine --")
-    ssh(host, f"chmod 755 {GAMEDIR}/gmloader", check=True)
+    print("\n-- Fixing exec bit on the engine + wrapper --")
+    ssh(host, f"chmod 755 {GAMEDIR}/gmloader {GAMEDIR}/MiSTer_Maldita", check=True)
 
     print("\n-- Deployed tree --")
     r = ssh(host, f"ls -la {GAMEDIR}/ {GAMEDIR}/saves/ 2>/dev/null | head -40; "
