@@ -172,11 +172,15 @@ module tb_blitter_fill_watchdog;
     // [watchdog test] the withheld fill is recovered with STALE texel data, so pixels
     // are intentionally wrong — do NOT assert bit-exact. Success = the frame COMPLETED
     // (done==submit, no hang). Task 1 Step 3 adds the wd_fire_count==1 assertion.
-    if (mem[32'h200005][31:0]==mem[32'h200000][31:0] && blt.wd_fire_count==24'd1)
-      $display("RESULT: PASS (wd_fire_count=%0d)", blt.wd_fire_count);
+    // published fire-count = C_STATUS.low[31:8] (0x3B000030 >> 8); OSD bits [1:0] preserved.
+    if (mem[32'h200005][31:0]==mem[32'h200000][31:0] && blt.wd_fire_count==24'd1
+        && mem[32'h200006][31:8]==24'd1)
+      $display("RESULT: PASS (wd_fire_count=%0d published=%0d)",
+               blt.wd_fire_count, mem[32'h200006][31:8]);
     else
-      $display("RESULT: FAIL (done=%0d submit=%0d wd_fire_count=%0d)",
-               mem[32'h200005][31:0], mem[32'h200000][31:0], blt.wd_fire_count);
+      $display("RESULT: FAIL (done=%0d submit=%0d wd_fire_count=%0d published=%0d)",
+               mem[32'h200005][31:0], mem[32'h200000][31:0],
+               blt.wd_fire_count, mem[32'h200006][31:8]);
     $finish;
   end
   // hard watchdog backstop

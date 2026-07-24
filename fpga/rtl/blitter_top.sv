@@ -1498,9 +1498,9 @@ module blitter_top #(
 `ifdef SOLARUS_DBG_PROBES
                 // [wedge probe v2] high32 = wedge_snap2 (bbox at peak stuck: maxx|maxy<<16) for the
                 // runaway-walk check; low32 OSD bits preserved. Host reads bbox at C_STATUS+4 = 0x3B000034.
-                bm_din<={wedge_snap2, 30'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={wedge_snap2, wd_fire_count, 6'd0, osd_fps_on, osd_restart_pending};
 `else
-                bm_din<={perf_texwait_cyc, 30'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={perf_texwait_cyc, wd_fire_count, 6'd0, osd_fps_on, osd_restart_pending};
 `endif
                 wr_ret<=S_WR_PERF;
                 state<=S_WR_WAIT;
