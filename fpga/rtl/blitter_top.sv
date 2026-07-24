@@ -543,6 +543,12 @@ module blitter_top #(
     reg         fill_busy;                  // a fill is in flight (p0_ok pending)
     reg  [TEXQ_AW-1:0] fill_slot;           // slot the in-flight fill targets
     reg  [TEXQ_TW-1:0] fill_tag;            // tag the in-flight fill will stamp
+    // [fill watchdog] self-heal a lost p0_ok strobe (permanent B_WAIT hang, no timeout).
+    // Always compiled (distinct from the ifdef'd fill_run diag below).
+    localparam [12:0] WD_TIMEOUT = 13'd4096;   // ~42us @98MHz; >> sim MISS_LAT=140 => never fires in sim
+    reg  [12:0] wd_stall;                   // continuous (fill_busy && !p0_ok) cycles, saturates at WD_TIMEOUT
+    reg  [23:0] wd_fire_count;              // saturating count of watchdog fires (reset only on rst)
+    wire        wd_fire = (wd_stall == WD_TIMEOUT);
 
 `ifdef SOLARUS_DBG_PROBES
     // [wedge probe v2] The fabric stall was PINNED to S_TRI_PIX (state 50) — the rasterizer's
@@ -738,6 +744,7 @@ module blitter_top #(
             tri_surf_rd_en<=1'b0; tri_src_surface<=1'b0;   // [app-surface v1]
             pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
             fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}}; last_pf_qtag<=24'hFFFFFF;
+            wd_stall<=13'd0; wd_fire_count<=24'd0;
         end else begin
             bm_rd<=1'b0;
             pipe_start<=1'b0;     // single-cycle blit_start pulse to comp_pipeline
@@ -768,6 +775,11 @@ module blitter_top #(
                 if ((state==S_TRI_PIX) && (pb==B_WAIT))
                     perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
+
+            // [fill watchdog] count continuous fill-stall cycles; saturate at WD_TIMEOUT.
+            if (fill_busy && !p0_ok) begin
+                if (wd_stall != WD_TIMEOUT) wd_stall <= wd_stall + 13'd1;
+            end else wd_stall <= 13'd0;
 
             case (state)
             S_POLL_SUBMIT: begin
@@ -1113,6 +1125,15 @@ module blitter_top #(
                     tq_tag[fill_slot]   <= fill_tag;
                     tq_valid[fill_slot] <= 1'b1;
                     fill_busy           <= 1'b0;
+                end else if (fill_busy && wd_fire) begin
+                    // [fill watchdog] synthesize a completion with STALE tq_data so the
+                    // pb FSM re-reads a HIT and makes forward progress (few wrong texels
+                    // vs a permanent hang). tq_data intentionally left unwritten.
+                    tq_tag[fill_slot]   <= fill_tag;
+                    tq_valid[fill_slot] <= 1'b1;
+                    fill_busy           <= 1'b0;
+                    wd_fire_count       <= (wd_fire_count==24'hFFFFFF) ? wd_fire_count
+                                                                       : wd_fire_count + 24'd1;
                 end
                 // ==== sub-FSM A: coverage walk -> W*recip mul -> texel addr -> issue P_SRC ====
                 case (pa)
