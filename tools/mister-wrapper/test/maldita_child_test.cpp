@@ -42,7 +42,7 @@ static void test_spawn(void) {
     // Spawn a child that exits cleanly with code 42.
     char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 42", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp, NULL);
+    pid_t pid = maldita_child_spawn(argv, envp, NULL, NULL);
     CHECK(pid > 0);  // Valid PID
 
     // Poll for reap (up to 1 second, sleeping 10ms between polls).
@@ -63,7 +63,7 @@ static void test_spawn_zero_exit(void) {
     // Spawn a child that exits with code 0 (clean exit).
     char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 0", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp, NULL);
+    pid_t pid = maldita_child_spawn(argv, envp, NULL, NULL);
     CHECK(pid > 0);
 
     // Poll for reap.
@@ -84,7 +84,7 @@ static void test_signal(void) {
     // Spawn a child that sleeps for 30 seconds.
     char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"sleep 30", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp, NULL);
+    pid_t pid = maldita_child_spawn(argv, envp, NULL, NULL);
     CHECK(pid > 0);
 
     // Give the child time to start.
@@ -115,7 +115,7 @@ static void test_spawn_cwd(void) {
     char *argv[] = { (char *)"/bin/sh", (char *)"-c",
                      (char *)"[ \"$(pwd)\" = / ] && exit 7 || exit 8", NULL };
     char *envp[] = { NULL };
-    pid_t pid = maldita_child_spawn(argv, envp, "/");
+    pid_t pid = maldita_child_spawn(argv, envp, "/", NULL);
     CHECK(pid > 0);
     int exit_code = -1;
     for (int i = 0; i < 100; i++) {
@@ -123,6 +123,88 @@ static void test_spawn_cwd(void) {
         usleep(10000);
     }
     CHECK(exit_code == 7);  // chdir(cwd) took effect before exec
+}
+
+static void test_spawn_log_path(void) {
+    // log_path captures BOTH the child's stdout and stderr. Under the real
+    // wrapper the child inherits MiSTer's stdio, which is /dev/console — so
+    // every engine message was previously unrecoverable.
+    const char *log = "/tmp/maldita_child_test.log";
+    unlink(log);
+    char *argv[] = { (char *)"/bin/sh", (char *)"-c",
+                     (char *)"echo OUT; echo ERR >&2", NULL };
+    char *envp[] = { NULL };
+    pid_t pid = maldita_child_spawn(argv, envp, NULL, log);
+    CHECK(pid > 0);
+    int exit_code = -1;
+    for (int i = 0; i < 100; i++) {
+        if (maldita_child_reap(pid, &exit_code)) break;
+        usleep(10000);
+    }
+    CHECK(exit_code == 0);
+
+    FILE *f = fopen(log, "r");
+    CHECK(f != NULL);
+    bool saw_out = false, saw_err = false;
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            if (!strncmp(line, "OUT", 3)) saw_out = true;
+            if (!strncmp(line, "ERR", 3)) saw_err = true;
+        }
+        fclose(f);
+    }
+    CHECK(saw_out);  // stdout redirected
+    CHECK(saw_err);  // stderr redirected
+    unlink(log);
+}
+
+static void test_spawn_log_path_append(void) {
+    // Respawns must accumulate, not truncate — the crash that triggered a
+    // respawn has to survive in the log next to the respawned run.
+    const char *log = "/tmp/maldita_child_test_append.log";
+    unlink(log);
+    char *argv1[] = { (char *)"/bin/sh", (char *)"-c", (char *)"echo FIRST", NULL };
+    char *argv2[] = { (char *)"/bin/sh", (char *)"-c", (char *)"echo SECOND", NULL };
+    char *envp[] = { NULL };
+    int exit_code = -1;
+    for (int pass = 0; pass < 2; pass++) {
+        pid_t pid = maldita_child_spawn(pass ? argv2 : argv1, envp, NULL, log);
+        CHECK(pid > 0);
+        for (int i = 0; i < 100; i++) {
+            if (maldita_child_reap(pid, &exit_code)) break;
+            usleep(10000);
+        }
+    }
+    FILE *f = fopen(log, "r");
+    CHECK(f != NULL);
+    bool saw_first = false, saw_second = false;
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            if (!strncmp(line, "FIRST",  5)) saw_first  = true;
+            if (!strncmp(line, "SECOND", 6)) saw_second = true;
+        }
+        fclose(f);
+    }
+    CHECK(saw_first);   // first run's output not truncated by the respawn
+    CHECK(saw_second);
+    unlink(log);
+}
+
+static void test_spawn_log_path_unwritable(void) {
+    // An unopenable log must NOT kill the engine — the child still runs, it
+    // just keeps the inherited stdio.
+    char *argv[] = { (char *)"/bin/sh", (char *)"-c", (char *)"exit 5", NULL };
+    char *envp[] = { NULL };
+    pid_t pid = maldita_child_spawn(argv, envp, NULL, "/nonexistent-dir/x.log");
+    CHECK(pid > 0);
+    int exit_code = -1;
+    for (int i = 0; i < 100; i++) {
+        if (maldita_child_reap(pid, &exit_code)) break;
+        usleep(10000);
+    }
+    CHECK(exit_code == 5);  // spawned and ran despite the unusable log path
 }
 
 int main(void) {
@@ -133,6 +215,9 @@ int main(void) {
     test_spawn_zero_exit();
     test_signal();
     test_spawn_cwd();
+    test_spawn_log_path();
+    test_spawn_log_path_append();
+    test_spawn_log_path_unwritable();
     if (fails) { printf("%d checks FAILED\n", fails); return 1; }
     printf("maldita_child spawn/reap/signal OK\n");
     return 0;

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <vector>
 
 #include "maldita_wrapper.h"
@@ -33,7 +34,9 @@ constexpr const char *kGameDir      = "/media/fat/games/gmloader";
 constexpr const char *kEngineConfig = "gmloader.json";
 constexpr const char *kEngineLibPath = "/media/fat/games/gmloader/mesa:/media/fat/games/gmloader";
 constexpr const char *kMenuCore     = "menu.rbf";
+constexpr const char *kLogDir       = "/media/fat/games/gmloader/logs";
 constexpr const char *kLogPath      = "/media/fat/games/gmloader/logs/osd-wrapper.log";
+constexpr const char *kEngineLog    = "/media/fat/games/gmloader/logs/engine.log";
 constexpr int  kMaxCrashes = 3;
 constexpr long kCrashWindowMs = 10000;
 
@@ -57,6 +60,9 @@ void set_engine_env(void) {
 
 // Spawn the engine; child runs from the game dir (so gmloader.json + game
 // paths resolve), with the config arg and library path the launcher provides.
+// stdout+stderr go to kEngineLog: the wrapper inherits MiSTer's stdio, which is
+// /dev/console, so without this the engine's output is unrecoverable (and every
+// write is a slow console write on the render thread).
 pid_t spawn_engine(int argc, char *argv[]) {
     (void)argc; (void)argv;
     std::vector<char*> child_argv;
@@ -65,7 +71,7 @@ pid_t spawn_engine(int argc, char *argv[]) {
     child_argv.push_back(const_cast<char*>(kEngineConfig));
     child_argv.push_back(nullptr);
     set_engine_env();
-    return maldita_child_spawn(child_argv.data(), environ, kGameDir);
+    return maldita_child_spawn(child_argv.data(), environ, kGameDir, kEngineLog);
 }
 
 void return_to_menu(void) {
@@ -119,6 +125,10 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     signal(SIGINT,  on_signal);
     signal(SIGHUP,  on_signal);
     signal(SIGTERM, on_signal);
+
+    // Log dir for the engine's redirected stdout/stderr (spawn_engine). Ignore
+    // EEXIST; if it can't be created the spawn just falls back to inherited stdio.
+    mkdir(kLogDir, 0755);
 
     // Initialise the MiSTer framework for the loaded core exactly as stock
     // main() does. user_io_init reads the core config and applies the analog
