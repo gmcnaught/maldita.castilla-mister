@@ -197,9 +197,6 @@ char *user_io_get_core_name(int orig = 0);
 char *user_io_get_core_name2();
 char *user_io_get_core_path(const char *suffix = NULL, int recheck = 0);
 void user_io_name_override(const char* name, int samedir);
-// For HPS "main=" wrapper binaries, which bypass the normal core-load path that
-// would populate the core name. See the definition in user_io.cpp.
-void user_io_wrapper_set_core_names(const char *core, const char *orig);
 char has_menu();
 
 const char *get_image_name(int i);

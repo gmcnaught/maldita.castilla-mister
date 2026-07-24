@@ -16,7 +16,6 @@
 #include "maldita_child.h"
 #include "maldita_joy_shm.h"
 #include "maldita_osd.h"
-#include "maldita_core_context.h"
 
 // Upstream Main_MiSTer symbols (resolved at armhf link):
 #include "fpga_io.h"
@@ -26,8 +25,6 @@
 #include "osd.h"
 #include "frame_timer.h"
 #include "file_io.h"
-#include "audio.h"                      // load_volume()
-#include "support/arcade/mra_loader.h"  // mgl_get()
 
 extern char **environ;
 
@@ -133,38 +130,13 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     // EEXIST; if it can't be created the spawn just falls back to inherited stdio.
     mkdir(kLogDir, 0755);
 
-    // Initialise the MiSTer framework for the loaded core. A "main=" wrapper
-    // replaces MiSTer's main(), so every step stock main() would have run has to
-    // be run here explicitly.
-    //
-    // The firmware does NOT pass an RBF path in argv when the core is launched
-    // via MiSTer.ini's main= directive (the path the user actually takes), so
-    // fall back to the core name rather than passing "" — user_io_init keys the
-    // per-core config off it.
+    // Initialise the MiSTer framework for the loaded core exactly as stock
+    // main() does. user_io_init reads the core config and applies the analog
+    // video output settings (vga_sog / vga_mode / composite_sync); without it
+    // the analog output never gets sync-on-green, so the CRT can't lock and the
+    // green channel (carrying sync) is corrupted (purple-ish image).
     FindStorage();
-    const char *rbf_path = (argc > 1 && argv[1] && argv[1][0]) ? argv[1] : NULL;
-    user_io_init(rbf_path ? rbf_path : MALDITA_CORE_NAME, (argc > 2) ? argv[2] : NULL);
-
-    // Per-core context: core identity, MiSTer.ini parse, and video_init(). None
-    // of this happens on its own in a main= wrapper. Skipping video_init() is
-    // what left the output with no valid timing ("no signal" on the TV).
-    // Mirrors sonicmania_core_context_init() / thirdsarm_core_context_init().
-    {
-        char cc_err[128] = {};
-        if (maldita_core_context_init(rbf_path, cc_err, sizeof(cc_err)) != 0)
-            fprintf(stderr, "maldita: core context init failed: %s\n", cc_err);
-    }
-
-    // HandleUI() runs `if (!mgl->done) OsdDisable();` on every iteration
-    // (menu.cpp), so without this the OSD is actively disabled ~1000x/second and
-    // never appears. Tells the menu the core is fully loaded so it renders the
-    // CONF_STR menu instead.
-    mgl_get()->done = 1;
-
-    // Persisted volume/filter state and the initial button state, which the
-    // normal core-load path would have established.
-    load_volume();
-    user_io_send_buttons(1);
+    user_io_init((argc > 1) ? argv[1] : "", (argc > 2) ? argv[2] : NULL);
 
     // Boot fabric recovery: zero the control block + pulse the core reset so the
     // blitter restarts from a clean submit==done==0 state instead of latching

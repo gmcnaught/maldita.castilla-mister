@@ -166,22 +166,6 @@ void user_io_set_core_name(const char *name)
 	printf("Core name set to \"%s\"\n", core_name);
 }
 
-// Establish the core identity for an HPS "main=" wrapper binary, which never
-// goes through the normal core-load path that would otherwise populate these.
-// Without it the framework has no core name, so per-core config lookup (and
-// everything keyed off it) cannot work. Mirrors the same patch carried by the
-// sonic-mania-mister / 3s-mister-arm wrappers; not present in stock upstream.
-void user_io_wrapper_set_core_names(const char *core, const char *orig)
-{
-	const char *core_value = (core && core[0]) ? core : "";
-	const char *orig_value = (orig && orig[0]) ? orig : core_value;
-
-	snprintf(core_name, sizeof(core_name), "%s", core_value);
-	snprintf(orig_name, sizeof(orig_name), "%s", orig_value);
-	ovr_name[0] = 0;
-	ovr_samedir = 0;
-}
-
 char *user_io_get_core_name(int orig)
 {
 	return orig ? orig_name : core_name;
