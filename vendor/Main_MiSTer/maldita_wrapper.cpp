@@ -37,6 +37,15 @@ constexpr const char *kMenuCore     = "menu.rbf";
 constexpr const char *kLogDir       = "/media/fat/games/gmloader/logs";
 constexpr const char *kLogPath      = "/media/fat/games/gmloader/logs/osd-wrapper.log";
 constexpr const char *kEngineLog    = "/media/fat/games/gmloader/logs/engine.log";
+// The wrapper's OWN stdout/stderr are MiSTer's, i.e. /dev/console — so every
+// framework message (cfg_print, video mode, core name) was unrecoverable. Same
+// blindness the engine log fixed, one level up.
+constexpr const char *kWrapperLog   = "/media/fat/games/gmloader/logs/wrapper.log";
+// Presence of this file makes the wrapper run the MiSTer framework ONLY: no
+// engine, no fabric poking. It isolates "is this a working Main_MiSTer
+// replacement?" from "does gmloader work inside it?" — with no child process,
+// video and OSD depend on nothing but the wrapper itself.
+constexpr const char *kNoEngineFlag = "/media/fat/games/gmloader/NOENGINE";
 constexpr int  kMaxCrashes = 3;
 constexpr long kCrashWindowMs = 10000;
 
@@ -130,6 +139,24 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     // EEXIST; if it can't be created the spawn just falls back to inherited stdio.
     mkdir(kLogDir, 0755);
 
+    // Capture the wrapper's OWN stdout/stderr before any framework call, so the
+    // framework's startup output (core name, cfg_print, video mode) is readable
+    // instead of vanishing into /dev/console. Non-fatal on failure.
+    {
+        int logfd = open(kWrapperLog, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+            if (logfd > STDERR_FILENO) close(logfd);
+            setvbuf(stdout, NULL, _IOLBF, 0);   // line-buffered: survive a hang
+            setvbuf(stderr, NULL, _IONBF, 0);
+        }
+    }
+    const bool no_engine = (access(kNoEngineFlag, F_OK) == 0);
+    printf("==== maldita wrapper start (pid=%d argc=%d argv1=%s) engine=%s ====\n",
+           getpid(), argc, (argc > 1 && argv[1]) ? argv[1] : "(none)",
+           no_engine ? "DISABLED (NOENGINE flag)" : "enabled");
+
     // Initialise the MiSTer framework for the loaded core exactly as stock
     // main() does. user_io_init reads the core config and applies the analog
     // video output settings (vga_sog / vga_mode / composite_sync); without it
@@ -137,6 +164,25 @@ int maldita_wrapper_run(int argc, char *argv[]) {
     // green channel (carrying sync) is corrupted (purple-ish image).
     FindStorage();
     user_io_init((argc > 1) ? argv[1] : "", (argc > 2) ? argv[2] : NULL);
+
+    printf("maldita: user_io_init done, core_name=\"%s\"\n", user_io_get_core_name());
+
+    // NOENGINE: prove the wrapper is a correct Main_MiSTer replacement on its
+    // own. No engine, and no recover_fabric() either — that pulses
+    // fpga_core_reset(), which resets the core's video timing generator and so
+    // could itself disturb sync. Nothing but the stock framework loop runs here,
+    // so whatever the display does is attributable to the wrapper alone.
+    if (no_engine) {
+        printf("maldita: NOENGINE — framework-only loop, no child, no fabric reset\n");
+        for (;;) {
+            if (!is_fpga_ready(1)) fpga_wait_to_reset();
+            user_io_poll();
+            frame_timer();
+            input_poll(0);
+            HandleUI();
+            OsdUpdate();
+        }
+    }
 
     // Boot fabric recovery: zero the control block + pulse the core reset so the
     // blitter restarts from a clean submit==done==0 state instead of latching
