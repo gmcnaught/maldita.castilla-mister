@@ -18,13 +18,13 @@ set_global_assignment -name VERILOG_MACRO "MALDITA_CORE=1"
 # ~-1.0ns across a 10-seed sweep). Drop it.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_PALETTE1=1"
 
-# *** TEMPORARY — DIAGNOSTIC BUILD, REVERT AFTER THE STALL IS PINNED ***
-# Enables the blitter wedge probe v3 (blitter_top.sv: state/pa/pb/fill_busy/fb_dma_busy latched
-# at the deepest state dwell -> C_SRCSEL.hi 0x3B00003C, max fb_dma_busy run -> C_STATUS.hi
-# 0x3B000034) and the reader-health instrument (openbor_video_reader.sv: vsync count 0x3BFB0000,
-# linebuf-underflow record 0x3BFB0004). Both publish only on the recovery side of a stall, which
-# is sufficient because the device stalls always recover (~18s, device-measured 2026-07-24).
-set_global_assignment -name VERILOG_MACRO "SOLARUS_DBG_PROBES=1"
+# NOTE (2026-07-24): do NOT re-enable SOLARUS_DBG_PROBES without reading the probe-v3
+# result recorded here. A build with it defined (698dc8a) wedged the fabric PERMANENTLY at frame 1 on device
+# — done=0 forever, 2/2 reconfigures — while the byte-identical-RTL build without it renders.
+# The probes add a per-frame reader DDR write and move emu STA +0.051 -> -0.061, and this bug
+# is evidently sensitive to exactly that. An instrumented build must therefore not add DDR
+# traffic, and must publish independently of frame completion (a permanently wedged blitter
+# never reaches S_WR_STATUS, so probe v3 published nothing at all in the state it induced).
 
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
