@@ -20,7 +20,12 @@ int maldita_crash_backoff_ms(int consecutive_crashes);
 int maldita_crash_count_update(int prev_count, long ms_since_last_crash, long window_ms);
 
 /* ---- syscall wrappers (Task 3) ---- */
-pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cwd);
+/* log_path: child stdout+stderr are appended there (NULL = inherit the parent's).
+ * The wrapper's stdio is MiSTer's, i.e. /dev/console — inheriting it makes every
+ * engine message unrecoverable, so pass a real path in production. An unopenable
+ * log_path is non-fatal: the child still spawns with the inherited stdio. */
+pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cwd,
+                          const char *log_path);
 bool  maldita_child_reap(pid_t pid, int *exit_code_out); /* WNOHANG; true if state changed */
 void  maldita_child_signal(pid_t pid, int sig);
 

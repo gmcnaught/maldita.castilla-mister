@@ -37,7 +37,8 @@ int maldita_crash_count_update(int prev_count, long ms_since_last_crash, long wi
 
 /* ---- syscall wrappers ---- */
 
-pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cwd)
+pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cwd,
+                          const char *log_path)
 {
     pid_t pid = fork();
     if (pid < 0) {
@@ -55,6 +56,20 @@ pid_t maldita_child_spawn(char *const argv[], char *const envp[], const char *cw
         if (devnull >= 0) {
             dup2(devnull, STDIN_FILENO);
             close(devnull);
+        }
+        /* Redirect stdout+stderr to the log. Otherwise they stay pointed at the
+         * parent's stdio — under MiSTer that is /dev/console, which both loses
+         * the engine's output and makes every write a slow console write.
+         * O_APPEND so a crash-respawn adds to the log instead of erasing the
+         * crash that caused it. Failure here is non-fatal: better to run the
+         * engine with inherited stdio than not at all. */
+        if (log_path && *log_path) {
+            int logfd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (logfd >= 0) {
+                dup2(logfd, STDOUT_FILENO);
+                dup2(logfd, STDERR_FILENO);
+                if (logfd > STDERR_FILENO) close(logfd);
+            }
         }
 #ifdef __linux__
         prctl(PR_SET_PDEATHSIG, SIGTERM);  /* die if parent dies */
