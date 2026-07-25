@@ -558,11 +558,14 @@ module blitter_top #(
     // dbg_stuck (deepest dwell) and published on the NEXT control-block write after recovery
     // (a stuck blitter writes nothing, so we can't publish DURING the stall — latch + defer).
     //   word A -> C_SRCSEL.hi  (host 0x3B00003C): [5:0]=state_at_peak [8:6]=pa [12:9]=pb
-    //             [13]=fill_busy_at_peak [31:16]=max_fill_run[23:8] (texel-fetch-stall severity)
-    //   word B -> C_STATUS.hi  (host 0x3B000034): [15:0]=tri_maxx_at_peak [31:16]=tri_maxy_at_peak
-    // Read: max_fill_run large & fill_busy_at_peak=1 => TEXEL-FETCH STALL (fill_busy waits on
-    // p0_ok, the SDRAM texel path ~L1212). Small max_fill_run + huge bbox => RUNAWAY WALK (bad
-    // geometry). pa/pb name the exact sub-state (A_*/B_* enums; A_PIX=0.., B_IDLE=0..).
+    //             [13]=fill_busy_at_peak [14]=fb_dma_busy_at_peak [31:16]=peak_stuck[23:8]
+    //   word B -> C_STATUS.hi  (host 0x3B000034): max_fbdma_run[31:0] (copy-stall severity)
+    // Read (v3): state_at_peak==44 (S_SNAP_DRAIN) + fb_dma_busy_at_peak=1 + max_fbdma_run huge
+    // => comp_fb_dma cannot finish its copy (its DDR writes are not being accepted => the
+    // arbiter is not in G_READER; suspect ddr_blitter_arb G_BLT_RD, whose exit has no timeout).
+    // state_at_peak==23 (S_RD_WAIT) => the blitter's own control-block read is starving instead.
+    // state_at_peak==50 (S_TRI_PIX) => back to the rasterizer; pa/pb name the sub-state.
+    // peak_stuck saturates at 0xFFFFFF (~0.17s @98.4MHz), so [31:16]==0xFFFF just means "deep".
     // Placed AFTER pa/pb/fill_busy/tri_max* decls: `default_nettype none` forbids forward refs.
     reg  [23:0] peak_stuck;
     reg  [5:0]  state_at_peak;
@@ -572,29 +575,53 @@ module blitter_top #(
     reg  [15:0] maxx_at_peak, maxy_at_peak;
     reg  [23:0] fill_run;        // current continuous fill_busy duration
     reg  [23:0] max_fill_run;    // persistent max continuous fill_busy (texel-fetch-stall severity)
+    // [wedge probe v3, 2026-07-24] The device stall was re-measured with the fabric's OWN perf
+    // counters: during an 18s host-observed stall perf_frame_cyc stays NORMAL (~34ms). That
+    // counter spans S_CHK_NEW -> the C_DONE write, so a normal value proves the dwell is OUTSIDE
+    // it — i.e. in the S_SNAP_* tail, not the rasterizer. Of those, S_SNAP_WAIT cannot park
+    // (vs_rise is free-running off tim_vblank) and S_SNAP_BUSY is bounded by SNAP_GUARD, leaving
+    // S_SNAP_DRAIN (:1543 `if (!fb_dma_busy)`) as the only unbounded wait. v3 therefore adds the
+    // signal that confirms or kills that chain: how long fb_dma_busy stays continuously high.
+    // If comp_fb_dma really is stuck mid-copy, max_fbdma_run reaches ~1.7e9 (18s @98.4MHz) and
+    // fbdma_at_peak is set with state_at_peak==S_SNAP_DRAIN(44). 32-bit: 18s fits, 24 would not.
+    reg  [31:0] fbdma_run;       // current continuous fb_dma_busy duration
+    reg  [31:0] max_fbdma_run;   // persistent max continuous fb_dma_busy (copy-stall severity)
+    reg         fbdma_at_peak;   // was comp_fb_dma mid-copy at the deepest dwell?
     always @(posedge clk) begin
         if (rst) begin
             peak_stuck<=24'd0; state_at_peak<=6'd0; pa_at_peak<=3'd0; pb_at_peak<=4'd0;
             fill_at_peak<=1'b0; maxx_at_peak<=16'd0; maxy_at_peak<=16'd0;
             fill_run<=24'd0; max_fill_run<=24'd0;
+            fbdma_run<=32'd0; max_fbdma_run<=32'd0; fbdma_at_peak<=1'b0;
         end else begin
             if (fill_busy) begin
                 if (fill_run != 24'hFFFFFF) fill_run <= fill_run + 24'd1;
                 if (fill_run >= max_fill_run) max_fill_run <= fill_run + 24'd1;
             end else fill_run <= 24'd0;
+            if (fb_dma_busy) begin
+                if (fbdma_run != 32'hFFFFFFFF) fbdma_run <= fbdma_run + 32'd1;
+                if (fbdma_run >= max_fbdma_run) max_fbdma_run <= fbdma_run + 32'd1;
+            end else fbdma_run <= 32'd0;
             if (dbg_stuck > peak_stuck) begin
                 peak_stuck    <= dbg_stuck;
                 state_at_peak <= dbg_state_q;
                 pa_at_peak    <= pa;
                 pb_at_peak    <= pb;
                 fill_at_peak  <= fill_busy;
+                fbdma_at_peak <= fb_dma_busy;
                 maxx_at_peak  <= tri_maxx;
                 maxy_at_peak  <= tri_maxy;
             end
         end
     end
-    wire [31:0] wedge_snap  = {max_fill_run[23:8], 2'b0, fill_at_peak, pb_at_peak, pa_at_peak, state_at_peak};
-    wire [31:0] wedge_snap2 = {maxy_at_peak, maxx_at_peak};
+    // word A (host 0x3B00003C): peak_stuck magnitude replaces max_fill_run — device-measured
+    // wd_fire_count==0 and fill_at_peak has never been the story, whereas the DWELL DEPTH is
+    // what distinguishes "0.17s saturated" from a brief hiccup. bit14 = fbdma_at_peak (new).
+    wire [31:0] wedge_snap  = {peak_stuck[23:8], 1'b0, fbdma_at_peak, fill_at_peak,
+                               pb_at_peak, pa_at_peak, state_at_peak};
+    // word B (host 0x3B000034): the bbox is retired (maxx/maxy read 319/239 = the legitimate
+    // full-screen composite quad, never diagnostic). Carries the copy-stall severity instead.
+    wire [31:0] wedge_snap2 = max_fbdma_run;
 `endif
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
