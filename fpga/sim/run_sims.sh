@@ -100,7 +100,18 @@ SKIP="tb_profile"
 # long note above). It is NOT silenced: the reducer's loud NON-GATING-failure banner
 # surfaces its failure in nightly. The banner mechanism future-proofs any new NON-GATING
 # TB against drifting from "known-slow" into "known-broken".
-NONGATING="tb_comp_replay"
+#
+# tb_blitter_trilist_uvfull is NON-GATING.
+# KNOWN RED since 2026-07-26 — this golden EXPOSES a real blitter_top texel-path
+# divergence (bad=173/76800; 117 consecutive rows wrong at screen x=51 / u≈10-11,
+# wrong QWORD fetched — R off by ~1 qword of u, B scrambled, G correct; + 56
+# scattered diagonal-edge pixels). First golden combining non-zero src_off with a
+# multi-qword u/v sweep. Reproduces the Bug-A class with the trivial P_SRC stub =>
+# the defect is in blitter_top's rasterizer texel path, NOT sdram_fb_cache. GATE
+# THIS again when the divergence is fixed. See
+# docs/superpowers/plans/2026-07-26-rendering-regression-fixes.md Task 2 +
+# .superpowers/sdd/task-2-report.md.
+NONGATING="tb_comp_replay tb_blitter_trilist_uvfull"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
 # NIGHTLY_ONLY: TBs excluded from the PR tier. tb_comp_replay is a non-gating visual-
