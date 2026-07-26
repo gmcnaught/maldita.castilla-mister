@@ -111,7 +111,25 @@ SKIP="tb_profile"
 # THIS again when the divergence is fixed. See
 # docs/superpowers/plans/2026-07-26-rendering-regression-fixes.md Task 2 +
 # .superpowers/sdd/task-2-report.md.
-NONGATING="tb_comp_replay tb_blitter_trilist_uvfull"
+#
+# tb_blitter_trilist_sdram is NON-GATING.
+# KNOWN RED since 2026-07-26 — the FIRST bench to run TRILIST texel fetch through
+# the REAL sdram_fb_cache + mt48 SDRAM chip model (blt.p0_* wired straight to ch5,
+# unlike every other TRILIST bench, which stubs P_SRC). It stages the same
+# tri_uvfull 32 KiB texture via a real BLT_OP_STAGE (ch1, ~126 evictions), then
+# runs the same TRILIST scene: bad=175/76800 — a STRICT SUPERSET of the sibling
+# tb_blitter_trilist_uvfull's known bad=173/76800 (all 173 coordinates reproduce
+# BYTE-IDENTICAL got/exp values through the real cache — confirming that defect is
+# in blitter_top's rasterizer texel-address path, not sdram_fb_cache/SDRAM), plus
+# exactly 2 new isolated single-pixel mismatches — (40,48) and (166,164), neither
+# part of the main contiguous wrong-qword band — plausibly coverage/edge-rounding
+# pixels tipped over the +-1 LSB tolerance by the real cache's fetch timing vs the
+# idealized stub. A future DELTA between these two benches' bad-pixel sets is the
+# signal to watch: shrinking to 173 (matching uvfull exactly) as the rasterizer fix
+# lands would mean sdram_fb_cache is clean; any NEW extras beyond today's 175 would
+# implicate the cache/SDRAM layer specifically. GATE THIS once uvfull's underlying
+# divergence is fixed and this delta is understood. See .superpowers/sdd/task-3-report.md.
+NONGATING="tb_comp_replay tb_blitter_trilist_uvfull tb_blitter_trilist_sdram"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
 # NIGHTLY_ONLY: TBs excluded from the PR tier. tb_comp_replay is a non-gating visual-
@@ -159,6 +177,12 @@ timeout_s() { case "$1" in
   tb_vram_contention)                      echo 180 ;;
   # Non-gating full-frame visual-dump TB: ~350s to actually PASS, capped low.
   tb_comp_replay)                          echo 30 ;;
+  # Non-gating real-cache+mt48 TRILIST co-sim (see NONGATING note above). Wall time
+  # is HIGHLY contention-sensitive: ~45-60s isolated, but observed 8+ min under
+  # concurrent CPU load from other sims/builds on the same machine (this bench
+  # co-simulates the bit-level SDRAM chip model, unlike every stub-P_SRC sibling).
+  # Generous budget so ordinary CI contention doesn't spuriously non-gate-fail it.
+  tb_blitter_trilist_sdram)                echo 480 ;;
   # [gmloader-GPU slim] tb_bgplane_equivalence/write_pipe_xl/3plane_xl/maptrans/
   # inval_teeth and tb_pal8_bgplane were RETIRED with OP_BGPLANE_WRITE/OP_CLUT_
   # UPLOAD (see the SKIP-block note above); their budget entries are gone too.
