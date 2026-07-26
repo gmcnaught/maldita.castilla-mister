@@ -77,6 +77,12 @@ module tb_arb_blt_timeout;
       errors=errors+1;
       $display("FAIL: blitter beat never arrived (arb.state=%0d, parked %0d cyc) — G_BLT_RD unbounded", arb.state, waitc);
     end
+    // the retry claim, made direct: exactly 2 read commands issued to the DDR model
+    // (the swallowed original + the re-issued retry) — not zero, not a third phantom.
+    if (cmds_seen != 2) begin
+      errors=errors+1;
+      $display("FAIL: expected 2 read commands (swallowed + retry), saw %0d", cmds_seen);
+    end
     b_rd<=0;
     repeat(8) @(posedge clk);
     if (arb.state != 3'd0) begin errors=errors+1; $display("FAIL: arbiter not back in G_READER (state=%0d)", arb.state); end
@@ -98,12 +104,27 @@ module tb_arb_blt_timeout;
     if (blt_beats==0) begin errors=errors+1; $display("FAIL: burstcnt=0 read deadlocked"); end
     repeat(8) @(posedge clk);
     if (arb.state != 3'd0) begin errors=errors+1; $display("FAIL: state=%0d after burstcnt=0 read", arb.state); end
+    // Load-bearing bound: guarded, the 1-beat shortcut takes G_BLT->G_READER in a
+    // single cycle after grant. Unguarded, blt_burstcnt-1 underflows blt_out to 255
+    // and (needing blt_out==1 to exit G_BLT_WR) drains ~254 cycles before completing
+    // (this DDR model never asserts ddram_busy on writes, so nothing else stalls it) —
+    // well inside the 5000-cycle timeout, so an unbounded wait alone can't catch the
+    // underflow. Bound the grant->drain span tightly instead.
     b_burst<=8'd0; b_addr<=29'h180; b_din<=64'hCAFE; b_we<=1;   // burstcnt=0 write
-    waitc=0; @(posedge clk);
-    while(arb.state != 3'd0 || b_we) begin
+    waitc=0;
+    while (arb.state != 3'd1) begin                  // wait for the write to be granted (G_BLT)
       @(posedge clk); waitc=waitc+1;
-      if (arb.state==3'd0 && waitc>2) b_we<=0;    // accepted via the 1-beat shortcut -> release
+      if (waitc>200) begin $display("RESULT: FAIL (burstcnt=0 write never granted)"); $finish; end
+    end
+    waitc=0;
+    while (arb.state != 3'd0) begin                  // measure cycles to drain back to G_READER
+      @(posedge clk); waitc=waitc+1;
       if (waitc>5000) begin $display("RESULT: FAIL (burstcnt=0 write deadlocked, state=%0d)", arb.state); $finish; end
+    end
+    b_we<=0;
+    if (waitc > 10) begin
+      errors=errors+1;
+      $display("FAIL: burstcnt=0 write drained in %0d cycles (>10) — unguarded 0-1 underflow (blt_out=255) not caught", waitc);
     end
 
     if (errors==0) $display("RESULT: PASS (bounded borrow: lost beat retried, reader restored, burstcnt=0 guarded)");
