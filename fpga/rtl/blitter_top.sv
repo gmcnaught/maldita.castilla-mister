@@ -439,6 +439,12 @@ module blitter_top #(
     // per-pixel latched intermediates
     reg  [7:0]   cr_q, cg_q, cb_q, ca_q;   // interpolated colour for the blend
     reg  [1:0]   tex_lane_q;               // 16-bit lane within the fetched texel qword
+    // pa-private pipeline register carrying THIS pixel's texel qword tag from A_ADDR2 to
+    // A_ISSUE. tri_p0_addr must NOT be (ab)used for this hand-carry: pb's B_FILL demand-miss
+    // write (`tri_p0_addr <= {b_qtag,3'd0}`) is a second writer of that register in the same
+    // always block, and can clobber pa's in-flight address on a same-cycle collision or during
+    // any pf_full stall in A_ISSUE — see docs/superpowers/.../uvfull-rootcause-report.md.
+    reg  [23:0]  pa_qtag;                  // pa-private: this pixel's SDRAM qword tag
     reg  [15:0]  texel_q, dst_q;           // fetched texel + dst pixel
     reg  [14:0]  dst_qw_q;                 // comp_fbram qword index for this pixel
     reg  [1:0]   dst_lane_q;               // x[1:0]
@@ -1266,15 +1272,18 @@ module blitter_top #(
                     // adds + register writes live here; the prefetch fill-kick moved to
                     // A_ISSUE so tq_hit's tag lookup is not chained behind texbyte's adder.
                     texbyte = c_src_off + tex_row + (itu_q<<<1);
-                    tri_p0_addr <= texbyte[26:0] & ~27'h7;
+                    pa_qtag     <= texbyte[26:3];
                     tex_lane_q  <= texbyte[2:1];
                 end
                 pa<=A_ISSUE;
             end
             // Push this pixel's payload into the depth-D FIFO. Stall only when the FIFO
             // is full (pa may run up to TEXFIFO_D pixels ahead of pb). Payload packing
-            // MUST match pb's B_IDLE unpack exactly. tri_p0_addr is now updated
-            // (texbyte&~7), so its [26:3] qtag is correct.
+            // MUST match pb's B_IDLE unpack exactly. Uses pa_qtag (pa-private, latched at
+            // A_ADDR2) rather than tri_p0_addr: tri_p0_addr is a shared bus-address register
+            // that pb's B_FILL demand-miss path also writes, and a same-cycle collision or a
+            // pf_full stall here would clobber it before this push — see
+            // docs/superpowers/.../uvfull-rootcause-report.md.
             A_ISSUE: if (!pf_full) begin
                 // best-effort prefetch: kick a fill for this qword when the arbiter is idle
                 // and it isn't the qword we just prefetched (last_pf_qtag skips the common
@@ -1283,17 +1292,20 @@ module blitter_top #(
                 // B_LOOK/B_FILL demand path is the correctness backbone (bit-exact either way).
                 // [app-surface v1] no SDRAM prefetch for a surface source (the texel is a
                 // 1-cyc surf_rd BRAM hit, no tq cache); guard the fill-kick on !surface.
-                if (!tri_src_surface && (tri_p0_addr[26:3] != last_pf_qtag) && !fill_busy) begin
+                // tri_p0_addr (the actual P_SRC bus address) is only written here, at the
+                // moment a read is actually issued — never as a pipeline hand-carry.
+                if (!tri_src_surface && (pa_qtag != last_pf_qtag) && !fill_busy) begin
                     tri_p0_rd    <= 1'b1;
+                    tri_p0_addr  <= {pa_qtag, 3'd0};
                     fill_busy    <= 1'b1;
-                    fill_slot    <= tri_p0_addr[3+:TEXQ_AW];
-                    fill_tag     <= tri_p0_addr[3+TEXQ_AW +: TEXQ_TW];
-                    last_pf_qtag <= tri_p0_addr[26:3];
+                    fill_slot    <= pa_qtag[TEXQ_AW-1:0];
+                    fill_tag     <= pa_qtag[TEXQ_AW +: TEXQ_TW];
+                    last_pf_qtag <= pa_qtag;
                 end
                 // qtag field carries the SDRAM qword tag, or (surface) surf_qw zero-extended.
                 pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
                     {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q,
-                     (tri_src_surface ? {9'd0, surf_qw_q} : tri_p0_addr[26:3]), tex_lane_q};
+                     (tri_src_surface ? {9'd0, surf_qw_q} : pa_qtag), tex_lane_q};
                 pf_wr <= pf_wr + 1'b1;
                 pa<=A_PIX;
             end

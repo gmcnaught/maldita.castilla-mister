@@ -101,35 +101,30 @@ SKIP="tb_profile"
 # surfaces its failure in nightly. The banner mechanism future-proofs any new NON-GATING
 # TB against drifting from "known-slow" into "known-broken".
 #
-# tb_blitter_trilist_uvfull is NON-GATING.
-# KNOWN RED since 2026-07-26 — this golden EXPOSES a real blitter_top texel-path
-# divergence (bad=173/76800; 117 consecutive rows wrong at screen x=51 / u≈10-11,
-# wrong QWORD fetched — R off by ~1 qword of u, B scrambled, G correct; + 56
-# scattered diagonal-edge pixels). First golden combining non-zero src_off with a
-# multi-qword u/v sweep. Reproduces the Bug-A class with the trivial P_SRC stub =>
-# the defect is in blitter_top's rasterizer texel path, NOT sdram_fb_cache. GATE
-# THIS again when the divergence is fixed. See
-# docs/superpowers/plans/2026-07-26-rendering-regression-fixes.md Task 2 +
-# .superpowers/sdd/task-2-report.md.
+# tb_blitter_trilist_uvfull: FIXED 2026-07-26 (was NON-GATING/known-RED, bad=173/76800;
+# now GATES — see git history for the pre-fix note). Root cause: `tri_p0_addr` was
+# double-duty as both the P_SRC bus address AND pa's A_ADDR2->A_ISSUE qword-tag
+# hand-carry; pb's B_FILL demand-miss write clobbered it mid-flight, pushing a stale
+# qtag into the texel FIFO. Fixed by giving pa a private `pa_qtag` register (blitter_top.sv)
+# so tri_p0_addr is written only when a P_SRC read is actually issued. bad=0/76800,
+# perf-neutral (tri=154084 texwait=39589 dpath=114495, byte-identical pre/post fix). See
+# docs/superpowers/plans/2026-07-26-rendering-regression-fixes.md Task 2,
+# .superpowers/sdd/uvfull-rootcause-report.md, .superpowers/sdd/task-8-report.md.
 #
-# tb_blitter_trilist_sdram is NON-GATING.
-# KNOWN RED since 2026-07-26 — the FIRST bench to run TRILIST texel fetch through
-# the REAL sdram_fb_cache + mt48 SDRAM chip model (blt.p0_* wired straight to ch5,
-# unlike every other TRILIST bench, which stubs P_SRC). It stages the same
-# tri_uvfull 32 KiB texture via a real BLT_OP_STAGE (ch1, ~126 evictions), then
-# runs the same TRILIST scene: bad=175/76800 — a STRICT SUPERSET of the sibling
-# tb_blitter_trilist_uvfull's known bad=173/76800 (all 173 coordinates reproduce
-# BYTE-IDENTICAL got/exp values through the real cache — confirming that defect is
-# in blitter_top's rasterizer texel-address path, not sdram_fb_cache/SDRAM), plus
-# exactly 2 new isolated single-pixel mismatches — (40,48) and (166,164), neither
-# part of the main contiguous wrong-qword band — plausibly coverage/edge-rounding
-# pixels tipped over the +-1 LSB tolerance by the real cache's fetch timing vs the
-# idealized stub. A future DELTA between these two benches' bad-pixel sets is the
-# signal to watch: shrinking to 173 (matching uvfull exactly) as the rasterizer fix
-# lands would mean sdram_fb_cache is clean; any NEW extras beyond today's 175 would
-# implicate the cache/SDRAM layer specifically. GATE THIS once uvfull's underlying
-# divergence is fixed and this delta is understood. See .superpowers/sdd/task-3-report.md.
-NONGATING="tb_comp_replay tb_blitter_trilist_uvfull tb_blitter_trilist_sdram"
+# tb_blitter_trilist_sdram is NON-GATING (dev tool, not re-gated by the uvfull fix —
+# see below).
+# Runs TRILIST texel fetch through the REAL sdram_fb_cache + mt48 SDRAM chip model
+# (blt.p0_* wired straight to ch5, unlike every other TRILIST bench, which stubs
+# P_SRC); stages the same tri_uvfull 32 KiB texture via a real BLT_OP_STAGE (ch1,
+# ~126 evictions), then runs the same TRILIST scene. Pre-fix: bad=175/76800, a STRICT
+# SUPERSET of tb_blitter_trilist_uvfull's then-known bad=173 (byte-identical got/exp on
+# all 173 shared coordinates) plus 2 isolated single-pixel mismatches — (40,48) and
+# (166,164). Post-fix (2026-07-26, pa_qtag): bad=0/76800 — the 2 stragglers were the
+# SAME bug manifesting through the real cache's fetch timing, not a separate cache-layer
+# defect. Left NON-GATING as a dev tool (real SDRAM co-sim, ~45s wall) rather than
+# promoted to gating; re-promote if it proves stably green over time. See
+# .superpowers/sdd/task-3-report.md, .superpowers/sdd/task-8-report.md.
+NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
 # NIGHTLY_ONLY: TBs excluded from the PR tier. tb_comp_replay is a non-gating visual-
