@@ -38,10 +38,22 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
     libGLES_sw.so       = mesa libGLESv2.so.2                    <- runtime (opt-in)
   /media/fat/_Other/MalditaCastilla_*.rbf                        <- RBF
 
-One-time device setup so stock MiSTer hands off to the wrapper on core load,
-add to MiSTer.ini:
-  [Maldita Castilla]
-  main=/media/fat/games/gmloader/MiSTer_Maldita
+AUTO-LAUNCH (changed 2026-07-25): the engine is started by MiSTer's Master_Daemon
+(Frontier), which watches /tmp/CORENAME and runs
+  /media/fat/games/Maldita Castilla/_handler.sh
+when the core loads. This is the pattern the sibling Solarus core uses, and it
+leaves STOCK MiSTer main running so it keeps its FPGA-readiness contract
+(scheduler_co_poll's `while (!is_fpga_ready(1)) fpga_wait_to_reset();`).
+
+The previous mechanism — MiSTer.ini `main=/media/fat/games/gmloader/MiSTer_Maldita`
+— REPLACED MiSTer's main() and did not fully honour that contract (it spawns the
+engine at maldita_wrapper.cpp:143 before its first readiness check at :157, and
+hand-rolls main()'s `#else` branch, which is dead code since USE_SCHEDULER is
+unconditional). If a [Maldita Castilla] main= line is present, this deploy
+COMMENTS IT OUT. Reinstating the wrapper is deferred to a future plan.
+
+The wrapper binary is still uploaded (harmless, unused by this path) so the
+future plan can re-enable it without a redeploy.
 
 Usage:
   ./deploy.py                      RBF + engine + content (the moving pieces)
@@ -64,6 +76,13 @@ USER = "root"
 REPO = Path(__file__).resolve().parent            # maldita.castilla-mister
 SIBLINGS = REPO.parent                            # ~/MisterFPGA-Projects
 GAMEDIR = "/media/fat/games/gmloader"
+
+# ── Auto-launch (Master_Daemon handler path, replaces the main= wrapper) ───────
+# The daemon watches /tmp/CORENAME and runs games/<CORENAME>/_handler.sh, so this
+# MUST match the RBF's CONF_STR setname exactly (fpga/Maldita.sv:270) — including
+# the space.
+CORENAME    = "Maldita Castilla"
+HANDLER_DIR = f"/media/fat/games/{CORENAME}"
 
 # ── Source paths (sibling repos). Override any with the matching CLI flag. ──────
 ENGINE_DEFAULT  = SIBLINGS / "gmloader-next/build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
@@ -172,8 +191,36 @@ def main():
     scp_verified(host, engine, f"{GAMEDIR}/gmloader")
     scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
 
-    print("\n-- Uploading HPS wrapper binary (sha1-verified) --")
+    print("\n-- Uploading HPS wrapper binary (sha1-verified; UNUSED by the handler path) --")
     scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
+
+    # --- auto-launch: Master_Daemon handler (replaces the MiSTer.ini main= wrapper) ---
+    # The daemon routes /tmp/CORENAME -> /media/fat/games/<CORENAME>/_handler.sh, so the
+    # directory name MUST equal the CONF_STR setname exactly ("Maldita Castilla").
+    handler_src = REPO / "games" / CORENAME / "_handler.sh"
+    if handler_src.exists():
+        print(f"\n-- Installing auto-launch handler for '{CORENAME}' --")
+        ssh(host, f"mkdir -p '{HANDLER_DIR}' /media/fat/logs/MalditaCastilla", check=True)
+        scp_verified(host, handler_src, f"{HANDLER_DIR}/_handler.sh")
+        ssh(host, f"chmod 755 '{HANDLER_DIR}/_handler.sh'", check=True)
+        # Disable a stale main= wrapper handoff: stock MiSTer main must stay resident so
+        # it keeps its FPGA-readiness contract. Device-measured 2026-07-25: wrapper 3/5
+        # frame-1 wedges vs stock main 0/5, same RBF and engine.
+        r = ssh(host, "grep -q '^main=/media/fat/games/gmloader/MiSTer_Maldita' /media/fat/MiSTer.ini "
+                      "&& echo PRESENT || echo ABSENT")
+        if (r.stdout or "").strip() == "PRESENT":
+            print("   ! MiSTer.ini has an active main= wrapper handoff — commenting it out")
+            ssh(host, "cp /media/fat/MiSTer.ini /media/fat/MiSTer.ini.bak.$(date +%s); "
+                      "sed -i 's|^main=/media/fat/games/gmloader/MiSTer_Maldita|"
+                      ";main=/media/fat/games/gmloader/MiSTer_Maldita  ; disabled by deploy.py|' "
+                      "/media/fat/MiSTer.ini", check=True)
+        # The daemon enumerates handlers at startup, so a NEW handler needs a restart.
+        print("   restarting Master_Daemon so it picks up the handler")
+        ssh(host, "pkill -f Master_Daemon.sh; sleep 1; "
+                  "nohup /media/fat/MiSTer_Frontier/Master_Daemon.sh >/tmp/master_daemon.log 2>&1 & "
+                  "sleep 1; true")
+    else:
+        print(f"\n   WARN: {handler_src} missing — auto-launch handler NOT installed.")
 
     if not args.no_content:
         print("\n-- Uploading content (APK + game.droid + options.ini, sha1-verified) --")
