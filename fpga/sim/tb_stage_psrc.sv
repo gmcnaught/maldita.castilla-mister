@@ -30,7 +30,16 @@ module tb_stage_psrc;
   reg reset = 1;
 
   // staging parameters: copy NQW qwords from DDR3 src_off=0 to SDRAM dest.
-  localparam integer NQW = 16;                 // 16 qwords = 128 bytes staged
+  //
+  // [ch1 eviction coverage, 2026-07-26] NQW was 16 (= 128 bytes), which fits ENTIRELY
+  // inside ch1 and therefore never evicts. ch1 is the BLT_OP_STAGE write-back channel and
+  // it reuses the READ-ONLY cache geometry (sdram_fb_cache.sv:54-55 RO_BLOCKS=2,
+  // RO_BLKSIZE=256 -> jtframe_cache WAYS=2, SETS=1) => 512 BYTES TOTAL. Every other bench
+  // and the hardware probe also stage <= 128 bytes, so an eviction/write-back on this
+  // channel has NEVER been exercised anywhere — while a real game texture is 32 KiB+.
+  // 4096 qwords = 32 KiB = 128 lines of 256 B => ~126 evictions, which is the regime the
+  // device actually runs in (a 128x128 RGB565 texture).
+  localparam integer NQW = 4096;               // 4096 qwords = 32 KiB staged (~126 ch1 evictions)
   localparam [26:0]  SDRAM_DEST = 27'h0100000; // atlas-like SDRAM dest offset (1 MiB)
   function [15:0] pat(input integer k); pat = 16'hA000 | k[15:0]; endfunction
 

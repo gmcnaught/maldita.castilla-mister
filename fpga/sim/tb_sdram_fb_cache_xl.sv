@@ -75,6 +75,20 @@ wire        p0_ok;
 reg         vs;
 wire        coh_busy;
 
+// [ch1 XL coverage, 2026-07-26] ch1 is the BLT_OP_STAGE write-back channel. It was tied
+// off in this bench, and this is the ONLY bench that runs SDRAM_AW=25 — i.e. the only one
+// in the configuration that is actually synthesised (Maldita.sv:448). So FULL1=1 (XL
+// addressing on the STAGE WRITE channel) has never been simulated anywhere. ch1 also
+// reuses the READ-ONLY cache geometry (RO_BLOCKS=2 x RO_BLKSIZE=256 => 512 BYTES TOTAL,
+// WAYS=2/SETS=1), and every other bench + the hardware probe stage <= 128 bytes, so a
+// write-back EVICTION on it has never been exercised either. Real textures are 32 KiB+.
+reg  [26:0] stage_addr;
+reg         stage_wr;
+reg  [63:0] stage_din;
+reg         stage_barrier;
+wire        stage_ok;
+wire        stage_busy;
+
 // SDRAM pins
 wire [15:0] sdram_dq;
 wire [12:0] sdram_a;
@@ -104,8 +118,11 @@ sdram_fb_cache #(.SDRAM_AW(25)) u_dut (
     .p0_rd     ( p0_rd     ),
     .p0_dout   ( p0_dout   ),
     .p0_ok     ( p0_ok     ),
-    .stage_addr(27'd0), .stage_wr(1'b0), .stage_din(64'd0), .stage_wdsn(8'hff), .stage_ok(),
-    .stage_barrier(1'b0), .stage_busy(),   // STAGE-barrier unit-tested elsewhere
+    // [ch1 XL coverage] ch1 is now DRIVEN (was tied off). stage_wdsn=8'h00 = full-qword
+    // burst write, matching Maldita.sv:477.
+    .stage_addr(stage_addr), .stage_wr(stage_wr), .stage_din(stage_din),
+    .stage_wdsn(8'h00), .stage_ok(stage_ok),
+    .stage_barrier(stage_barrier), .stage_busy(stage_busy),
     .dst_barrier(1'b0), .dst_busy(),       // no carry-forward in this bench
     .vs        ( vs        ),
     .coh_busy  ( coh_busy  ),
@@ -261,6 +278,44 @@ task pulse_vs_and_wait_coh;
     end
 endtask
 
+// [ch1 XL coverage] Drive one qword into the STAGE (ch1) write-back channel.
+// Protocol per sdram_fb_cache.sv:102-108 — hold stage_wr until stage_ok (cache-ok),
+// single-qword writes; mirrors blitter_top's S_STAGE_WR/S_STAGE_WR_WAIT hold.
+task stage_write(input [26:0] a, input [63:0] d);
+    integer cyc;
+    begin
+        @(posedge clk); #1;
+        stage_addr = a; stage_din = d; stage_wr = 1'b1;
+        cyc = 0;
+        while (!stage_ok) begin
+            @(posedge clk); #1; cyc = cyc + 1;
+            if (cyc > 20000) begin
+                $display("RESULT: FAIL - stage_write never accepted @%07h (stage_ok stuck low)", a);
+                $finish;
+            end
+        end
+        @(posedge clk); #1; stage_wr = 1'b0;
+    end
+endtask
+
+// [ch1 XL coverage] Pulse the STAGE->P_SRC barrier: commits ch1's dirty lines to SDRAM
+// and invalidates ch5, so a following p0_read must observe the staged bytes.
+task pulse_stage_barrier;
+    integer bw;
+    begin
+        @(posedge clk); #1; stage_barrier = 1'b1;
+        @(posedge clk); #1; stage_barrier = 1'b0;
+        bw = 0;
+        while (bw < 4 || stage_busy) begin
+            @(posedge clk); #1; bw = bw + 1;
+            if (bw > 30000) begin
+                $display("RESULT: FAIL - stage_busy never cleared (ch1 flush hung)");
+                $finish;
+            end
+        end
+    end
+endtask
+
 // ---------------------------------------------------------------------------
 // Test sequence
 // ---------------------------------------------------------------------------
@@ -278,6 +333,7 @@ initial begin
     dst_addr = 27'd0; dst_rd = 1'b0; dst_wr = 1'b0; dst_din = 64'd0; dst_wdsn = 8'h00;
     scan_addr= 27'd0; scan_rd= 1'b0;
     p0_addr  = 27'd0; p0_rd  = 1'b0;
+    stage_addr = 27'd0; stage_wr = 1'b0; stage_din = 64'd0; stage_barrier = 1'b0;
     vs       = 1'b0;
     pass     = 1'b1;
 
@@ -403,6 +459,48 @@ initial begin
             end
         end
         if (pass) $display("arena sweep: all 8 chip/bank combos x2 within-die locations round-trip CLEAN on ch0+ch5+ch4 (incl chip1 bank1 @80MiB, the 84MiB arena base)");
+    end
+
+    // =======================================================================
+    // [ch1 XL coverage, 2026-07-26] STAGE (ch1) write-back in the SHIPPED config.
+    //
+    // Closes a real hole: ch1 is the BLT_OP_STAGE write channel, but it was tied off
+    // in this bench — and this is the only bench running SDRAM_AW=25, so FULL1=1 (XL
+    // addressing on the STAGE WRITE path) had never been simulated. ch1 is also only
+    // 512 bytes total (RO_BLOCKS=2 x RO_BLKSIZE=256, WAYS=2/SETS=1), while every other
+    // bench and the hardware probe stage <= 128 bytes — so a write-back EVICTION had
+    // never been exercised either. A real game texture is 32 KiB.
+    //
+    // Stage STAGE_QW qwords (>> 512 B, forcing many evictions) at a CHIP-1 address so
+    // the upper-die/XL path is exercised, barrier, then read every qword back through
+    // ch5/P_SRC — the exact producer->consumer route the fabric uses for texels.
+    begin : ch1_stage_evict
+        integer sq;
+        reg [26:0] sa;
+        reg [63:0] sd, sq_got;
+        localparam integer STAGE_QW   = 1024;          // 8 KiB = 32 lines => ~30 evictions
+        localparam [26:0]  STAGE_BASE = 27'h4200000;   // bit26 set => CHIP 1 (upper die)
+        for (sq = 0; sq < STAGE_QW; sq = sq + 1) begin
+            sa = STAGE_BASE + (sq * 8);
+            sd = {32'hC1C1_0000 + sq, 32'h5A5A_0000 + sq};   // address-derived, unique
+            stage_write(sa, sd);
+        end
+        pulse_stage_barrier();      // commit ch1 -> SDRAM, invalidate ch5
+        for (sq = 0; sq < STAGE_QW; sq = sq + 1) begin
+            sa = STAGE_BASE + (sq * 8);
+            sd = {32'hC1C1_0000 + sq, 32'h5A5A_0000 + sq};
+            p0_read(sa, sq_got);
+            if (sq_got !== sd) begin
+                pass = 1'b0;
+                $display("RESULT: FAIL - ch1 stage @%07h (qw %0d): got %016h exp %016h%s",
+                         sa, sq, sq_got, sd,
+                         (sq >= 64) ? "  <-- beyond ch1's 512B capacity: EVICTION/write-back dropped"
+                                    : "  <-- within ch1 capacity: plain write-back broken");
+                if (sq > 4) disable ch1_stage_evict;   // don't spam 1024 lines
+            end
+        end
+        if (pass) $display("ch1 STAGE write-back: %0d qwords (%0d KiB, ~%0d evictions) staged to chip1 and read back CLEAN via ch5/P_SRC",
+                           STAGE_QW, (STAGE_QW*8)/1024, (STAGE_QW*8)/256 - 2);
     end
 
     if (pass) $display("RESULT: PASS");
