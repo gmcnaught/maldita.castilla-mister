@@ -7,14 +7,15 @@
 // If this bench FAILS with row-constant/column-pinned texels, it has REPRODUCED
 // Bug A in sim — capture the pattern and report; do not "fix" the bench.
 //
-// KNOWN-RED CONTEXT (2026-07-26): the pure-BRAM sibling tb_blitter_trilist_uvfull
-// (same tri_uvfull vectors, P_SRC served by a behavioral cache-ok stub) is ALREADY
-// RED: bad=173/76800, a column-constant wrong-qword band at screen x~51 (a real
-// blitter_top texel-path divergence, not a cache/SDRAM defect). This bench's floor
-// is therefore that same 173-pixel signature; anything BEYOND it (a superset, or a
-// differently-shaped mismatch set) would implicate sdram_fb_cache/SDRAM specifically
-// rather than the already-known blitter_top divergence. See both benches' RESULT
-// lines + MISMATCH dumps when triaging Bug A.
+// HISTORY (2026-07-26): on first landing, BOTH this bench (bad=175/76800) and the
+// pure-BRAM sibling tb_blitter_trilist_uvfull (bad=173) were RED with a column-
+// constant wrong-qword band at screen x~51 — root-caused to the pa/pb tri_p0_addr
+// clobber in blitter_top (pb B_FILL overwrote pa's A_ADDR2->A_ISSUE pipeline reg)
+// and fixed by the pa-private pa_qtag register. Post-fix both benches are bad=0
+// (the 2 extra real-cache pixels were the same bug via fetch timing). The uvfull
+// sibling GATES again; this bench stays NONGATING as a slower (~45s+) dev tool.
+// DELTA SEMANTICS today: any future mismatch HERE while uvfull stays green
+// implicates sdram_fb_cache/SDRAM/timing specifically, not the rasterizer.
 `timescale 1ns/1ps
 `default_nettype none
 `include "blitter_defs.vh"

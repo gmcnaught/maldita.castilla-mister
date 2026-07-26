@@ -4,7 +4,7 @@
 // thousands of distinct qword fills — the 8x8 goldens covered one u bit and no lanes.
 //
 // The control block (@0x200000) requests a CLEAR-before-list (blue bg) followed
-// by one textured triangle; the vertex array + texture live at SRC (@0x210000).
+// by a two-triangle textured quad; the vertex array + texture live at SRC (@0x210000).
 // The tri walk composites into comp_fbram via the tri_busy bus muxes.
 `timescale 1ns/1ps
 `default_nettype none
