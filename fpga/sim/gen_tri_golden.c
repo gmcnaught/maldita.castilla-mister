@@ -140,6 +140,7 @@
 #define FB_H  240
 #define BLUE  0x001Fu           /* RGB565 blue -- the scene clear color                */
 #define EOFF  0x80u             /* vertex-array byte offset within the SRC heap        */
+#define TEX_OFF 0x100u          /* [tri_uvfull] non-zero texture offset (verts end at 0xE0) */
 
 /* ---- 32-byte on-wire command packing (mirrors host/blt_wire.h::blt_pack_cmd,
  * reproduced locally since the documented build only -I's refmodel/) --------- */
@@ -158,7 +159,7 @@ static void pack_cmd(const blt_cmd_t *c, uint8_t out[BLT_CMD_BYTES]) {
 }
 
 /* ---- scene state -------------------------------------------------------- */
-static uint8_t   heap[4096];
+static uint8_t   heap[40960];   /* holds the 32 KiB tri_uvfull texture + verts */
 static uint32_t  heap_len = 0;
 static blt_vtx_t verts[6];
 static int       ntris = 0;
@@ -201,6 +202,21 @@ static void tex_checker8(uint16_t a, uint16_t b) {
         heap[o]=(uint8_t)c; heap[o+1]=(uint8_t)(c>>8);
     }
     if (heap_len < 128) heap_len = 128;
+}
+
+/* 128x128 coordinate-encoded RGB565 texture at heap byte offset `off`:
+ * R5 = u>>2, G6 = v>>1, B5 = (u^v)&0x1F. R maps the qword-and-above address
+ * bits, G maps the row bits, and B varies with u's low bits so a wrong LANE
+ * (texbyte[2:1]) is visible too — the 8x8 goldens covered exactly one u
+ * address bit (texbyte[3]) and zero lane bits. */
+static void tex_coord128(uint32_t off) {
+    for (int v = 0; v < 128; v++)
+        for (int u = 0; u < 128; u++) {
+            uint16_t c = (uint16_t)((((u>>2)&0x1F)<<11) | (((v>>1)&0x3F)<<5) | ((u^v)&0x1F));
+            size_t o = off + ((size_t)v*128 + u)*2;
+            heap[o] = (uint8_t)c; heap[o+1] = (uint8_t)(c>>8);
+        }
+    if (heap_len < off + 128u*128u*2u) heap_len = off + 128u*128u*2u;
 }
 
 /* Place n vertices (n==3 or 6) at the fixed EOFF vertex region. */
@@ -309,6 +325,24 @@ static int build(const char *s) {
          * 320x240); pass 0 to prove the RTL does not consult src_x/src_y. */
         set_hdr(BLT_BLEND_COPY, 0,0,0, 0, 255);
         hdr.flags = (uint8_t)BLT_F_SRC_SURFACE;
+    } else if (!strcmp(s, "tri_uvfull")) {
+        /* [Bug A sim gap] 128x128 stride-256 texture at a NON-ZERO src_off,
+         * u and v sweeping the full 0..127 texel range across a 2-tri quad
+         * (128x128 px => ~1 texel/px on both axes). Exercises texbyte[7:1]
+         * (u), texbyte[15:8] (v), lane select, the tq qword cache under
+         * thousands of distinct fills, and c_src_off in address assembly. */
+        tex_coord128(TEX_OFF);
+        blt_vtx_t v[6] = {
+            VTX(40,40,        0,      0, 255,255,255,255),
+            VTX(168,40,  127*16,      0, 255,255,255,255),
+            VTX(168,168, 127*16, 127*16, 255,255,255,255),
+            VTX(40,40,        0,      0, 255,255,255,255),
+            VTX(168,168, 127*16, 127*16, 255,255,255,255),
+            VTX(40,168,       0, 127*16, 255,255,255,255),
+        };
+        put_verts(v,6);
+        set_hdr(BLT_BLEND_COPY, 128,128,256, 0, 255);
+        hdr.src_off = TEX_OFF;
     } else {
         fprintf(stderr, "unknown scenario '%s'\n", s);
         return -1;

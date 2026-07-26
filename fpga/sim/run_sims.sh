@@ -100,7 +100,31 @@ SKIP="tb_profile"
 # long note above). It is NOT silenced: the reducer's loud NON-GATING-failure banner
 # surfaces its failure in nightly. The banner mechanism future-proofs any new NON-GATING
 # TB against drifting from "known-slow" into "known-broken".
-NONGATING="tb_comp_replay"
+#
+# tb_blitter_trilist_uvfull: FIXED 2026-07-26 (was NON-GATING/known-RED, bad=173/76800;
+# now GATES — see git history for the pre-fix note). Root cause: `tri_p0_addr` was
+# double-duty as both the P_SRC bus address AND pa's A_ADDR2->A_ISSUE qword-tag
+# hand-carry; pb's B_FILL demand-miss write clobbered it mid-flight, pushing a stale
+# qtag into the texel FIFO. Fixed by giving pa a private `pa_qtag` register (blitter_top.sv)
+# so tri_p0_addr is written only when a P_SRC read is actually issued. bad=0/76800,
+# perf-neutral (tri=154084 texwait=39589 dpath=114495, byte-identical pre/post fix). See
+# docs/superpowers/plans/2026-07-26-rendering-regression-fixes.md Task 2,
+# .superpowers/sdd/uvfull-rootcause-report.md, .superpowers/sdd/task-8-report.md.
+#
+# tb_blitter_trilist_sdram is NON-GATING (dev tool, not re-gated by the uvfull fix —
+# see below).
+# Runs TRILIST texel fetch through the REAL sdram_fb_cache + mt48 SDRAM chip model
+# (blt.p0_* wired straight to ch5, unlike every other TRILIST bench, which stubs
+# P_SRC); stages the same tri_uvfull 32 KiB texture via a real BLT_OP_STAGE (ch1,
+# ~126 evictions), then runs the same TRILIST scene. Pre-fix: bad=175/76800, a STRICT
+# SUPERSET of tb_blitter_trilist_uvfull's then-known bad=173 (byte-identical got/exp on
+# all 173 shared coordinates) plus 2 isolated single-pixel mismatches — (40,48) and
+# (166,164). Post-fix (2026-07-26, pa_qtag): bad=0/76800 — the 2 stragglers were the
+# SAME bug manifesting through the real cache's fetch timing, not a separate cache-layer
+# defect. Left NON-GATING as a dev tool (real SDRAM co-sim, ~45s wall) rather than
+# promoted to gating; re-promote if it proves stably green over time. See
+# .superpowers/sdd/task-3-report.md, .superpowers/sdd/task-8-report.md.
+NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
 # NIGHTLY_ONLY: TBs excluded from the PR tier. tb_comp_replay is a non-gating visual-
@@ -148,6 +172,12 @@ timeout_s() { case "$1" in
   tb_vram_contention)                      echo 180 ;;
   # Non-gating full-frame visual-dump TB: ~350s to actually PASS, capped low.
   tb_comp_replay)                          echo 30 ;;
+  # Non-gating real-cache+mt48 TRILIST co-sim (see NONGATING note above). Wall time
+  # is HIGHLY contention-sensitive: ~45-60s isolated, but observed 8+ min under
+  # concurrent CPU load from other sims/builds on the same machine (this bench
+  # co-simulates the bit-level SDRAM chip model, unlike every stub-P_SRC sibling).
+  # Generous budget so ordinary CI contention doesn't spuriously non-gate-fail it.
+  tb_blitter_trilist_sdram)                echo 480 ;;
   # [gmloader-GPU slim] tb_bgplane_equivalence/write_pipe_xl/3plane_xl/maptrans/
   # inval_teeth and tb_pal8_bgplane were RETIRED with OP_BGPLANE_WRITE/OP_CLUT_
   # UPLOAD (see the SKIP-block note above); their budget entries are gone too.

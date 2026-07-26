@@ -61,6 +61,12 @@ module ddr_blitter_arb #(
     wire b_rd = ENABLE & blt_rd;
     wire b_we = ENABLE & blt_we;
 
+    // [bounded borrow] a burstcnt of 0 would arm blt_out at 0 (reads: the G_BLT_RD
+    // exit blt_out==1 becomes unreachable; writes: 0-1 underflows to 255) => instant
+    // permanent deadlock. No current master emits 0 (comp_pipeline ties mem_rd off
+    // while its mem_burstcnt=0) — this is a guard, not a behavior change.
+    wire [7:0] b_burst_eff = (blt_burstcnt == 8'd0) ? 8'd1 : blt_burstcnt;
+
     localparam [2:0] G_READER=3'd0, G_BLT=3'd1, G_BLT_RD=3'd2, G_BLT_WR=3'd3;
     reg [2:0] state;
 
@@ -99,6 +105,24 @@ module ddr_blitter_arb #(
     end
     wire rdr_idle = (rd_out == 10'd0);   // reader has NO burst in flight -> safe to lend
 
+    // [bounded borrow] symmetric self-correct for the BLITTER side. The reader's
+    // rd_out has QUIET_MAX/drift_clr above; blt_out had NOTHING, and a G_BLT_RD
+    // park is escape-free by construction: ddram_rd/we are gated off in that state,
+    // so no master can issue the very command whose return beat would exit it
+    // (device signature: fb_dma_busy stuck -> S_SNAP_DRAIN park -> recurring stalls).
+    // On timeout, abandon the wait and return to G_READER. The blitter still holds
+    // its mem_rd asserted through the wait (see the mux CRITICAL note below), so
+    // the next reader-idle gap re-grants and RE-ISSUES the read — a retry, not a
+    // data loss (reads are idempotent). BLT_QUIET_MAX >> any real f2h latency.
+    localparam [10:0] BLT_QUIET_MAX = 11'd1024;
+    reg [10:0] bquiet;
+    always @(posedge clk) begin
+        if (reset)                                        bquiet <= 11'd0;
+        else if ((state != G_BLT_RD) | ddram_dout_ready)  bquiet <= 11'd0;
+        else if (bquiet != BLT_QUIET_MAX)                 bquiet <= bquiet + 11'd1;
+    end
+    wire blt_abort = (bquiet >= BLT_QUIET_MAX);
+
     // blitter burst beat counters: how many beats the current blitter burst still
     // owes (reads: dout_ready beats; writes: !ddram_busy accepts). The grant is held
     // until this reaches zero. blt_burstcnt is bounded by MAXBURST at the master, so
@@ -109,9 +133,10 @@ module ddr_blitter_arb #(
     always @(posedge clk) begin
         if (reset) blt_out <= 8'd0;
         else case (state)
-            G_BLT:    if (b_rd & ~ddram_busy)      blt_out <= blt_burstcnt; // arm read beats
-                      else if (b_we & ~ddram_busy) blt_out <= blt_burstcnt - 8'd1; // 1st write beat taken
-            G_BLT_RD: if (ddram_dout_ready & (blt_out!=8'd0)) blt_out <= blt_out - 8'd1;
+            G_BLT:    if (b_rd & ~ddram_busy)      blt_out <= b_burst_eff; // arm read beats
+                      else if (b_we & ~ddram_busy) blt_out <= b_burst_eff - 8'd1; // 1st write beat taken
+            G_BLT_RD: if (blt_abort)                                   blt_out <= 8'd0;
+                      else if (ddram_dout_ready & (blt_out!=8'd0))     blt_out <= blt_out - 8'd1;
             G_BLT_WR: if (b_we & ~ddram_busy & (blt_out!=8'd0)) blt_out <= blt_out - 8'd1;
             default: ;
         endcase
@@ -130,11 +155,12 @@ module ddr_blitter_arb #(
             G_BLT:
                 if      (b_rd & ~ddram_busy)               state <= G_BLT_RD;  // await read beats
                 else if (b_we & ~ddram_busy)
-                    state <= (blt_burstcnt==8'd1) ? G_READER : G_BLT_WR;       // 1-beat write done now
+                    state <= (b_burst_eff==8'd1) ? G_READER : G_BLT_WR;        // 1-beat write done now
                 else if (~b_rd & ~b_we)                    state <= G_READER;
                 // else: blitter command stalled by ddram_busy -> hold G_BLT
             G_BLT_RD:
                 if (ddram_dout_ready & (blt_out==8'd1))     state <= G_READER;  // last beat captured
+                else if (blt_abort)                         state <= G_READER;  // [bounded borrow] lost beat -> retry
             G_BLT_WR:
                 if (b_we & ~ddram_busy & (blt_out==8'd1))   state <= G_READER;  // last write accepted
             default: state <= G_READER;
@@ -156,7 +182,7 @@ module ddr_blitter_arb #(
             ddram_burstcnt = rdr_burstcnt; ddram_addr = rdr_addr; ddram_rd = rdr_rd;
             ddram_din = rdr_din; ddram_be = rdr_be; ddram_we = rdr_we;
         end else begin
-            ddram_burstcnt = blt_burstcnt; ddram_addr = blt_addr;
+            ddram_burstcnt = b_burst_eff; ddram_addr = blt_addr;
             ddram_rd = (state == G_BLT) ? b_rd : 1'b0;     // read command only in G_BLT
             ddram_we = ((state == G_BLT) | (state == G_BLT_WR)) ? b_we : 1'b0;
             ddram_din = blt_din; ddram_be = blt_be;
