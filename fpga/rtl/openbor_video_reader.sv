@@ -598,19 +598,15 @@ always @(posedge ddr_clk) begin
                 // new_frame_pending is latched so it can't be missed.
                 if (enable_ddr && new_frame_pending) begin
                     new_frame_pending <= 1'b0;  // consumed
-                    // [DDR-scanout custom-reader] SCANOUT_ONLY skips the joystick-write +
-                    // vsync-writeback DDR path (deferred HPS-I/O) and goes straight to the
-                    // control-word poll -> line-fetch scanout.
-                    // [reader-health instrument] a SOLARUS_DBG_PROBES build routes even the
-                    // SCANOUT_ONLY frame-start through ST_WRITE_VSYNC first so the per-frame
-                    // underflow diag lands at VSYNC_ADDR (ST_WRITE_VSYNC falls through to
-                    // ST_POLL_CTRL). Costs one extra 1-qword DDR write per frame at frame
-                    // start — negligible vs the ~19200-qword copy, and debug-only.
-`ifdef SOLARUS_DBG_PROBES
-                    state <= SCANOUT_ONLY ? ST_WRITE_VSYNC : ST_WRITE_JOY0;
-`else
-                    state <= SCANOUT_ONLY ? ST_POLL_CTRL : ST_WRITE_JOY0;
-`endif
+                    // [joy-ddr-writeback] Every frame start goes through ST_WRITE_JOY0..3 —
+                    // including SCANOUT_ONLY builds. The joystick words at qw +1/+3/+4/+5
+                    // (bytes 0x008/0x018/0x020/0x028) are the OpenBOR-contract input path:
+                    // the engine reads them from /dev/mem (same mechanism as OpenBOR_7533 /
+                    // sonic-mania). Cost: 4 extra 1-qword DDR writes per frame — negligible
+                    // vs the ~19200-qword scanout copy. SCANOUT_ONLY still gates the audio
+                    // ring, cart, and (in ship builds) the vsync writeback: ST_WRITE_JOY3
+                    // routes back to ST_POLL_CTRL for the SCANOUT_ONLY ship path.
+                    state <= ST_WRITE_JOY0;
                 end
                 else if (cart_write_pending)
                     state <= ST_WRITE_CART;
@@ -654,13 +650,21 @@ always @(posedge ddr_clk) begin
             end
 
             ST_WRITE_JOY3: begin
-                // Write joystick_3 (P4) to DDR3, then write the vsync counter
+                // Write joystick_3 (P4) to DDR3, then write the vsync counter.
+                // [joy-ddr-writeback] SCANOUT_ONLY ship builds skip the vsync writeback
+                // (pre-existing behavior — their frame start used to go straight to
+                // ST_POLL_CTRL); probe builds still route through ST_WRITE_VSYNC so the
+                // per-frame reader-health diag lands at DIAG_ADDR.
                 if (!ddr_busy) begin
                     ddr_addr     <= JOY3_ADDR;
                     ddr_din      <= {32'd0, joystick_3};
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
+`ifdef SOLARUS_DBG_PROBES
                     state        <= ST_WRITE_VSYNC;
+`else
+                    state        <= SCANOUT_ONLY ? ST_POLL_CTRL : ST_WRITE_VSYNC;
+`endif
                 end
             end
 

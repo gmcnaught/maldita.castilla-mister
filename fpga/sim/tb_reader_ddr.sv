@@ -18,8 +18,14 @@
 module tb_reader_ddr;
     localparam [28:0] FB      = 29'd0;             // FB_QW_BASE: CTRL@0, BUF0@8, BUF1@0x8008
     localparam [28:0] CTRLA   = FB;
+    localparam [28:0] JOY0A   = FB + 29'd1;        // joystick P1 writeback (byte +0x008)
+    localparam [28:0] JOY1A   = FB + 29'd3;        // joystick P2 writeback (byte +0x018)
     localparam [28:0] BUF0    = FB + 29'd8;
     localparam [28:0] BUF1    = FB + 29'h8008;
+    // OpenBOR-contract input path: the reader must publish these each frame even in
+    // SCANOUT_ONLY builds — the engine reads them from /dev/mem (P1 +0x008, P2 +0x018).
+    localparam [31:0] JOY0_VAL = 32'h0000_0113;    // right+up+Sword+Pause pattern
+    localparam [31:0] JOY1_VAL = 32'h0000_0025;    // right+down+Action pattern
     localparam integer NQW    = 19200;
     localparam integer STRIDE = 80;
     localparam integer VACT   = 240;
@@ -63,7 +69,7 @@ module tb_reader_ddr;
         .de(tim_de), .hblank(tim_hb), .vblank(tim_vb), .new_frame(tim_nf), .new_line(tim_nl),
         .vcount(tim_vc),
         .ioctl_download(1'b0), .ioctl_wr(1'b0), .ioctl_addr(27'd0), .ioctl_dout(8'd0), .ioctl_wait(),
-        .joystick_0(32'd0), .joystick_1(32'd0), .joystick_2(32'd0), .joystick_3(32'd0),
+        .joystick_0(JOY0_VAL), .joystick_1(JOY1_VAL), .joystick_2(32'd0), .joystick_3(32'd0),
         .joystick_l_analog_0(16'd0),
         .r_out(reader_r), .g_out(reader_g), .b_out(reader_b),
         .clk_audio(clk), .audio_l(), .audio_r(),
@@ -113,6 +119,27 @@ module tb_reader_ddr;
             r_dout_ready <= 1'b1;
             rd_i         <= rd_i + 8'd1;
             if (rd_i == rd_cnt_l - 8'd1) serving <= 1'b0;
+        end
+    end
+
+    // ── (d) joystick writeback: each frame start writes JOY0/JOY1 with the live values ──
+    integer joy0_writes = 0, joy1_writes = 0, joy_errs = 0;
+    always @(posedge clk) begin
+        if (!reset && r_we && !r_ddr_busy) begin
+            if (r_addr == JOY0A) begin
+                joy0_writes = joy0_writes + 1;
+                if (r_din !== {32'd0, JOY0_VAL}) begin
+                    if (joy_errs < 8) $display("  JOY0 DATA MISMATCH got=%h exp=%h", r_din, {32'd0, JOY0_VAL});
+                    joy_errs = joy_errs + 1;
+                end
+            end
+            if (r_addr == JOY1A) begin
+                joy1_writes = joy1_writes + 1;
+                if (r_din !== {32'd0, JOY1_VAL}) begin
+                    if (joy_errs < 8) $display("  JOY1 DATA MISMATCH got=%h exp=%h", r_din, {32'd0, JOY1_VAL});
+                    joy_errs = joy_errs + 1;
+                end
+            end
         end
     end
 
@@ -250,6 +277,13 @@ module tb_reader_ddr;
         if (addr_errs || data_errs || orient_errs || active_err) begin
             $display("RESULT: FAIL — addr_errs=%0d data_errs=%0d orient_errs=%0d active_err=%0d",
                      addr_errs, data_errs, orient_errs, active_err);
+            $fatal;
+        end
+        // (d) joystick writeback ran every settled frame with the live values (>=3 frames
+        // measured across the BUF0+BUF1 phases; exact count depends on settle timing).
+        if (joy0_writes < 3 || joy1_writes < 3 || joy_errs) begin
+            $display("RESULT: FAIL — joystick writeback joy0_writes=%0d joy1_writes=%0d joy_errs=%0d",
+                     joy0_writes, joy1_writes, joy_errs);
             $fatal;
         end
         $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; FORWARD scanout — screen(c,d)=buf(c,d), no re-ordering, both buffers");
