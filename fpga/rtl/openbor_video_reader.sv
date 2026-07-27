@@ -334,6 +334,17 @@ localparam [4:0] ST_WRITE_AUDIO_RD  = 5'd19;
 localparam [4:0] ST_PAINT            = 5'd20;  // blitter paint-test rectangle
 localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti-tearing)
 localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
+localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven liveness beacon
+
+// [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
+// {dbg_blt, beacon_cnt} to VSYNC_ADDR+2 (byte 0x3A070010) from ST_IDLE. Timer-
+// driven, so it does NOT depend on the frame-start (new_frame CDC) chain — it
+// stays alive as long as the reader FSM and the f2h write path are alive.
+// Reading it names a wedge: beacon frozen = f2h/m0 dead; beacon climbing with
+// dbg state frozen = blitter parked (state in dbg_blt[5:0]).
+reg [21:0] beacon_tick;
+reg        beacon_pending;
+reg [31:0] beacon_cnt;
 
 reg  [4:0]  state;
 reg  [31:0] ctrl_word;
@@ -498,8 +509,14 @@ always @(posedge ddr_clk) begin
         audio_backoff      <= 20'd0;
         audio_fifo_wr      <= 1'b0;
         audio_fifo_wr_data <= 64'd0;
+        beacon_tick        <= 22'd0;
+        beacon_pending     <= 1'b0;
+        beacon_cnt         <= 32'd0;
     end
     else begin
+        // [wedge probe v5] beacon timer — free-running, independent of new_frame.
+        beacon_tick <= beacon_tick + 22'd1;
+        if (beacon_tick == 22'd0) beacon_pending <= 1'b1;
         lb_we         <= 1'b0;
         audio_fifo_wr <= 1'b0;
         if (audio_backoff != 20'd0) audio_backoff <= audio_backoff - 20'd1;
@@ -615,6 +632,21 @@ always @(posedge ddr_clk) begin
                     state <= ST_WRITE_CART_SIZE;
                 else if (audio_wake)
                     state <= ST_POLL_AUDIO_WR;
+                else if (beacon_pending)          // [wedge probe v5] lowest priority
+                    state <= ST_BEACON;
+            end
+
+            // [wedge probe v5] liveness beacon + live blitter dbg publish.
+            ST_BEACON: begin
+                if (!ddr_busy) begin
+                    ddr_addr       <= VSYNC_ADDR + 29'd2;   // byte 0x3A070010
+                    ddr_din        <= {dbg_blt, beacon_cnt};
+                    ddr_burstcnt   <= 8'd1;
+                    ddr_we         <= 1'b1;
+                    beacon_cnt     <= beacon_cnt + 32'd1;
+                    beacon_pending <= 1'b0;
+                    state          <= ST_IDLE;
+                end
             end
 
             ST_WRITE_JOY0: begin

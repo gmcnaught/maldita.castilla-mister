@@ -33,7 +33,12 @@
 `include "comp_clut.vh"
 
 module blitter_top #(
-    parameter AW = 32
+    parameter AW = 32,
+    // [startup-wedge fix] S_RD_WAIT reissue watchdog window. MUST stay > the
+    // arbiter's FLUSH_QUIET_MAX (2^20 cyc) — see the S_RD_WAIT comment for the
+    // ordering proof. Parameter so the sim can exercise the reissue without
+    // multi-million-cycle waits (same pattern as ddr_blitter_arb FLUSH_QUIET_MAX).
+    parameter [21:0] RW_WD_MAX = 22'h3FFFFF   // 2^22-1 cyc ~42.6ms @98.4375MHz
 ) (
     input  wire          clk,
     input  wire          rst,
@@ -214,6 +219,9 @@ module blitter_top #(
 
     reg  [5:0]  state, rd_ret, wr_ret;
     reg         rd_issued;   // read accepted by the bus, now awaiting dout_ready
+    // [startup-wedge fix] S_RD_WAIT reissue watchdog (window = RW_WD_MAX param).
+    reg  [21:0] rw_wd;           // cycles spent in S_RD_WAIT since entry/reissue
+    reg  [7:0]  rd_reissue_cnt;  // saturating diagnostic: reissues since reset
     // ---- legacy-FSM master signals (muxed onto mem_* at the bottom) ----
     reg  [AW-1:0] bm_addr;
     reg           bm_rd, bm_wr;
@@ -329,7 +337,9 @@ module blitter_top #(
     // for data = NOT starved), [5:0]=state. The legacy dx/dy fields are retired with
     // the per-pixel renderer; comp_pipeline owns per-pixel progress now, so those
     // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
-    assign dbg = {dbg_stuck[23:16], rd_issued, 8'd0, 9'd0, state};
+    // [startup-wedge fix] bits[22:15] now carry rd_reissue_cnt (reissue watchdog
+    // fires since reset) — 0 in a clean run, >0 means a lost f2h beat was healed.
+    assign dbg = {dbg_stuck[23:16], rd_issued, rd_reissue_cnt, 9'd0, state};
     // [wedge probe v2] declared/defined AFTER the tri sub-FSM regs (pa/pb/fill_busy/tri_maxx/y),
     // since `default_nettype none` forbids forward references — see the block below ~L590.
 
@@ -762,6 +772,7 @@ module blitter_top #(
             state<=S_POLL_SUBMIT; bm_rd<=0; bm_wr<=0; bm_be<=0;
             bm_addr<=0; bm_din<=0; idle<=1; frame_counter<=0;
             cmd_idx<=0; fetch_k<=0; submit_reg<=0; done_reg<=0; rd_issued<=0;
+            rw_wd<=22'd0; rd_reissue_cnt<=8'd0;
             perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;
             perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;
             throttle_cnt<=8'd0; throttle_cfg<=8'd0;
@@ -813,6 +824,12 @@ module blitter_top #(
             if (fill_busy && !p0_ok) begin
                 if (wd_stall != WD_TIMEOUT) wd_stall <= wd_stall + 13'd1;
             end else wd_stall <= 13'd0;
+
+            // [startup-wedge fix] S_RD_WAIT dwell counter (reissue watchdog). Reset
+            // outside the state; S_RD_WAIT's reissue branch also clears it (that NBA
+            // executes later in this block, so it wins on the reissue cycle).
+            if (state != S_RD_WAIT) rw_wd <= 22'd0;
+            else if (rw_wd != RW_WD_MAX) rw_wd <= rw_wd + 22'd1;
 
             case (state)
             S_POLL_SUBMIT: begin
@@ -1591,12 +1608,29 @@ module blitter_top #(
             // Backpressure-safe generic read: hold bm_rd until the bus accepts
             // it (~mem_busy), then await dout_ready. (mem_busy = ddram busy OR not
             // granted by the arbiter; on the never-busy sim model this is a no-op.)
+            //
+            // [startup-wedge fix] REISSUE WATCHDOG: an f2h read accepted during the
+            // core-load port-bring-up window can lose its response beat outright
+            // (device evidence 2026-07-27: ~50% of launches park here on the FIRST
+            // C_SUBMIT poll, rd_issued=1, C_DONE never written — the frame-1 wedge).
+            // The arbiter's expectation queue self-heals a lost beat after
+            // FLUSH_QUIET_MAX (2^20 cyc ~10.6ms), but the master never re-issued.
+            // RW_WD_MAX is deliberately > FLUSH_QUIET_MAX so the reissue can only
+            // fire AFTER the arb has flushed the dead expectation — a reissued
+            // read can therefore never pair with a stale queue entry. Reads are
+            // side-effect-free, so reissue is idempotent. bm_addr still holds the
+            // original address (only S_RD_WAIT's issuing state writes it).
             S_RD_WAIT: begin
                 if (!rd_issued) begin
                     bm_rd <= 1'b1;                       // hold request
                     if (!mem_busy) rd_issued <= 1'b1;     // accepted this cycle
                 end else if (mem_dout_ready) begin
                     rd_data <= mem_dout; rd_issued <= 1'b0; state <= rd_ret;
+                end else if (rw_wd == RW_WD_MAX) begin
+                    rd_issued <= 1'b0;                   // response lost: re-arm the issue phase
+                    bm_rd <= 1'b1;                       // request visible when the accept check runs
+                    rw_wd <= 22'd0;
+                    if (~&rd_reissue_cnt) rd_reissue_cnt <= rd_reissue_cnt + 8'd1;
                 end
             end
             // Backpressure-safe generic write: bm_wr/addr/din/be held from the
