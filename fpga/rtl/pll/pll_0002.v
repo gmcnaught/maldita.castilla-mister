@@ -40,9 +40,30 @@ module  pll_0002(
 		.output_clock_frequency3("98.437500 MHz"),
 		// [#44] SDRAM_CLK capture phase. MUST be a non-zero ~105.8ps PLL tap:
 		// at 0 ps outclk_3 is bit-identical to outclk_0, so Quartus merges them
-		// and SDRAM_CLK goes unconstrained (frame-wide banding). 5079ps (48 taps,
-		// ~180deg) is the best DQ read-capture sub-cycle point of the sweep.
-		.phase_shift3("5079 ps"),
+		// and SDRAM_CLK goes unconstrained (frame-wide banding).
+		//
+		// 2026-07-26 CROSS-BOARD SWEEP: the old 5079ps was tuned on ONE board and
+		// is DEAD on the other. jtframe's burst controller runs CL=2 at clk_sys
+		// 98.4375MHz (~2x the ~48MHz jtcores uses that stack at), so the data eye
+		// is too narrow to be board-agnostic — each DE10-Nano+module pair has its
+		// own dead zone. 8 phases x 2 boards, scored BIT-EXACT on the uvsym probe
+		// u-ramp (period 10159ps; PASS=bit-exact, BADn=n/7 samples wrong):
+		//
+		//   phase    635   1270   2540   3809   5079   6349   8042   9313
+		//   .62     PASS   PASS   PASS   BAD7   DEAD   PASS   PASS   PASS
+		//   .81     PASS   PASS   PASS   PASS   PASS   BAD1   PASS   PASS
+		//
+		// One contiguous good arc wrapping through zero; the two dead zones are in
+		// DIFFERENT places (.62 ~3100-5900, .81 ~5700-6800) and 5079 lands inside
+		// .62's. 2540ps is in the arc common to both AND is the only candidate with
+		// in-game evidence of sustained fabric advance on .62.
+		//
+		// CAUTION: the uvsym probe passing does NOT imply the game is stable — 635ps
+		// is bit-exact on both boards yet wedged the fabric far sooner in-game.
+		// Re-sweep against the GAME, not just the probe. And do not trust STA here:
+		// Maldita.sdc:90-100 multicycles both SDRAM directions, reporting +15.5ns
+		// slack on a 10.159ns clock, so CI cannot catch a phase regression today.
+		.phase_shift3("2540 ps"),
 		.duty_cycle3(50),
 		.output_clock_frequency4("0 MHz"),
 		.phase_shift4("0 ps"),
