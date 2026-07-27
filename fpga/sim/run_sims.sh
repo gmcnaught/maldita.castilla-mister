@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # run_sims.sh — build + run every fpga/sim testbench under Icarus Verilog and
-# report PASS/FAIL. Used both locally and by .github/workflows/sim.yml.
+# report PASS/FAIL. Run LOCALLY ONLY — there is no sim workflow in .github/workflows/
+# (build-rbf.yml is the sole workflow, and it does not invoke this script). That matters:
+# the geometry contract-check below is the only gate covering the production RTL's root,
+# so nothing catches a root change automatically. Adding a sim workflow would close it.
 #
 # Why a runner instead of per-test filelists: every tb_*.sv resolves its RTL
 # deps through iverilog's library search (-y over ../rtl ../sys and this dir,

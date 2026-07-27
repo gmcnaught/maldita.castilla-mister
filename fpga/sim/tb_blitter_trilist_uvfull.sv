@@ -167,9 +167,13 @@ module tb_blitter_trilist_uvfull;
       // FALSE, so the pixel would be silently NOT compared. That is exactly how this
       // bench passed vacuously before the geometry root landed — if FB_W/FB_H move
       // without regenerating vectors, fail loudly instead of re-opening the hole.
-      if (e === 16'hxxxx) begin
+      // Guard BOTH sides: chan_ok() is symmetric in x-propagation (dr/dg/db are 4-state
+      // integers), so chan_ok(x, real) also returns x and `!x` is x, which if() drops.
+      // comp_fbram's banks have no sim initialisation, so an unwritten DUT pixel really
+      // does read x and would be silently skipped. Reduction-XOR catches any x/z bit.
+      if ((^e === 1'bx) || (^got === 1'bx)) begin
         bad=bad+1;
-        if (bad<=20) $display("  GOLDEN SHORT at (%0d,%0d) — vectors not regenerated for this canvas?", x,y);
+        if (bad<=20) $display("  UNDEFINED at (%0d,%0d): got=%04h exp=%04h — short golden (regenerate vectors) or unwritten FB pixel", x,y,got,e);
       end
       else if (!chan_ok(got,e)) begin
         bad=bad+1;

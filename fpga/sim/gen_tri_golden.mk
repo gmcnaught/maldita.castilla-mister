@@ -20,10 +20,16 @@
 # an opcode this fabric decodes as nothing — turning the bit-exact gate into a
 # check of the WRONG contract while still "passing".
 #
-# Pin to the gmloader-next SUBMODULE instead: it is fixed by a recorded commit
-# pointer, and it is the exact source the engine binary is compiled from, so the
-# golden and the device are guaranteed to share one contract. contract-check
-# below enforces that agreement on every generator build.
+# Read the gmloader-next refmodel instead: it is the exact source the engine binary is
+# compiled from, so the golden and the device share one contract, and contract-check below
+# enforces that agreement on every generator build.
+#
+# CAVEAT (be honest about what this path is): maldita is NOT a submodule of mister-gmloader,
+# so this resolves to the SIBLING WORKING CHECKOUT of gmloader-next on whatever branch it
+# happens to be on — it is NOT pinned by a recorded commit pointer. Since contract-check
+# joined run_sims.sh, the whole battery hard-fails at step 0 if that checkout drifts or is
+# absent (a fresh clone without it runs ZERO testbenches). Pinning this properly is an open
+# follow-up.
 REFMODEL  := ../../../gmloader-next/3rdparty/mfgpu/refmodel
 RTLDEFS   := ../rtl/blitter_defs.vh
 CC        ?= cc
