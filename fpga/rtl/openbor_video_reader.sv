@@ -333,6 +333,7 @@ localparam [4:0] ST_WAIT_AUDIO_RING = 5'd18;
 localparam [4:0] ST_WRITE_AUDIO_RD  = 5'd19;
 localparam [4:0] ST_PAINT            = 5'd20;  // blitter paint-test rectangle
 localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti-tearing)
+localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
 
 reg  [4:0]  state;
 reg  [31:0] ctrl_word;
@@ -693,7 +694,10 @@ always @(posedge ddr_clk) begin
                                      last_uf_line, first_uf_line, max_dline};
 `else
                     ddr_addr     <= VSYNC_ADDR;
-                    ddr_din      <= {32'd0, vsync_count};   // ship: low word = engine vsync pacing
+                    // [wedge probe v4] high word carries the LIVE blitter FSM snapshot
+                    // ({stuck>>16, rd_issued, state}) — the reader outlives a blitter
+                    // park, so devmem 0x3A070004 names the frozen state.
+                    ddr_din      <= {dbg_blt, vsync_count};
 `endif
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
@@ -706,6 +710,19 @@ always @(posedge ddr_clk) begin
                     max_fetch_stall <= 16'd0;
                     cur_stall       <= 16'd0;
 `endif
+                    state        <= ST_WRITE_DBGA;
+                end
+            end
+
+            // [wedge probe v4] publish the blitter's live mem_addr (+ diag) one qword
+            // above VSYNC_ADDR: byte 0x3A070008 = dbg_addr, 0x3A07000C = dbg_diag.
+            // Names WHICH access is parked (control block / ring / SRC heap read).
+            ST_WRITE_DBGA: begin
+                if (!ddr_busy) begin
+                    ddr_addr     <= VSYNC_ADDR + 29'd1;
+                    ddr_din      <= {dbg_diag, dbg_addr};
+                    ddr_burstcnt <= 8'd1;
+                    ddr_we       <= 1'b1;
                     state        <= ST_POLL_CTRL;
                 end
             end
