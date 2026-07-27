@@ -65,7 +65,7 @@ gen_tri_golden: gen_tri_golden.c blt_tri.c | contract-check
 # [app-surface v1] Task 8 full-frame integration golden: a two-pass ring executed
 # by the reference blt_execute() (surface render + sample). Emits the ring + vertex
 # heap + the golden WORK framebuffer for tb_blitter_system_pipe.sv's surface phase.
-gen_system_golden: gen_system_golden.c | contract-check
+gen_system_golden: gen_system_golden.c blt_tri.c | contract-check
 	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_system_golden.c
 
 vectors: gen_tri_golden gen_system_golden
