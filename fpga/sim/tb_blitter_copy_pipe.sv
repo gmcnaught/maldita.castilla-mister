@@ -128,7 +128,7 @@ module tb_blitter_copy_pipe;
     repeat(10) @(posedge clk);
     $display("=== done_seq=%0d submit=%0d (to=%0d) ===", mem[32'h200005][31:0], mem[32'h200000][31:0], to);
     // dst corners: (20,10)->0x1000 ; (27,10)->0x1007 ; (20,13)->0x1018 ; (27,13)->0x101F
-    // dst_qw window = 8 + ((dy*320+dx)>>2); lane = (dy*320+dx)&3
+    // dst_qw window = 8 + ((dy*`FB_W+dx)>>2); lane = (dy*`FB_W+dx)&3
     check(20,10, 16'h1000); check(27,10, 16'h1007);
     check(20,13, 16'h1018); check(27,13, 16'h101F);
     check(24,11, 16'h100C);   // middle pixel (x=4,y=1) -> 0x1000+8+4
@@ -139,7 +139,7 @@ module tb_blitter_copy_pipe;
   task check(input integer dx, input integer dy, input [15:0] exp);
     integer idx; reg [15:0] got;
     begin
-      idx = dy*80 + (dx>>2);   // comp_fbram qword; lane = dx[1:0]
+      idx = dy*`FB_STRIDE_QW + (dx>>2);   // comp_fbram qword; lane = dx[1:0]
       got = ((dx&3)==0) ? fbram.bank0[idx] : ((dx&3)==1) ? fbram.bank1[idx] :
             ((dx&3)==2) ? fbram.bank2[idx] : fbram.bank3[idx];
       if (got !== exp) begin errs=errs+1; $display("  MISMATCH (%0d,%0d): got %h exp %h", dx,dy,got,exp); end

@@ -164,11 +164,11 @@ module tb_argb4444_blendmodes;
     end
   endfunction
 
-  // ── FB peek: pixel (dx,dy) -> qword dy*80+(dx>>2), lane dx[1:0] ──────────────
+  // ── FB peek: pixel (dx,dy) -> qword dy*`FB_STRIDE_QW+(dx>>2), lane dx[1:0] ──────────────
   function [15:0] getpx(input integer dx, input integer dy);
     integer qw, lane;
     begin
-      qw = dy*80 + (dx>>2);
+      qw = dy*`FB_STRIDE_QW + (dx>>2);
       lane = dx & 3;
       case (lane)
         0:       getpx = fbram.bank0[qw];

@@ -6,7 +6,13 @@
 // (the blitter-borrow path is covered by tb_arb_borrow + tb_blitter_system).
 `timescale 1ns/1ps
 `default_nettype none
+`include "blitter_defs.vh"
 module tb_deadlock;
+  // The modelled reader burst is ONE framebuffer row — derived from the FB geometry
+  // root (blitter_defs.vh), bound through a sized localparam (never a bare expression
+  // on a port). 72 qwords @ 288x216.
+  localparam integer RDR_BURST_QW = `FB_STRIDE_QW;
+  localparam [7:0]   RDR_BURST_B  = 8'(`FB_STRIDE_QW);
   reg clk=0,reset=1; always #5 clk=~clk;
   reg [7:0] r_burst; reg[28:0] r_addr; reg r_rd; reg[63:0] r_din; reg[7:0] r_be; reg r_we;
   wire r_busy,r_grant;
@@ -41,12 +47,12 @@ module tb_deadlock;
       repeat(300)@(posedge clk);            // reader idle -> producer fills
       gap=0;
       while(r_busy) begin @(posedge clk); gap=gap+1; if(gap>5000) begin $display("DEADLOCK: reader stuck %0d cyc",gap); $finish; end end
-      r_addr<=29'h07408008; r_burst<=8'd80; r_rd<=1'b1;   // gate-on-busy then request
+      r_addr<=29'h07408008; r_burst<=RDR_BURST_B; r_rd<=1'b1; // gate-on-busy then request
       @(posedge clk);
       while(!(r_grant && !d_busy)) @(posedge clk);
       r_rd<=1'b0;
       if(gap>maxgap) maxgap=gap;
-      for(k=0;k<80;k=k+1) begin @(posedge clk); while(!(d_dready&&r_grant)) @(posedge clk);
+      for(k=0;k<RDR_BURST_QW;k=k+1) begin @(posedge clk); while(!(d_dready&&r_grant)) @(posedge clk);
         if(d_dout!==mem[32776+k]) errors=errors+1; end
     end
     $display("=== %0d bursts, read errors=%0d, max grant gap=%0d cyc ===",n,errors,maxgap);

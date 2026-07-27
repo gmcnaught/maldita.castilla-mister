@@ -79,14 +79,14 @@ module tb_surfram;
   integer errs=0, to, qw, lane;
   function [15:0] getwork(input integer dx, input integer dy);
     begin
-      qw = dy*80 + (dx>>2); lane = dx & 3;
+      qw = dy*`FB_STRIDE_QW + (dx>>2); lane = dx & 3;
       getwork = (lane==0) ? fbram.bank0[qw] : (lane==1) ? fbram.bank1[qw] :
                 (lane==2) ? fbram.bank2[qw] : fbram.bank3[qw];
     end
   endfunction
   function [15:0] getsurf(input integer dx, input integer dy);
     begin
-      qw = dy*80 + (dx>>2); lane = dx & 3;
+      qw = dy*`FB_STRIDE_QW + (dx>>2); lane = dx & 3;
       getsurf = (lane==0) ? fbram.surf_bank0[qw] : (lane==1) ? fbram.surf_bank1[qw] :
                 (lane==2) ? fbram.surf_bank2[qw] : fbram.surf_bank3[qw];
     end
@@ -162,12 +162,12 @@ module tb_surfram;
     cksurf(0,0,     MAGENTA, "surf-tl");   cksurf(RW-1,RH-1, MAGENTA, "surf-br");
     cksurf(32,24,   MAGENTA, "surf-mid");
     cksurf(RW,0,    JUNK_S,  "surf-out-x"); cksurf(0,RH,     JUNK_S,  "surf-out-y");
-    cksurf(319,239, JUNK_S,  "surf-out-far");
+    cksurf(`FB_W-1,`FB_H-1, JUNK_S,  "surf-out-far");
     // WORK: rect == green (NOT magenta), outside == JUNK_W
     ckwork(0,0,     GREEN,   "work-tl");   ckwork(RW-1,RH-1, GREEN,   "work-br");
     ckwork(32,24,   GREEN,   "work-mid");
     ckwork(RW,0,    JUNK_W,  "work-out-x"); ckwork(0,RH,     JUNK_W,  "work-out-y");
-    ckwork(319,239, JUNK_W,  "work-out-far");
+    ckwork(`FB_W-1,`FB_H-1, JUNK_W,  "work-out-far");
 
     if (errs==0) $display("RESULT: PASS"); else $display("RESULT: FAIL (errs=%0d)", errs);
     $finish;

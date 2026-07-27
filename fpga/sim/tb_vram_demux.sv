@@ -31,7 +31,8 @@ module tb_vram_demux;
 
   // sdmem: byte-addressed, stores 64-bit qwords indexed by addr>>3.
   // Cover the full SDRAM FB address space (both FB0 and FB1).
-  // 0x0440000 (FB1_BASE) + 19200*8 = ~0x4DC800; 8M qword entries (2^23) is safe.
+  // 0x0440000 (FB1_BASE) + FB_QWORDS*8 (blitter_defs.vh geometry root) = ~0x4C0000 @288x216;
+  // 8M qword entries (2^23) is safe for any FB size this core can carry.
   reg [63:0] sdmem_q [0:1<<20];   // qword array indexed by byte_addr>>3
 
   // Helper: read a single byte from the qword array.

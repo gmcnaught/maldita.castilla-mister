@@ -142,12 +142,12 @@ module tb_comp_pipeline;
   endfunction
 
   integer errs=0, x, y, to;
-  // FB pixel (dx,dy) now lives in comp_fbram: qword = dy*80+(dx>>2), lane = dx[1:0].
-  // (dy*320 contributes 0 to the lane since 320%4==0.) Peek the four lane banks.
+  // FB pixel (dx,dy) now lives in comp_fbram: qword = dy*`FB_STRIDE_QW+(dx>>2), lane = dx[1:0].
+  // (dy*`FB_W contributes 0 to the lane since `FB_W%4==0.) Peek the four lane banks.
   function [15:0] getpx(input integer dx, input integer dy);
     integer qw; integer lane;
     begin
-      qw   = dy*80 + (dx>>2);
+      qw   = dy*`FB_STRIDE_QW + (dx>>2);
       lane = dx & 3;
       getpx = (lane==0) ? fbram.bank0[qw] :
               (lane==1) ? fbram.bank1[qw] :

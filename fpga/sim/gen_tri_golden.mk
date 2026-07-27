@@ -58,6 +58,13 @@ contract-check:
 	  exit 1; \
 	fi; \
 	echo "contract-check: refmodel and RTL agree on TRILIST/SET_TARGET"
+	@cw=$$(sed -n 's/#define BLT_FB_WIDTH[[:space:]]*\([0-9]*\).*/\1/p' $(REFMODEL)/blitter_ref.h); \
+	ch=$$(sed -n 's/#define BLT_FB_HEIGHT[[:space:]]*\([0-9]*\).*/\1/p' $(REFMODEL)/blitter_ref.h); \
+	vw=$$(sed -n 's/`define FB_W[[:space:]]*\([0-9]*\).*/\1/p' $(RTLDEFS)); \
+	vh=$$(sed -n 's/`define FB_H[[:space:]]*\([0-9]*\).*/\1/p' $(RTLDEFS)); \
+	if [ "$$cw" != "$$vw" ] || [ "$$ch" != "$$vh" ]; then \
+	  echo "CONTRACT DIMS MISMATCH: refmodel $$cw x $$ch vs blitter_defs.vh $$vw x $$vh"; exit 1; \
+	fi; echo "contract-check dims OK ($$cw x $$ch)"
 
 gen_tri_golden: gen_tri_golden.c blt_tri.c | contract-check
 	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_tri_golden.c

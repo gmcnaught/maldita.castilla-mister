@@ -10,8 +10,10 @@
  *    cmd2  FILL magenta 40x40 @(0,0)      -> "sprite" into the app-surface
  *    cmd3  SET_TARGET WORK
  *    cmd4  FILL blue    fullscreen        -> clear WORK
- *    cmd5  FILL green   120x240 @(200,0)  -> background into WORK (right region)
+ *    cmd5  FILL green   120xFB_H @(200,0) -> background into WORK (right region;
+ *                                            clips to x=200..FB_W-1 at 288 wide)
  *    cmd6  TRILIST 2 tris, quad (0,0)-(160,240), UV==position, BLT_F_SRC_SURFACE,
+ *          (the quad's y=240 clips to FB_H — deliberate: clipping is under test)
  *          BLEND_COPY                      -> sample the app-surface over WORK (left region)
  *    cmd7  END
  *  So the final WORK is: left = app-surface sampled (teal + the magenta sprite,
@@ -23,7 +25,8 @@
  *
  *  Outputs (mem[] window offsets == tb_blitter_system_pipe.sv):
  *    vectors/sys_surface_ddr.hex : @200008 ring (8 cmds x 4 qw) + @210000 heap (verts)
- *    vectors/sys_surface_exp.hex : 76800 RGB565, line = y*320+x (the golden WORK)
+ *    vectors/sys_surface_exp.hex : FB_W*FB_H RGB565, line = y*FB_W+x (the golden WORK;
+ *                                  62208 @ 288x216)
  *  The testbench sets the control block (cmd_count=8, target=0, flags=0) itself and
  *  bumps submit; only the ring + vertex heap come from the .hex.
  *
@@ -38,8 +41,11 @@
 
 #define RING_OFF  0x00200008u   /* RING_QW(real) - WBASE (== BLTCTRL+8)           */
 #define SRC_OFF   0x00210000u   /* SRC_QW(real)  - WBASE                          */
-#define FB_W  320
-#define FB_H  240
+/* GEOMETRY: taken from the single C-domain root in blitter_ref.h — never retype a
+ * dimension here (native-288x216 single-source rule). gen_tri_golden.mk's
+ * contract-check gates this root against the Verilog root (`FB_W/`FB_H). */
+#define FB_W  BLT_FB_WIDTH
+#define FB_H  BLT_FB_HEIGHT
 #define EOFF  0u                /* vertex-array byte offset in the heap (entry_off) */
 
 #define BLT_CMD_BYTES 32

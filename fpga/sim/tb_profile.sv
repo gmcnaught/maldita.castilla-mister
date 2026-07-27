@@ -52,6 +52,9 @@
 `endif
 
 module tb_profile;
+  // "full width" == the FB width from the geometry root (blitter_defs.vh), bound
+  // through a sized localparam rather than an inlined bare expression.
+  localparam [15:0] FULL_W = 16'(`FB_W);
   localparam [28:0] WBASE = 29'h07400000;     // DDR window base; mem idx = addr-WBASE
   localparam        MEMQW = (`SRC_QW - 29'h07400000) + 29'h10000;  // [#52] tracks SRC_QW heap base        // covers control block @ 0x200000
   localparam        SRC_LAT = `PROF_SRC_LAT;
@@ -297,16 +300,16 @@ module tb_profile;
     $display("RESULT: PASS"); $finish;
 `endif
     // Throughput cases (data-independent write-back): full-width spans.
-    prof_blit("COPY  wide1band", 8'd0, 16'd320, 16'd8);    // single band, full width
-    prof_blit("COPY  wide",      8'd0, 16'd320, 16'd48);   // multi-band -> chunk/flush overhead
-    prof_blit("ALPHA wide",      8'd2, 16'd320, 16'd48);
-    prof_blit("PALPHA wide",     8'd3, 16'd320, 16'd48);
+    prof_blit("COPY  wide1band", 8'd0, FULL_W,  16'd8);    // single band, full width
+    prof_blit("COPY  wide",      8'd0, FULL_W,  16'd48);   // multi-band -> chunk/flush overhead
+    prof_blit("ALPHA wide",      8'd2, FULL_W,  16'd48);
+    prof_blit("PALPHA wide",     8'd3, FULL_W,  16'd48);
     // Sprite-shaped cases: per-span fixed overhead vs body.
     prof_blit("COPY  sprite",    8'd0, 16'd64,  16'd64);
     prof_blit("COPY  small",     8'd0, 16'd16,  16'd16);   // fixed-overhead dominated
     prof_blit("COPY  tall",     8'd0, 16'd16,  16'd128);   // many chunks, thin
     // FILL (no source fetch) — isolates band-load + composite + write-back.
-    prof_fill("FILL  wide",      16'd320, 16'd48, 16'hF800);
+    prof_fill("FILL  wide",      FULL_W,  16'd48, 16'hF800);
     prof_fill("FILL  sprite",    16'd64,  16'd64, 16'hF800);
 
     $display("==================================================================");

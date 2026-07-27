@@ -16,7 +16,8 @@
  *  [app-surface render target, step 1] MIRROR of the refmodel golden
  *  (mister-fpga-blitter/refmodel/blt_tri.c @ c0851d1): blt_raster_tri gained a
  *  6th `surface` param; when BLT_F_SRC_SURFACE is set the texel is sampled from
- *  the app-surface buffer (fixed 320x240 extent) instead of the SDRAM heap. This
+ *  the app-surface buffer (fixed BLT_FB_WIDTH x BLT_FB_HEIGHT extent — 288x216
+ *  as of the native-288x216 contract) instead of the SDRAM heap. This
  *  file is kept BIT-IDENTICAL to that refmodel copy so the RTL golden agrees.
  *
  *  Copyright (C) 2026 — GPL-3.0 (matches solarus-mister/fpga).

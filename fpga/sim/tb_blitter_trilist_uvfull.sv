@@ -115,8 +115,8 @@ module tb_blitter_trilist_uvfull;
     end
   end
 
-  // ── golden framebuffer (76800 RGB565 pixels, index = y*320+x) ────────────────
-  reg [15:0] exp [0:320*240-1];
+  // ── golden framebuffer (`FB_PIXELS RGB565 pixels, index = y*`FB_W+x) ────────────────
+  reg [15:0] exp [0:`FB_PIXELS-1];
 
   integer x,y,idx,bad,ncov;
   reg [15:0] got, e;
@@ -151,23 +151,23 @@ module tb_blitter_trilist_uvfull;
     // (tri - texwait) is memory-independent and should track the device's ~41 cyc/px. Use
     // this as the iteration metric while pipelining the rasterizer toward 1 px/cyc.
     ncov=0;
-    for (y=0;y<240;y=y+1) for (x=0;x<320;x=x+1) if (exp[y*320+x]!==exp[0]) ncov=ncov+1;
+    for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) if (exp[y*`FB_W+x]!==exp[0]) ncov=ncov+1;
     $display("=== PERF tri=%0d texwait=%0d dpath=%0d covered_px=%0d | dpath_cyc/px=%0d ===",
              blt.perf_tri_cyc, blt.perf_texwait_cyc, blt.perf_tri_cyc-blt.perf_texwait_cyc,
              ncov, (ncov>0)?((blt.perf_tri_cyc-blt.perf_texwait_cyc)/ncov):0);
 
     bad=0;
-    for (y=0;y<240;y=y+1) for (x=0;x<320;x=x+1) begin
-      idx = y*80 + (x>>2);
+    for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin
+      idx = y*`FB_STRIDE_QW + (x>>2);
       got = ((x&3)==0) ? fbram.bank0[idx] : ((x&3)==1) ? fbram.bank1[idx] :
             ((x&3)==2) ? fbram.bank2[idx] : fbram.bank3[idx];
-      e   = exp[y*320+x];
+      e   = exp[y*`FB_W+x];
       if (!chan_ok(got,e)) begin
         bad=bad+1;
         if (bad<=20) $display("  MISMATCH (%0d,%0d): got %04h exp %04h", x,y,got,e);
       end
     end
-    $display("=== bad pixels = %0d / %0d ===", bad, 320*240);
+    $display("=== bad pixels = %0d / %0d ===", bad, `FB_PIXELS);
     if (mem[32'h200005][31:0]==mem[32'h200000][31:0] && bad==0) $display("RESULT: PASS");
     else $display("RESULT: FAIL (bad=%0d)", bad);
     $finish;

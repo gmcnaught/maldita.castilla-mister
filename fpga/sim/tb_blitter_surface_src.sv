@@ -3,11 +3,11 @@
 // Backdoor-loads a known image into comp_fbram's off-screen surface bank, then submits
 // a CLEAR(blue) + a fullscreen TRILIST carrying BLT_F_SRC_SURFACE (+BLEND_COPY) targeting
 // WORK, and diffs the ENTIRE composited WORK bank against vectors/tri_surface_exp.hex
-// (76800 RGB565 px) within +-1 LSB per channel.
+// (`FB_PIXELS RGB565 px) within +-1 LSB per channel.
 //
 // The scene (vectors/tri_surface_*.hex, from gen_tri_golden.c) uses a fullscreen quad
 // whose UV == position, so destination pixel (px,py) samples surface texel (px+1,py+1)
-// (the rasterizer's existing +1 sample-point convention), clamped to the fixed 320x240
+// (the rasterizer's existing +1 sample-point convention), clamped to the fixed `FB_W x `FB_H (288x216)
 // surface extent. The golden (blt_raster_tri, 6-arg surface path) is bit-exact to the
 // engine reference; this proves the RTL surface texel-fetch matches it.
 `timescale 1ns/1ps
@@ -80,8 +80,8 @@ module tb_blitter_surface_src;
   end
 
   // ── golden framebuffer + surface source image ────────────────────────────────
-  reg [15:0] exp     [0:320*240-1];
-  reg [15:0] surfimg [0:320*240-1];
+  reg [15:0] exp     [0:`FB_PIXELS-1];
+  reg [15:0] surfimg [0:`FB_PIXELS-1];
 
   integer x,y,idx,bad,sidx;
   reg [15:0] got, e;
@@ -101,13 +101,13 @@ module tb_blitter_surface_src;
     $readmemh("vectors/tri_surface_exp.hex", exp);
     $readmemh("vectors/tri_surface_surf.hex", surfimg);
     // backdoor-load the surface bank with the golden's surface image (linear -> qword/lane)
-    for (y=0;y<240;y=y+1) for (x=0;x<320;x=x+1) begin
-      sidx = y*80 + (x>>2);
+    for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin
+      sidx = y*`FB_STRIDE_QW + (x>>2);
       case (x&3)
-        2'd0: fbram.surf_bank0[sidx] = surfimg[y*320+x];
-        2'd1: fbram.surf_bank1[sidx] = surfimg[y*320+x];
-        2'd2: fbram.surf_bank2[sidx] = surfimg[y*320+x];
-        2'd3: fbram.surf_bank3[sidx] = surfimg[y*320+x];
+        2'd0: fbram.surf_bank0[sidx] = surfimg[y*`FB_W+x];
+        2'd1: fbram.surf_bank1[sidx] = surfimg[y*`FB_W+x];
+        2'd2: fbram.surf_bank2[sidx] = surfimg[y*`FB_W+x];
+        2'd3: fbram.surf_bank3[sidx] = surfimg[y*`FB_W+x];
       endcase
     end
   end
@@ -121,17 +121,17 @@ module tb_blitter_surface_src;
     $display("=== done_seq=%0d submit=%0d (to=%0d) ===", mem[32'h200005][31:0], mem[32'h200000][31:0], to);
 
     bad=0;
-    for (y=0;y<240;y=y+1) for (x=0;x<320;x=x+1) begin
-      idx = y*80 + (x>>2);
+    for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin
+      idx = y*`FB_STRIDE_QW + (x>>2);
       got = ((x&3)==0) ? fbram.bank0[idx] : ((x&3)==1) ? fbram.bank1[idx] :
             ((x&3)==2) ? fbram.bank2[idx] : fbram.bank3[idx];
-      e   = exp[y*320+x];
+      e   = exp[y*`FB_W+x];
       if (!chan_ok(got,e)) begin
         bad=bad+1;
         if (bad<=20) $display("  MISMATCH (%0d,%0d): got %04h exp %04h", x,y,got,e);
       end
     end
-    $display("=== bad pixels = %0d / %0d ===", bad, 320*240);
+    $display("=== bad pixels = %0d / %0d ===", bad, `FB_PIXELS);
     if (mem[32'h200005][31:0]==mem[32'h200000][31:0] && bad==0) $display("RESULT: PASS");
     else $display("RESULT: FAIL (bad=%0d)", bad);
     $finish;
