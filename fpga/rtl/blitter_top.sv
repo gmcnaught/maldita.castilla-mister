@@ -1218,11 +1218,18 @@ module blitter_top #(
             // wide 96-bit W*recip rounding here in one cycle — that chain was the
             // reported worst path (mul_v[40] -> tri_p0_addr, -5.576 ns).
             A_MUL: begin
-                // texel coords (u12.4) then nearest-texel with clamp
+                // texel coords (u12.4) then nearest-texel with clamp.
+                // FLOOR (plain >>>4), not +8 round: the interpolant is sampled
+                // at pixel centres so it already carries the destination's
+                // +half-pixel; the old +8 landed one texel down-right of GL/SW
+                // nearest on every 1:1 corner-UV draw (device-visible as
+                // mangled glyph text, 2026-07-26). MUST match refmodel
+                // blt_tri.c tex_nearest/tex_nearest_surface. Also drops one
+                // 64-bit add from the texel-address path.
                 rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
                 rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
-                itu   = (rnd_u + 64'sd8) >>> 4;
-                itv   = (rnd_v + 64'sd8) >>> 4;
+                itu   = rnd_u >>> 4;
+                itv   = rnd_v >>> 4;
                 // [app-surface v1] clamp bound: for a surface source the texel extent is the
                 // FIXED 320x240 surface (c_src_x/c_src_y are NOT consulted — they may be 0),
                 // matching the refmodel tex_nearest_surface; else the command's tex_w/tex_h.
