@@ -1014,8 +1014,8 @@ wire [7:0] comp_v = (cos_g >= rnd_c) ? {cos_g - rnd_c, 2'b00} : 8'd0;
 // The custom openbor_video_timing (exact Genesis H40) + openbor_video_reader read the DDR3
 // double-buffer that comp_fb_dma writes and drive VGA_* directly (VGA_SCALER=0 -> video_mixer/
 // analog, the timing the TV syncs to). We instantiate the timing + reader DIRECTLY (NOT
-// openbor_video_top) — its audio/ioctl HPS-I/O is DEFERRED (tied off; SCANOUT_ONLY
-// gates the reader's out-of-region audio-ring DDR path). joystick_0/1 are LIVE
+// openbor_video_top) — its audio HPS-I/O is LIVE (at absolute 0x3A ring addresses), ioctl is
+// DEFERRED (tied off). joystick_0/1 are LIVE
 // ([joy-ddr-writeback]): the reader publishes them to DDR +0x008/+0x018 each frame,
 // the OpenBOR-contract input path the engine reads. The reader's ddr_* master is the
 // rd_ddr_* side of the rdr time-share mux above.

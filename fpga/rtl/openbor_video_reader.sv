@@ -42,9 +42,9 @@ module openbor_video_reader #(
     // (0x3BF40000) so the framebuffer lives above the host texture heap, disjoint from
     // gmloader's 0x3A region. CTRL @ base, BUF0 @ base+8, BUF1 @ base+0x8008 stay relative.
     parameter [28:0] FB_QW_BASE   = 29'h07400000,
-    // SCANOUT_ONLY=1 gates the deferred HPS-side audio-ring DDR path (its ring lives at
-    // base+0xD0000, which falls OUTSIDE the 16 MiB window once repointed). Scanout + the
-    // in-region joystick/cart writes are unaffected.
+    // SCANOUT_ONLY=1 gates the ioctl/cart path and (in ship builds) the vsync writeback.
+    // The audio-ring DDR path is LIVE (its addresses are absolute: 0x3A000030/38/0x3A0D0000,
+    // independent of FB_QW_BASE). Joystick writes run in both SCANOUT_ONLY and fabric builds.
     parameter        SCANOUT_ONLY = 1'b0
 )(
     // DDR3 Avalon-MM master
@@ -610,9 +610,9 @@ always @(posedge ddr_clk) begin
                     // (bytes 0x008/0x018/0x020/0x028) are the OpenBOR-contract input path:
                     // the engine reads them from /dev/mem (same mechanism as OpenBOR_7533 /
                     // sonic-mania). Cost: 4 extra 1-qword DDR writes per frame — negligible
-                    // vs the ~15552-qword scanout copy. SCANOUT_ONLY still gates the audio
-                    // ring, cart, and (in ship builds) the vsync writeback: ST_WRITE_JOY3
-                    // routes back to ST_POLL_CTRL for the SCANOUT_ONLY ship path.
+                    // vs the ~15552-qword scanout copy. SCANOUT_ONLY still gates the cart
+                    // and (in ship builds) the vsync writeback: ST_WRITE_JOY3 routes back to
+                    // ST_POLL_CTRL for the SCANOUT_ONLY ship path.
                     state <= ST_WRITE_JOY0;
                 end
                 else if (cart_write_pending)
