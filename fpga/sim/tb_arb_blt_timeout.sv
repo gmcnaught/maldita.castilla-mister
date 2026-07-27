@@ -1,18 +1,22 @@
-// tb_arb_blt_timeout.sv — bounded-borrow (lost-beat) liveness for ddr_blitter_arb.
+// tb_arb_blt_timeout.sv — bounded-borrow liveness for ddr_blitter_arb (iter 7).
 //
-// Device evidence 2026-07-24/26: the arbiter parks in G_BLT_RD when a blitter
-// read's return beat is lost (mis-steered/consumed elsewhere). That state gates
-// ddram_rd/we off, so no master can issue the command whose beat would exit it:
-// escape-free deadlock -> rdr_busy stuck -> comp_fb_dma stalls -> fb_dma_busy
-// stuck -> blitter S_SNAP_DRAIN park (the recurring ~430-frame stalls).
+// REWRITTEN for the owner-FIFO contract (2026-07-26). The previous version
+// modeled a blitter that HOLDS blt_rd through the wait and asserted a RETRY
+// (a second read command) after blt_abort. The real blitter (blitter_top
+// S_RD_WAIT) drops bm_rd once the command is accepted, so that retry never
+// existed on hardware — and re-issuing while the original response is still
+// in flight would create a duplicate response anyway. The iter-7 contract:
 //
-//   RED  (today): DDR model swallows the first blitter read's beat -> arbiter
-//                 sits in G_BLT_RD forever -> FAIL.
-//   GREEN (fix):  BLT_QUIET_MAX bounded exit -> arbiter returns to G_READER,
-//                 re-grants the still-asserted blt_rd (retry, reads idempotent),
-//                 the retry's beat completes the blitter, and a subsequent
-//                 reader burst is served in full -> PASS.
-// Also covers the blt_burstcnt==0 arming guard (read AND write).
+//   LATE beat  (device event): blt_abort releases only the GRANT — the
+//              expectation stays queued, the late beat still routes to the
+//              blitter, and the reader is served meanwhile. No retry.
+//   LOST beat  (pathological; boot-time bridge-down): the queue head sticks;
+//              after FLUSH_QUIET_MAX beat-less cycles the arbiter flushes all
+//              expectations and returns to G_READER so the READER regains
+//              service. (The blitter stays parked — it has no retry — but one
+//              wedged master beats two.)
+//   burstcnt=0 guards: read and write with burstcnt=0 are armed as 1 beat,
+//              no deadlock (unchanged from iter 6).
 `timescale 1ns/1ps
 `default_nettype none
 module tb_arb_blt_timeout;
@@ -26,7 +30,8 @@ module tb_arb_blt_timeout;
   wire [7:0] d_burst; wire [28:0] d_addr; wire d_rd, d_we;
   wire [63:0] d_din; wire [7:0] d_be;
 
-  ddr_blitter_arb #(.ENABLE(1'b1)) arb(.clk(clk),.reset(reset),
+  // small flush window so the lost-beat phase runs in sim time
+  ddr_blitter_arb #(.ENABLE(1'b1), .FLUSH_QUIET_MAX(20'd3000)) arb(.clk(clk),.reset(reset),
     .rdr_burstcnt(r_burst),.rdr_addr(r_addr),.rdr_rd(r_rd),.rdr_din(r_din),.rdr_be(r_be),.rdr_we(r_we),
     .rdr_busy(r_busy),.rdr_grant(r_grant),
     .blt_burstcnt(b_burst),.blt_addr(b_addr),.blt_rd(b_rd),.blt_din(b_din),.blt_be(b_be),.blt_we(b_we),
@@ -34,103 +39,132 @@ module tb_arb_blt_timeout;
     .ddram_busy(ddr_busy),.ddram_dout_ready(ddr_dready),
     .ddram_burstcnt(d_burst),.ddram_addr(d_addr),.ddram_rd(d_rd),.ddram_din(d_din),.ddram_be(d_be),.ddram_we(d_we));
 
-  // Behavioral DDR: accepts one read, latency 3, streams beats. `swallow` makes it
-  // accept the NEXT read command but return ZERO beats (the lost-beat event).
-  reg swallow=0;
-  reg [7:0] beats_left=0; reg [3:0] lat_left=0;
-  integer blt_beats=0, rdr_beats=0, cmds_seen=0;
+  // behavioral f2h: in-order response queue, per-command latency; `swallow`
+  // eats the NEXT command (accepted, zero beats ever = the LOST-beat event).
+  reg swallow=0; reg [15:0] next_lat=3;
+  reg [7:0]  q_beats [0:7]; reg [15:0] q_lat [0:7]; reg q_eat [0:7];
+  reg [2:0]  q_wr, q_rd;
+  wire q_empty = (q_wr == q_rd);
+  integer cmds_seen = 0;
+  reg [7:0] cur_left=0; reg [15:0] cur_lat=0; reg cur_on=0;
   always @(posedge clk) begin
     ddr_dready <= 1'b0;
-    if (reset) begin ddr_busy<=0; beats_left<=0; lat_left<=0; end
-    else if (!ddr_busy) begin
-      if (d_rd) begin
+    if (reset) begin q_wr<=0; q_rd<=0; cur_on<=0; cur_left<=0; end
+    else begin
+      if (d_rd && !ddr_busy) begin
+        q_beats[q_wr] <= d_burst; q_lat[q_wr] <= next_lat; q_eat[q_wr] <= swallow;
+        swallow <= 0;
+        q_wr <= q_wr + 3'd1;
         cmds_seen = cmds_seen + 1;
-        if (swallow) begin swallow<=0; ddr_busy<=0; end       // command eaten, no beats ever
-        else begin beats_left<=d_burst; lat_left<=4'd3; ddr_busy<=1; end
       end
-    end else if (lat_left != 0) lat_left <= lat_left - 4'd1;
-    else if (beats_left != 0) begin
-      ddr_dready <= 1'b1; ddr_dout <= 64'hFEED_0000 + beats_left;
-      beats_left <= beats_left - 8'd1;
-      if (beats_left == 8'd1) ddr_busy <= 1'b0;
+      if (!cur_on && !q_empty) begin
+        if (q_eat[q_rd]) q_rd <= q_rd + 3'd1;   // command eaten: no beats, ever
+        else begin
+          cur_left <= q_beats[q_rd]; cur_lat <= q_lat[q_rd];
+          q_rd <= q_rd + 3'd1; cur_on <= 1'b1;
+        end
+      end else if (cur_on) begin
+        if (cur_lat != 0) cur_lat <= cur_lat - 16'd1;
+        else if (cur_left != 0) begin
+          ddr_dready <= 1'b1;
+          ddr_dout   <= 64'hFEED_0000_0000_0000 + {56'd0, cur_left};
+          cur_left   <= cur_left - 8'd1;
+          if (cur_left == 8'd1) cur_on <= 1'b0;
+        end
+      end
     end
   end
+
+  integer blt_beats=0, rdr_beats=0;
   always @(posedge clk) if (ddr_dready) begin
     if (b_grant) blt_beats = blt_beats + 1;
     if (r_grant) rdr_beats = rdr_beats + 1;
   end
 
-  integer errors=0, waitc;
+  integer errors=0, waitc, mark;
   initial begin
     repeat(4) @(posedge clk); reset<=0; repeat(2) @(posedge clk);
 
-    // ── Phase 1: lost-beat read. Model the real blitter: hold blt_rd through the wait.
-    swallow<=1;
+    // ── Phase 1: LATE beat. blt 1-beat read, response 1500 cyc late
+    //    (> BLT_QUIET_MAX=1024). Real-blitter model: b_rd drops at accept. ────
+    next_lat = 16'd1500;
     b_burst<=8'd1; b_addr<=29'h100; b_rd<=1;
-    // wait for the (doomed) command accept
-    waitc=0; while(!(arb.state==3'd1 && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
+    waitc=0;
+    while (!(d_rd && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
       if (waitc>200) begin $display("RESULT: FAIL (blt cmd never accepted)"); $finish; end end
-    // arbiter is now headed into G_BLT_RD with no beat ever coming.
-    // GREEN: bounded exit + retry completes within ~BLT_QUIET_MAX + latency slack.
-    waitc=0; while(blt_beats==0 && waitc<5000) begin @(posedge clk); waitc=waitc+1; end
-    if (blt_beats==0) begin
-      errors=errors+1;
-      $display("FAIL: blitter beat never arrived (arb.state=%0d, parked %0d cyc) — G_BLT_RD unbounded", arb.state, waitc);
-    end
-    // the retry claim, made direct: exactly 2 read commands issued to the DDR model
-    // (the swallowed original + the re-issued retry) — not zero, not a third phantom.
-    if (cmds_seen != 2) begin
-      errors=errors+1;
-      $display("FAIL: expected 2 read commands (swallowed + retry), saw %0d", cmds_seen);
-    end
     b_rd<=0;
-    repeat(8) @(posedge clk);
-    if (arb.state != 3'd0) begin errors=errors+1; $display("FAIL: arbiter not back in G_READER (state=%0d)", arb.state); end
+    // grant must be released by the abort well before the beat arrives...
+    repeat(1200) @(posedge clk);
+    if (arb.state != 3'd0) begin errors=errors+1;
+      $display("FAIL: grant not released after abort (state=%0d)", arb.state); end
+    // ...and the late beat must still reach the BLITTER (expectation kept).
+    waitc=0;
+    while (blt_beats==0 && waitc<1000) begin @(posedge clk); waitc=waitc+1; end
+    if (blt_beats != 1) begin errors=errors+1;
+      $display("FAIL: late blitter beat not delivered (blt_beats=%0d)", blt_beats); end
+    if (cmds_seen != 1) begin errors=errors+1;
+      $display("FAIL: %0d read commands (want exactly 1: no phantom retry)", cmds_seen); end
 
-    // ── Phase 2: reader service after the event — 4-beat burst must fully return.
-    waitc=0; while(r_busy) begin @(posedge clk); waitc=waitc+1;
-      if (waitc>5000) begin $display("RESULT: FAIL (reader locked out post-abort)"); $finish; end end
-    r_addr<=29'h200; r_rd<=1; @(posedge clk);
-    while(!(r_grant && !ddr_busy)) @(posedge clk);
+    // ── Phase 2: reader service after the event — 4-beat burst returns whole. ─
+    next_lat = 16'd3;
+    mark = rdr_beats;
+    r_burst<=8'd4; r_addr<=29'h200; r_rd<=1;
+    waitc=0;
+    while (!(d_rd && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
+      if (waitc>200) begin $display("RESULT: FAIL (rdr cmd never accepted)"); $finish; end end
     r_rd<=0;
-    waitc=0; while(rdr_beats<4 && waitc<5000) begin @(posedge clk); waitc=waitc+1; end
-    if (rdr_beats!=4) begin errors=errors+1; $display("FAIL: reader got %0d/4 beats", rdr_beats); end
+    waitc=0;
+    while ((rdr_beats-mark)<4 && waitc<500) begin @(posedge clk); waitc=waitc+1; end
+    if (rdr_beats-mark != 4) begin errors=errors+1;
+      $display("FAIL: reader burst after abort returned %0d/4 beats", rdr_beats-mark); end
 
-    // ── Phase 3: blt_burstcnt==0 guard — read then write must both complete, not deadlock.
-    blt_beats=0;
-    b_burst<=8'd0; b_addr<=29'h140; b_rd<=1;      // pathological burstcnt=0 read
-    waitc=0; while(blt_beats==0 && waitc<5000) begin @(posedge clk); waitc=waitc+1; end
+    // ── Phase 3: LOST beat -> deep flush restores the arbiter + reader. ──────
+    swallow<=1; next_lat=16'd3;
+    b_addr<=29'h300; b_rd<=1;
+    waitc=0;
+    while (!(d_rd && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
+      if (waitc>2200) begin $display("RESULT: FAIL (lost-beat cmd never accepted)"); $finish; end end
     b_rd<=0;
-    if (blt_beats==0) begin errors=errors+1; $display("FAIL: burstcnt=0 read deadlocked"); end
-    repeat(8) @(posedge clk);
-    if (arb.state != 3'd0) begin errors=errors+1; $display("FAIL: state=%0d after burstcnt=0 read", arb.state); end
-    // Load-bearing bound: guarded, the 1-beat shortcut takes G_BLT->G_READER in a
-    // single cycle after grant. Unguarded, blt_burstcnt-1 underflows blt_out to 255
-    // and (needing blt_out==1 to exit G_BLT_WR) drains ~254 cycles before completing
-    // (this DDR model never asserts ddram_busy on writes, so nothing else stalls it) —
-    // well inside the 5000-cycle timeout, so an unbounded wait alone can't catch the
-    // underflow. Bound the grant->drain span tightly instead.
-    b_burst<=8'd0; b_addr<=29'h180; b_din<=64'hCAFE; b_we<=1;   // burstcnt=0 write
+    // wait past FLUSH_QUIET_MAX(3000)+slack: expectations flushed, G_READER.
+    repeat(3500) @(posedge clk);
+    if (arb.state != 3'd0) begin errors=errors+1;
+      $display("FAIL: not in G_READER after lost-beat flush (state=%0d)", arb.state); end
+    mark = rdr_beats;
+    r_addr<=29'h400; r_rd<=1;
     waitc=0;
-    while (arb.state != 3'd1) begin                  // wait for the write to be granted (G_BLT)
-      @(posedge clk); waitc=waitc+1;
-      if (waitc>200) begin $display("RESULT: FAIL (burstcnt=0 write never granted)"); $finish; end
-    end
+    while (!(d_rd && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
+      if (waitc>200) begin $display("RESULT: FAIL (post-flush rdr cmd never accepted)"); $finish; end end
+    r_rd<=0;
     waitc=0;
-    while (arb.state != 3'd0) begin                  // measure cycles to drain back to G_READER
-      @(posedge clk); waitc=waitc+1;
-      if (waitc>5000) begin $display("RESULT: FAIL (burstcnt=0 write deadlocked, state=%0d)", arb.state); $finish; end
-    end
-    b_we<=0;
-    if (waitc > 10) begin
-      errors=errors+1;
-      $display("FAIL: burstcnt=0 write drained in %0d cycles (>10) — unguarded 0-1 underflow (blt_out=255) not caught", waitc);
-    end
+    while ((rdr_beats-mark)<4 && waitc<500) begin @(posedge clk); waitc=waitc+1; end
+    if (rdr_beats-mark != 4) begin errors=errors+1;
+      $display("FAIL: reader burst after flush returned %0d/4 beats", rdr_beats-mark); end
 
-    if (errors==0) $display("RESULT: PASS (bounded borrow: lost beat retried, reader restored, burstcnt=0 guarded)");
-    else           $display("RESULT: FAIL (%0d errors)", errors);
+    // ── Phase 4: burstcnt=0 arming guards (read, then write). ────────────────
+    mark = blt_beats;
+    b_burst<=8'd0; b_addr<=29'h500; b_rd<=1;
+    waitc=0;
+    while (!(d_rd && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
+      if (waitc>500) begin $display("RESULT: FAIL (burst0 read never accepted)"); $finish; end end
+    b_rd<=0;
+    waitc=0;
+    while ((blt_beats-mark)<1 && waitc<500) begin @(posedge clk); waitc=waitc+1; end
+    if (blt_beats-mark != 1) begin errors=errors+1;
+      $display("FAIL: burstcnt=0 read deadlocked"); end
+    b_burst<=8'd0; b_addr<=29'h600; b_we<=1;
+    waitc=0;
+    while (!(d_we && !ddr_busy)) begin @(posedge clk); waitc=waitc+1;
+      if (waitc>500) begin errors=errors+1; $display("FAIL: burstcnt=0 write never granted"); waitc=0; end end
+    b_we<=0;
+    repeat(8) @(posedge clk);
+    if (arb.state != 3'd0) begin errors=errors+1;
+      $display("FAIL: arbiter not back in G_READER (state=%0d)", arb.state); end
+
+    if (errors == 0) $display("RESULT: PASS");
+    else             $display("RESULT: FAIL (%0d errors)", errors);
     $finish;
   end
-  initial begin #2000000 $display("RESULT: FAIL (timeout)"); $finish; end
+
+  initial begin #400000; $display("RESULT: FAIL (timeout)"); $finish; end
 endmodule
 `default_nettype wire
