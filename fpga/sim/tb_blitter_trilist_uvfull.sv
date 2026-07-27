@@ -162,7 +162,16 @@ module tb_blitter_trilist_uvfull;
       got = ((x&3)==0) ? fbram.bank0[idx] : ((x&3)==1) ? fbram.bank1[idx] :
             ((x&3)==2) ? fbram.bank2[idx] : fbram.bank3[idx];
       e   = exp[y*`FB_W+x];
-      if (!chan_ok(got,e)) begin
+      // Golden-short trap: an entry past the end of the loaded vectors/*.hex reads
+      // back x; x propagates through chan_ok and Verilog treats the resulting x as
+      // FALSE, so the pixel would be silently NOT compared. That is exactly how this
+      // bench passed vacuously before the geometry root landed — if FB_W/FB_H move
+      // without regenerating vectors, fail loudly instead of re-opening the hole.
+      if (e === 16'hxxxx) begin
+        bad=bad+1;
+        if (bad<=20) $display("  GOLDEN SHORT at (%0d,%0d) — vectors not regenerated for this canvas?", x,y);
+      end
+      else if (!chan_ok(got,e)) begin
         bad=bad+1;
         if (bad<=20) $display("  MISMATCH (%0d,%0d): got %04h exp %04h", x,y,got,e);
       end

@@ -163,8 +163,21 @@ module tb_blitter_fill_watchdog;
     // stub gives P_SRC a fixed low latency, so texwait is small here; the DATAPATH cyc/px
     // (tri - texwait) is memory-independent and should track the device's ~41 cyc/px. Use
     // this as the iteration metric while pipelining the rasterizer toward 1 px/cyc.
-    ncov=0;
-    for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) if (exp[y*`FB_W+x]!==exp[0]) ncov=ncov+1;
+    // Golden-short trap: entries past the end of the loaded vectors/*.hex read back x.
+    // This bench does NOT compare bit-exact (see the note below), but it still consumes
+    // the golden as the covered-pixel denominator, and an x entry compares !== against
+    // exp[0] as FALSE — a short golden would silently shrink ncov instead of failing.
+    // If FB_W/FB_H move without regenerating vectors, fail loudly.
+    ncov=0; bad=0;
+    for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin
+      e = exp[y*`FB_W+x];
+      if (e === 16'hxxxx) begin
+        bad=bad+1;
+        if (bad<=20) $display("  GOLDEN SHORT at (%0d,%0d) — vectors not regenerated for this canvas?", x,y);
+      end
+      else if (e!==exp[0]) ncov=ncov+1;
+    end
+    if (bad>0) $display("=== GOLDEN SHORT pixels = %0d / %0d ===", bad, `FB_PIXELS);
     $display("=== PERF tri=%0d texwait=%0d dpath=%0d covered_px=%0d | dpath_cyc/px=%0d ===",
              blt.perf_tri_cyc, blt.perf_texwait_cyc, blt.perf_tri_cyc-blt.perf_texwait_cyc,
              ncov, (ncov>0)?((blt.perf_tri_cyc-blt.perf_texwait_cyc)/ncov):0);
@@ -174,13 +187,13 @@ module tb_blitter_fill_watchdog;
     // (done==submit, no hang). Task 1 Step 3 adds the wd_fire_count==1 assertion.
     // published fire-count = C_STATUS.low[31:8] (0x3B000030 >> 8); OSD bits [1:0] preserved.
     if (mem[32'h200005][31:0]==mem[32'h200000][31:0] && blt.wd_fire_count==24'd1
-        && mem[32'h200006][31:8]==24'd1)
+        && mem[32'h200006][31:8]==24'd1 && bad==0)
       $display("RESULT: PASS (wd_fire_count=%0d published=%0d)",
                blt.wd_fire_count, mem[32'h200006][31:8]);
     else
-      $display("RESULT: FAIL (done=%0d submit=%0d wd_fire_count=%0d published=%0d)",
+      $display("RESULT: FAIL (done=%0d submit=%0d wd_fire_count=%0d published=%0d golden_short=%0d)",
                mem[32'h200005][31:0], mem[32'h200000][31:0],
-               blt.wd_fire_count, mem[32'h200006][31:8]);
+               blt.wd_fire_count, mem[32'h200006][31:8], bad);
     $finish;
   end
   // hard watchdog backstop

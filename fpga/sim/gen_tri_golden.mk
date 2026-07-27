@@ -62,6 +62,12 @@ contract-check:
 	ch=$$(sed -n 's/#define BLT_FB_HEIGHT[[:space:]]*\([0-9]*\).*/\1/p' $(REFMODEL)/blitter_ref.h); \
 	vw=$$(sed -n 's/`define FB_W[[:space:]]*\([0-9]*\).*/\1/p' $(RTLDEFS)); \
 	vh=$$(sed -n 's/`define FB_H[[:space:]]*\([0-9]*\).*/\1/p' $(RTLDEFS)); \
+	if [ -z "$$cw" ] || [ -z "$$vw" ] || [ -z "$$ch" ] || [ -z "$$vh" ]; then \
+	  echo "CONTRACT DIMS: could not extract (c=$$cw x $$ch, v=$$vw x $$vh)"; \
+	  echo "       The \\([0-9]*\\) captures match the EMPTY string, so a root that stops"; \
+	  echo "       being a bare integer would otherwise compare '' == '' and PASS vacuously."; \
+	  exit 1; \
+	fi; \
 	if [ "$$cw" != "$$vw" ] || [ "$$ch" != "$$vh" ]; then \
 	  echo "CONTRACT DIMS MISMATCH: refmodel $$cw x $$ch vs blitter_defs.vh $$vw x $$vh"; exit 1; \
 	fi; echo "contract-check dims OK ($$cw x $$ch)"
