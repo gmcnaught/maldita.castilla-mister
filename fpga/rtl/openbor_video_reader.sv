@@ -509,7 +509,11 @@ always @(posedge ddr_clk) begin
         audio_backoff      <= 20'd0;
         audio_fifo_wr      <= 1'b0;
         audio_fifo_wr_data <= 64'd0;
-        beacon_tick        <= 22'd0;
+        // beacon_tick resets to 1, NOT 0: the pending trigger is tick==0, so a
+        // 0-init would fire the beacon on the first post-reset cycle — inside the
+        // core-load port-bring-up danger window (and, in sim, before the bench
+        // settles). Starting at 1 defers the first fire one full 2^22 period.
+        beacon_tick        <= 22'd1;
         beacon_pending     <= 1'b0;
         beacon_cnt         <= 32'd0;
     end
@@ -645,7 +649,7 @@ always @(posedge ddr_clk) begin
                     ddr_we         <= 1'b1;
                     beacon_cnt     <= beacon_cnt + 32'd1;
                     beacon_pending <= 1'b0;
-                    state          <= ST_IDLE;
+                    state          <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
                 end
             end
 
@@ -789,7 +793,22 @@ always @(posedge ddr_clk) begin
             end
 
             ST_POLL_CTRL: begin
-                if (!ddr_busy) begin
+                // [input fix + wedge probe v5] Service the per-vblank JOY writeback and
+                // the liveness beacon from HERE, not ST_IDLE: once frames stream, the
+                // fetch loop (CHECK_CTRL stale/new branches) cycles POLL->CHECK->READ
+                // without visiting ST_IDLE, so IDLE-anchored work starves. Device 2026-
+                // 07-27: joy words frozen at boot values (the .62 "input death") and the
+                // beacon fired exactly once. POLL_CTRL provably runs every frame (the
+                // ctrl word is seen flipping), so anchor both here. The JOY chain ends
+                // back at ST_POLL_CTRL (SCANOUT_ONLY path), consuming new_frame_pending
+                // — once per display vblank, same contract as before.
+                if (enable_ddr && new_frame_pending) begin
+                    new_frame_pending <= 1'b0;
+                    state <= ST_WRITE_JOY0;
+                end
+                else if (beacon_pending)
+                    state <= ST_BEACON;
+                else if (!ddr_busy) begin
                     ddr_addr     <= CTRL_ADDR;
                     ddr_burstcnt <= 8'd1;
                     ddr_rd       <= 1'b1;
