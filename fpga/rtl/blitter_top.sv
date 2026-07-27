@@ -245,6 +245,9 @@ module blitter_top #(
     // tied idle — the FSM proceeds after SNAP_GUARD cycles instead of wedging. Purely a
     // no-DMA fallback; invisible whenever a DMA engine is present.
     localparam [5:0] SNAP_GUARD = 6'd32;
+    // Framebuffer row stride in qwords, explicitly 16-bit so the row multiplies
+    // below stay single 16x16 DSPs (timing-closed pipeline — do not widen).
+    localparam [15:0] FB_STRIDE_QW16 = `FB_STRIDE_QW;
     reg   [5:0]   snap_guard;
     wire          vs_rise = ~vs_sync[2] & vs_sync[1];
     always @(posedge clk or posedge rst) begin
@@ -511,7 +514,7 @@ module blitter_top #(
     // (NO tq cache / P_SRC): surf_qw_q/lane computed in A_ADDR2, read in B_SURF_*.
     reg          tri_src_surface;
     reg          tri_surf_rd_en; reg [14:0] tri_surf_rd_qw;   // drive comp_fbram surf_rd port
-    reg  [14:0]  surf_qw_q;      // A_ADDR2 surface qword (itv*80 + itu>>2), pushed to the FIFO
+    reg  [14:0]  surf_qw_q;      // A_ADDR2 surface qword (itv*stride + itu>>2), pushed to the FIFO
 
     // ── Lever 1: blitter-local prefetching qword texel cache ────────────────
     // Direct-mapped BRAM of TEXQ_N qwords; slot = qtag[TEXQ_AW-1:0]; a single
@@ -879,7 +882,7 @@ module blitter_top #(
                     c_flags     <= 8'd0;          // no colour-mod / flip / key
                     c_src_off   <= 32'd0; c_src_stride <= 16'd0;
                     c_src_x     <= 16'd0; c_src_y <= 16'd0;
-                    c_w         <= 16'd320; c_h <= 16'd240;
+                    c_w         <= `FB_W; c_h <= `FB_H;
                     c_colorkey  <= 16'd0; c_alpha <= 8'd0;
                     c_color     <= rd_data[15:0]; // clear_color is the FILL colour
                     c_cmod_r    <= 8'd255; c_cmod_g <= 8'd255; c_cmod_b <= 8'd255; // identity
@@ -1231,7 +1234,7 @@ module blitter_top #(
                 itu   = rnd_u >>> 4;
                 itv   = rnd_v >>> 4;
                 // [app-surface v1] clamp bound: for a surface source the texel extent is the
-                // FIXED 320x240 surface (c_src_x/c_src_y are NOT consulted — they may be 0),
+                // FIXED `FB_W x `FB_H surface (c_src_x/c_src_y are NOT consulted — they may be 0),
                 // matching the refmodel tex_nearest_surface; else the command's tex_w/tex_h.
                 tw1r  = tri_src_surface ? (`FB_W - 16'd1) : (c_src_x - 16'd1);
                 th1r  = tri_src_surface ? (`FB_H - 16'd1) : (c_src_y - 16'd1);
@@ -1248,7 +1251,7 @@ module blitter_top #(
                 // comp_fbram destination qword/lane for this pixel (independent of
                 // the texel-address multiply, so it stays here). Uses the dispatched
                 // pixel's snapshot (pxs/pys), since the walk cursor has already moved on.
-                dst_qw_q   <= pys*16'd80 + (pxs>>2);
+                dst_qw_q   <= pys*FB_STRIDE_QW16 + (pxs>>2);
                 dst_lane_q <= pxs[1:0];
                 pa<=A_ADDR;
             end
@@ -1259,9 +1262,10 @@ module blitter_top #(
             // Doing it combinationally into the address add was an ~8.9 ns multiply
             // feeding tri_p0_addr (the -2.0 ns worst path).
             A_ADDR: begin
-                // [app-surface v1] row stride: a surface row is 80 qwords (320 px) wide;
-                // an SDRAM texture row is c_src_stride BYTES. Same registered 16x16 DSP.
-                tex_row <= itv_q[15:0] * (tri_src_surface ? 16'd80 : c_src_stride);
+                // [app-surface v1] row stride: a surface row is `FB_STRIDE_QW qwords
+                // (`FB_W px) wide; an SDRAM texture row is c_src_stride BYTES. Same
+                // registered 16x16 DSP.
+                tex_row <= itv_q[15:0] * (tri_src_surface ? FB_STRIDE_QW16 : c_src_stride);
                 pa<=A_ADDR2;
             end
             // Interpolation stage 3b: texel byte address add + P_SRC read (adds
@@ -1269,8 +1273,8 @@ module blitter_top #(
             // the SDRAM texel-read wait.
             A_ADDR2: begin
                 if (tri_src_surface) begin
-                    // [app-surface v1] surface qword = itv*80 + (itu>>2), lane = itu[1:0].
-                    // tex_row already holds itv*80 (qwords). No SDRAM byte address / P_SRC
+                    // [app-surface v1] surface qword = itv*stride + (itu>>2), lane = itu[1:0].
+                    // tex_row already holds itv*stride (qwords). No SDRAM byte address / P_SRC
                     // read — the texel is a 1-cyc comp_fbram surf_rd hit (B_SURF_*).
                     surf_qw_q  <= tex_row[14:0] + {2'b0, itu_q[14:2]};   // itu>>2
                     tex_lane_q <= itu_q[1:0];

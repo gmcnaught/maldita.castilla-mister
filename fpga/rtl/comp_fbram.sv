@@ -1,7 +1,7 @@
 // comp_fbram.sv — on-chip framebuffer for the FB-in-BRAM compositor.
 //
-// 4 lane-banks × 16-bit × FB_QWORDS (=19200 for 320×240 RGB565).
-//   qword index = y*80 + (x>>2);  lane = x[1:0].
+// 4 lane-banks × 16-bit × FB_QWORDS (=15552 for 288×216 RGB565).
+//   qword index = y*(FB_W/4) + (x>>2);  lane = x[1:0].
 //
 // [DDR-scanout] The on-chip SCAN buffer (sbank0-3) + its snapshot write (snap_*) + scanout
 // read (scan_rd_*) ports are RETIRED: scanout now reads a DDR3 framebuffer written by the
@@ -15,9 +15,10 @@
 //   SURFACE buffer (surf_*):  the off-screen APP-SURFACE render target (app-surface v1).
 // Each bank is a clean 1-write/1-read full-width RAM → M10K.
 `default_nettype none
+`include "blitter_defs.vh"
 module comp_fbram #(
-    parameter integer FB_QWORDS = 19200,   // 320*240/4
-    parameter integer AW        = 15       // ceil(log2(19200)) = 15
+    parameter integer FB_QWORDS = `FB_QWORDS,   // 288*216/4 = 15552
+    parameter integer AW        = 15            // kept at 15 (port widths unchanged)
 )(
     input  wire          clk,
     // composite write: one pixel (one lane) per cycle

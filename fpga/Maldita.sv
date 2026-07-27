@@ -545,7 +545,7 @@ comp_fbram u_fbram (
 // to FB_BYTE_BASE via a DDR write master on the freed arbiter reader slot (rdr_*, below).
 wire        dma_mem_wr;   wire [31:0] dma_mem_addr; wire [7:0] dma_mem_burstcnt;
 wire [63:0] dma_mem_din;  wire [7:0]  dma_mem_be;
-comp_fb_dma #(.FB_QWORDS(19200), .AW(15), .MAW(32)) u_fb_dma (
+comp_fb_dma #(.AW(15), .MAW(32)) u_fb_dma (
 	.clk          (clk_sys),
 	.rst          (RESET),
 	.start        (fb_dma_start),

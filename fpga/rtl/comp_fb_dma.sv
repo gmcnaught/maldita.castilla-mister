@@ -10,7 +10,7 @@
 //   (0) latches wr_target = ~disp_active — the BACK buffer, the one the reader is NOT
 //       currently displaying (device-fix: double-buffer tearing — a free-running toggle could
 //       write the front buffer if the compositor laps the 60 Hz scanout).
-//   (1) bursts WORK qw 0..FB_QWORDS-1 (19200 qwords = 320x240 @ 4 RGB565 px/qword;
+//   (1) bursts WORK qw 0..FB_QWORDS-1 (15552 qwords = 288x216 @ 4 RGB565 px/qword;
 //       lane0 = leftmost) into the BACK buffer:
 //         buf_base = fb_qw_base + 8 (0x40 B)  +  wr_target * 0x8000 (0x40000 B)
 //         → BUF0 @ fb_qw_base+0x40, BUF1 @ fb_qw_base+0x40040  (openbor_video_reader layout),
@@ -31,9 +31,10 @@
 //
 // Copyright (C) 2026 — GPL-3.0
 `default_nettype none
+`include "blitter_defs.vh"
 module comp_fb_dma #(
-    parameter integer FB_QWORDS = 19200,  // 320*240/4
-    parameter integer AW        = 15,     // WORK qword-address width (2^15 > 19200)
+    parameter integer FB_QWORDS = `FB_QWORDS,  // 288*216/4 = 15552
+    parameter integer AW        = 15,     // WORK qword-address width (2^15 > 15552)
     parameter integer MAW       = 32      // DDR mem_* qword-address width (mirrors blitter_top master)
 )(
     input  wire            clk,
@@ -91,7 +92,7 @@ module comp_fb_dma #(
 
     // [wedge probe — SOLARUS_DBG_PROBES] copy-duration instrument. copy_cyc counts cycles
     // busy is held for the CURRENT copy (start -> control-word accepted); peak_copy_cyc is the
-    // saturating max across copies, persistent. A normal copy is ~FB_QWORDS (~19200) cycles;
+    // saturating max across copies, persistent. A normal copy is ~FB_QWORDS (~15552) cycles;
     // a value orders of magnitude larger means comp_fb_dma is STALLING mid-copy on the shared
     // f2h slot (the S_SNAP_DRAIN hard-stall hypothesis) rather than the stall living elsewhere
     // (blitter S_SNAP_WAIT / arbiter). Published into the control qword's otherwise-unused high

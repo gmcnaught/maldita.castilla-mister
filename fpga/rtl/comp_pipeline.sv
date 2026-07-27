@@ -331,14 +331,17 @@ module comp_pipeline (
     P_ADVANCE     = 6'd24;    // post-drain: wait !prefetch_busy, promote pend->serve
   reg [5:0] state;
 
-  // ── span table (max FB_H=240 spans) ─────────────────────────────────────────
+  // ── span table (max FB_H=216 spans) ─────────────────────────────────────────
   // Explicit ramstyle (lower-priority hardening alongside the Task 3
   // LAB-overflow root-cause fix in comp_src_linebuf.sv, same AUTO-inference-
   // fragility class -- these arrays fit clean in the failing build but were
   // flagged as an exposed risk of the same nature, not a confirmed second
   // trigger): don't rely on Quartus's AUTO inference heuristic for these
   // either.
-  localparam MAX_SPANS = 240;
+  localparam MAX_SPANS = `FB_H;    // one span per dst row
+  // Framebuffer row stride in qwords, explicitly 16-bit so the row multiplies
+  // below stay single 16x16 DSPs (same DSP rationale as blitter_top).
+  localparam [15:0] FB_STRIDE_QW16 = `FB_STRIDE_QW;
   (* ramstyle = "no_rw_check, M10K" *) reg [15:0] sp_dst_x [0:MAX_SPANS-1];
   (* ramstyle = "no_rw_check, M10K" *) reg [15:0] sp_dst_y [0:MAX_SPANS-1];
   (* ramstyle = "no_rw_check, M10K" *) reg [15:0] sp_len   [0:MAX_SPANS-1];
@@ -356,7 +359,7 @@ module comp_pipeline (
 
   // span-table single registered READ port. The FSM used to index sp_*[chunk_first+i]
   // combinationally at ~26 sites, forcing the 5 tables into logic (uninferred RAM +
-  // 240:1 read muxes). Route every read through one combinational address (sp_ra_c)
+  // MAX_SPANS:1 read muxes). Route every read through one combinational address (sp_ra_c)
   // feeding registered fields (sp_q_*) so the tables infer as simple-dual-port BRAM;
   // each consumer presents the index one cycle ahead via a P_*_RD state (span setup
   // is not the per-pixel bottleneck). The write port (P_SPAN_COLL @ span_wr) is the
@@ -850,10 +853,10 @@ module comp_pipeline (
                 ? ((gpix0 - {16'd0, pix_k}) - ((gpix_lo >> 2) << 2))
                 : ((gpix0 + {16'd0, pix_k}) - ((gpix_lo >> 2) << 2));
             end
-            // dst RMW read of comp_fbram: qword = cur_dst_y*80 + (x>>2). The whole
+            // dst RMW read of comp_fbram: qword = cur_dst_y*stride + (x>>2). The whole
             // qword (4 lanes) returns; the pixel's lane is selected at FEED.
             fb_rd_en  <= 1'b1;
-            fb_rd_qw  <= 15'(cur_dst_y * 16'd80 + ((cur_dst_x + pix_k) >> 16'd2));
+            fb_rd_qw  <= 15'(cur_dst_y * FB_STRIDE_QW16 + ((cur_dst_x + pix_k) >> 16'd2));
             s1_valid  <= 1'b1;
             s1_cw_x   <= cur_dst_x + pix_k;
             s1_cw_row <= cur_band_row;
@@ -923,12 +926,12 @@ module comp_pipeline (
           end
 
           // ── WRITE-BACK into comp_fbram ──
-          // qword = cur_dst_y*80 + (x>>2), lane = x[1:0]. cur_dst_y is constant for the
+          // qword = cur_dst_y*stride + (x>>2), lane = x[1:0]. cur_dst_y is constant for the
           // whole span (one span = one dst row), so the in-flight write-back pixels all
           // belong to this row — no need to pipe dst_y.
           if (mx_out_valid && cwv_pipe[MIX_LAT] && mx_out_we) begin
             fb_wr_en   <= 1'b1;
-            fb_wr_qw   <= 15'(cur_dst_y * 16'd80 + (cwx_pipe[MIX_LAT] >> 16'd2));
+            fb_wr_qw   <= 15'(cur_dst_y * FB_STRIDE_QW16 + (cwx_pipe[MIX_LAT] >> 16'd2));
             fb_wr_lane <= cwx_pipe[MIX_LAT][1:0];
             fb_wr_pix  <= mx_out_pix;
           end
@@ -953,7 +956,7 @@ module comp_pipeline (
           end
           if (mx_out_valid && cwv_pipe[MIX_LAT] && mx_out_we) begin
             fb_wr_en   <= 1'b1;
-            fb_wr_qw   <= 15'(cur_dst_y * 16'd80 + (cwx_pipe[MIX_LAT] >> 16'd2));
+            fb_wr_qw   <= 15'(cur_dst_y * FB_STRIDE_QW16 + (cwx_pipe[MIX_LAT] >> 16'd2));
             fb_wr_lane <= cwx_pipe[MIX_LAT][1:0];
             fb_wr_pix  <= mx_out_pix;
           end
