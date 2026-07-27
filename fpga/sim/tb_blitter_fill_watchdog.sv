@@ -165,9 +165,12 @@ module tb_blitter_fill_watchdog;
     // this as the iteration metric while pipelining the rasterizer toward 1 px/cyc.
     // Golden-short trap: entries past the end of the loaded vectors/*.hex read back x.
     // This bench does NOT compare bit-exact (see the note below), but it still consumes
-    // the golden as the covered-pixel denominator, and an x entry compares !== against
-    // exp[0] as FALSE — a short golden would silently shrink ncov instead of failing.
-    // If FB_W/FB_H move without regenerating vectors, fail loudly.
+    // the golden as the covered-pixel denominator. `!==` is case-INEQUALITY, so an x
+    // entry compares TRUE against exp[0] — a short golden would silently INFLATE ncov
+    // toward `FB_PIXELS, reporting an artificially LOW dpath_cyc/px rather than failing.
+    // (Contrast the `!chan_ok(...)` benches, where the hazard runs the other way: that
+    // function RETURNS x, `!x` is x, and if() treats it as false, so mismatches vanish.)
+    // Either way, if FB_W/FB_H move without regenerating vectors, fail loudly.
     ncov=0; bad=0;
     for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin
       e = exp[y*`FB_W+x];

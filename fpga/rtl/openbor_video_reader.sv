@@ -29,7 +29,7 @@
 //    0x3A080000             : Cart data buffer (past video buffers)
 //    0x3A0D0000             : Audio ring buffer (64 KiB, 16,384 stereo S16 frames)
 //
-//  Bandwidth: 124,416 bytes x 60fps = 7.1 MB/s (DDR3 can do >1000)
+//  Bandwidth: 124,416 bytes x 60fps = 7.46 MB/s (7.1 MiB/s) (DDR3 can do >1000)
 //
 //  Adapted from MiSTer_PICO-8 by MiSTer Organize
 //  Copyright (C) 2026 MiSTer Organize -- GPL-3.0
@@ -844,8 +844,8 @@ always @(posedge ddr_clk) begin
             end
 
             ST_WAIT_LINE: begin
-                // Collect the 80 burst beats (captured into linebuf in the shared block above,
-                // which increments beat_count on each ddr_dout_ready). The f2h auto-increments
+                // Collect the `FB_STRIDE_QW (72) burst beats (captured into linebuf in the shared
+                // block above, which increments beat_count on each ddr_dout_ready). The f2h auto-increments
                 // the burst address; the reader just counts beats. TIMEOUT_MAX guards a hang.
                 if (beat_count == LINE_BURST[6:0]) begin
                     state <= ST_LINE_DONE;
@@ -1019,8 +1019,8 @@ end
 // -- Line-buffer read port + position-addressed pixel output ----------
 //
 // Read side is anchored to DISPLAY POSITION, not buffer occupancy:
-//   * hcol counts output pixels 0..319, reset at new_line, advanced on ce_pix
-//     within de. word group = hcol[8:2] (0..79), sub-pixel lane = hcol[1:0].
+//   * hcol counts output pixels 0..`FB_W-1 (0..287), reset at new_line, advanced on ce_pix
+//     within de. word group = hcol[8:2] (0..71 = `FB_STRIDE_QW-1), sub-pixel lane = hcol[1:0].
 //   * the buffer for the current display line = vcount[0] (line L -> buf L%2),
 //     which matches the fill (line L written to buf L%2). No swap toggle needed.
 //   * BRAM read has 1 clk_vid latency; ce_pix is ~1-in-8, so lb_q is always
