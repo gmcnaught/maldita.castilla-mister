@@ -7,7 +7,7 @@
 // 0x200000 == DDR byte 0x3B000000). Re-triggering the blitter (bump submit) makes the
 // REAL command list (FILL + 11 PALPHA blits: full-screen cloud bg + 4 clipped cloud
 // tiles + logo/text + END) composite into FB0 through the exact RTL path. We then dump
-// FB0 (320x240 RGB565) to fb0_replay.bin for visual diff against the HW screenshot.
+// FB0 (`FB_W x `FB_H RGB565) to fb0_replay.bin for visual diff against the HW screenshot.
 //
 //   sim FB banded  -> a WRITE-PATH / command bug (debuggable in sim, deterministic)
 //   sim FB clean   -> the on-HW banding is HW-only (timing/electrical), since the exact
@@ -20,7 +20,9 @@
 module tb_comp_replay;
   localparam [28:0] WBASE = 29'h07400000;
   localparam        MEMQW = 32'h240000;             // covers loaded 0x200000..0x240000
-  localparam integer FBW = 320, FBH = 240, ROW_QW = FBW/4, ROW_B = FBW*2;
+  // FB geometry from the root (blitter_defs.vh) — the replay dump must match the
+  // real frame size or the .bin is un-viewable.
+  localparam integer FBW = `FB_W, FBH = `FB_H, ROW_QW = `FB_STRIDE_QW, ROW_B = FBW*2;
 
   reg clk_sys = 0;   always #5 clk_sys   = ~clk_sys;
   reg clk_sdram = 1; always #5 clk_sdram = ~clk_sdram;
@@ -210,7 +212,7 @@ module tb_comp_replay;
       if (settle>2_000_000) begin $display("RESULT: FAIL - coh_busy stuck"); $finish; end end
     $display("flush complete; dumping FB0...");
 
-    // dump FB0 320x240 RGB565 -> fb0_replay.bin (little-endian per pixel)
+    // dump FB0 (FBW x FBH) RGB565 -> fb0_replay.bin (little-endian per pixel)
     fd = $fopen("fb0_replay.bin","wb");
     for (y=0; y<FBH; y=y+1) begin
       for (qw=0; qw<ROW_QW; qw=qw+1) begin

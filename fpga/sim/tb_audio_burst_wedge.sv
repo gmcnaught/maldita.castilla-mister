@@ -14,12 +14,19 @@
 //                 plus a short recovery tail, but NEVER drifts downstream.
 //
 // VERDICT: PASS iff PIXEL-EXACT clean AND starve-zone glitches (non-vacuous)
-//          AND post-recovery lines [104..239] are all pixel-exact (no drift).
+//          AND post-recovery lines [104..`FB_H-1] are all pixel-exact (no drift).
 `timescale 1ns/1ps
 `default_nettype none
 `include "../rtl/vram_defs.vh"
 
 module tb_audio_burst_wedge;
+  // ── FB geometry / scan-line landmarks derived from the root (blitter_defs.vh via
+  // vram_defs.vh) — never retype a dimension. V_FIRST_BLANK is the first vblank
+  // line (V_ACTIVE+1 in the old 240-line build); V_LAST_ACTIVE is the last active
+  // line. Bound through sized localparams, not inlined bare expressions.
+  localparam integer FB_BYTES       = `FB_PIXELS * 2;      // 0x1E600 @288x216
+  localparam [8:0]   V_FIRST_BLANK  = 9'(`FB_H + 1);
+  localparam [8:0]   V_LAST_ACTIVE  = 9'(`FB_H - 1);
   // ---- [#39] audio-burst-wedge regression injection -------------------------
   // The reader's audio-ring DDR read (ST_WAIT_AUDIO_RING) waits for exactly
   // ddr_burstcnt ddr_dout_ready beats with NO timeout. On the shared f2h bus a
@@ -276,10 +283,10 @@ module tb_audio_burst_wedge;
   task seed_fb_sdram;
     begin
       // Clear the FB region first (address range covering both FBs)
-      for (sm_i = (`SDRAM_FB0_BASE >> 1); sm_i < ((`SDRAM_FB1_BASE + 27'h25800) >> 1); sm_i = sm_i + 1)
+      for (sm_i = (`SDRAM_FB0_BASE >> 1); sm_i < ((`SDRAM_FB1_BASE + FB_BYTES) >> 1); sm_i = sm_i + 1)
         sdram_mem[sm_i] = 16'd0;
-      for (yy = 0; yy < 240; yy = yy + 1)
-        for (xx = 0; xx < 320; xx = xx + 1) begin
+      for (yy = 0; yy < `FB_H; yy = yy + 1)
+        for (xx = 0; xx < `FB_W; xx = xx + 1) begin
           b = `SDRAM_FB0_BASE + yy * `SDRAM_FB_STRIDE + xx * 2;
           sdram_mem[b >> 1] = fbpix(yy, xx);
         end
@@ -317,7 +324,7 @@ module tb_audio_burst_wedge;
   reg          chk_enable = 1'b0;
   integer      px_errs    = 0;
   integer      px_checked = 0;
-  integer      line_err [0:239];
+  integer      line_err [0:`FB_H-1];
   reg          pe_ok      = 1'b0;
   integer      starve_zone_errs = 0;   // glitches within the starve+recovery window
   integer      recovered_errs   = 0;   // glitches AFTER recovery -> cumulative drift
@@ -337,7 +344,7 @@ module tb_audio_burst_wedge;
       // ce_pix; the reader's r_out registered this ce_pix carries exactly that
       // position's source pixel (position-addressed, no occupancy coupling).
       if (chk_enable && frame_ready && pv_valid
-          && pv_x < 320 && pv_y < 240) begin
+          && pv_x < `FB_W && pv_y < `FB_H) begin
         exp_pix = fbpix(pv_y, pv_x);
         exp_r   = dec_r(exp_pix);
         exp_g   = dec_g(exp_pix);
@@ -359,7 +366,7 @@ module tb_audio_burst_wedge;
     begin
       px_errs = 0;
       px_checked = 0;
-      for (li = 0; li < 240; li = li + 1) line_err[li] = 0;
+      for (li = 0; li < `FB_H; li = li + 1) line_err[li] = 0;
     end
   endtask
 
@@ -384,7 +391,7 @@ module tb_audio_burst_wedge;
   integer settle;
 
   initial begin
-    for (li = 0; li < 240; li = li + 1) line_err[li] = 0;
+    for (li = 0; li < `FB_H; li = li + 1) line_err[li] = 0;
 
     ddr_busy       = 1'b0;
     ddr_dout       = 64'd0;
@@ -470,17 +477,17 @@ module tb_audio_burst_wedge;
     // frame_ready for ~30 vblanks. So we DON'T re-publish here.
     // Wait for a clean top-of-frame, then enable checking just inside the next
     // active region so we never straddle a publish/preload boundary.
-    wait_for_line_hblank(9'd241);   // settle in vblank, reader fully preloaded
+    wait_for_line_hblank(V_FIRST_BLANK); // settle in vblank, reader fully preloaded
     clear_counters;
     chk_enable = 1'b1;
     for (scan = 0; scan < 3; scan = scan + 1) begin
-      wait_for_line_hblank(9'd239);   // run through one full active region
+      wait_for_line_hblank(V_LAST_ACTIVE); // run through one full active region
       @(posedge clk_vid);
-      wait_for_line_hblank(9'd241);   // and its vblank
+      wait_for_line_hblank(V_FIRST_BLANK); // and its vblank
     end
     chk_enable = 1'b0;
 
-    pe_ok = (px_errs == 0 && px_checked > 200000);
+    pe_ok = (px_errs == 0 && px_checked > (2*`FB_PIXELS));  // ~3 frames scanned; >2 frames' worth
     $display("PIXEL-EXACT: checked=%0d errs=%0d  -> %s",
              px_checked, px_errs, pe_ok ? "PASS" : "FAIL");
 
@@ -503,7 +510,7 @@ module tb_audio_burst_wedge;
 
     // The buffer is static (single publish above); the reader keeps re-displaying
     // it via the stale path. Wait for a clean top-of-frame, then approach line 100.
-    wait_for_line_hblank(9'd241);
+    wait_for_line_hblank(V_FIRST_BLANK);
     wait_for_line_hblank(9'd96);
 
     // Starve from the hblank before line 96 onward, through ~line 100, holding for
@@ -513,19 +520,19 @@ module tb_audio_burst_wedge;
     sdram_starve = 1'b0;
 
     // let the rest of the frame scan out
-    wait_for_line_hblank(9'd239);
+    wait_for_line_hblank(V_LAST_ACTIVE);
     repeat (H_TOTAL*CE_DIV) @(posedge clk_vid);      // ~1 full display line
     chk_enable = 1'b0;
 
     // Starve band starts at line ~97 and runs ~4 lines; allow a short recovery
     // tail. Lines [96 .. 103] = starve+recovery window (glitches expected/allowed);
-    // lines [104 .. 239] = post-recovery (MUST be clean — proves no drift).
+    // lines [104 .. `FB_H-1] = post-recovery (MUST be clean — proves no drift).
     starve_zone_errs = 0;
     recovered_errs   = 0;
     for (li = 96;  li <= 103; li = li + 1) starve_zone_errs = starve_zone_errs + line_err[li];
-    for (li = 104; li <= 239; li = li + 1) recovered_errs   = recovered_errs   + line_err[li];
+    for (li = 104; li < `FB_H; li = li + 1) recovered_errs   = recovered_errs   + line_err[li];
 
-    $display("UNDERFLOW: line[100]=%0d line[101]=%0d line[150]=%0d | starve_zone[96..103]=%0d recovered[104..239]=%0d",
+    $display("UNDERFLOW: line[100]=%0d line[101]=%0d line[150]=%0d | starve_zone[96..103]=%0d recovered[104..FB_H-1]=%0d",
              line_err[100], line_err[101], line_err[150], starve_zone_errs, recovered_errs);
 
     // ===================== VERDICT =========================================

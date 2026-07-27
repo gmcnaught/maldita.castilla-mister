@@ -83,7 +83,7 @@
  *  2. vectors/<scen>_exp.hex — golden framebuffer, ONE RGB565 value per line
  *  ===========================================================================
  *
- *  76800 (= 320*240) lines, pixel-linear order: line index = y*320+x, each
+ *  FB_W*FB_H (= 62208 @ 288x216) lines, pixel-linear order: line index = y*FB_W+x, each
  *  line a 4-hex-digit RGB565 value. Computed by calling blt_raster_tri() --
  *  THE golden math the RTL blt_tri module must reproduce bit-for-bit -- over
  *  the SAME scene onto an all-blue (0x001f) cleared field. That is: this file
@@ -91,10 +91,10 @@
  *  matching exactly what the control block above asks the fabric to do.
  *
  *  comp_fbram itself is addressed as one qword (4 RGB565 lanes) per (y,x>>2):
- *  qword index = y*80+(x>>2), lane = x&3 (see tb_blitter_copy_pipe.sv's `check`
- *  task). The Task-5 testbench is expected to $readmemh this file into a
- *  same-shaped uint16 fb[320*240] array and compare fb[y*320+x] against
- *  fbram.bank{x&3}[y*80+(x>>2)].
+ *  qword index = y*`FB_STRIDE_QW+(x>>2), lane = x&3 (see tb_blitter_copy_pipe.sv's
+ *  `check` task). The Task-5 testbench is expected to $readmemh this file into a
+ *  same-shaped uint16 fb[`FB_PIXELS] array and compare fb[y*`FB_W+x] against
+ *  fbram.bank{x&3}[y*`FB_STRIDE_QW+(x>>2)].
  *
  *  ===========================================================================
  *  Scenarios (argv[1])
@@ -136,8 +136,11 @@
 #define RING_OFF  0x00200008u   /* RING_QW(real)    - WBASE  (== CTRL_OFF+8)           */
 #define SRC_OFF   0x00210000u   /* SRC_QW(real)     - WBASE                            */
 
-#define FB_W  320
-#define FB_H  240
+/* GEOMETRY: taken from the single C-domain root in blitter_ref.h — never retype a
+ * dimension here (native-288x216 single-source rule). gen_tri_golden.mk's
+ * contract-check gates this root against the Verilog root (`FB_W/`FB_H). */
+#define FB_W  BLT_FB_WIDTH
+#define FB_H  BLT_FB_HEIGHT
 #define BLUE  0x001Fu           /* RGB565 blue -- the scene clear color                */
 #define EOFF  0x80u             /* vertex-array byte offset within the SRC heap        */
 #define TEX_OFF 0x100u          /* [tri_uvfull] non-zero texture offset (verts end at 0xE0) */
@@ -307,7 +310,7 @@ static int build(const char *s) {
          * test_surface_src comment). No SDRAM texture: the texel source is the
          * app-surface, backdoor-loaded into the RTL surface bank from surf.hex.
          * The surface is a deterministic per-pixel pattern so the +1 offset and
-         * the fixed 320x240 clamp are both exercised pixel-exactly. */
+         * the fixed FB_W x FB_H clamp are both exercised pixel-exactly. */
         uses_surface = 1;
         for (int y=0;y<FB_H;y++) for (int x=0;x<FB_W;x++)
             surface_img[y*FB_W+x] = (uint16_t)((((x*5)&0x1F)<<11) |
@@ -322,7 +325,7 @@ static int build(const char *s) {
         };
         put_verts(v,6);
         /* tw/th/stride are IGNORED for a surface source (clamp is a fixed
-         * 320x240); pass 0 to prove the RTL does not consult src_x/src_y. */
+         * FB_W x FB_H); pass 0 to prove the RTL does not consult src_x/src_y. */
         set_hdr(BLT_BLEND_COPY, 0,0,0, 0, 255);
         hdr.flags = (uint8_t)BLT_F_SRC_SURFACE;
     } else if (!strcmp(s, "tri_uvfull")) {
@@ -394,7 +397,7 @@ int main(int argc, char **argv) {
     fclose(fe);
 
     /* [app-surface v1] surf.hex: the app-surface texel source, pixel-linear
-     * (line = y*320+x), one RGB565 per line. The testbench $readmemh's this and
+     * (line = y*FB_W+x), one RGB565 per line. The testbench $readmemh's this and
      * backdoor-loads comp_fbram's surface bank so the RTL samples the SAME image. */
     if (uses_surface) {
         char surfpath[256];

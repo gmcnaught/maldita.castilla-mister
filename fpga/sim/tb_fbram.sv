@@ -4,9 +4,10 @@
 // Copyright (C) 2026 — GPL-3.0
 `timescale 1ns/1ps
 `default_nettype none
+`include "blitter_defs.vh"
 module tb_fbram;
   localparam integer AW       = 15;
-  localparam integer NQW      = 16;   // exercise a handful of qwords (full depth = 19200)
+  localparam integer NQW      = 16;   // exercise a handful of qwords (full depth = `FB_QWORDS)
 
   reg clk=0; always #5 clk=~clk;
 
@@ -21,7 +22,7 @@ module tb_fbram;
   // [DDR-scanout] The SCAN buffer + snap_*/scan_rd_* ports are retired; comp_fbram now holds
   // WORK (wr_*/rd_*) + the off-screen SURFACE (surf_*, exercised by tb_surfram). This unit
   // test covers the WORK port only; surf_* left unconnected (its enable gates make z a no-op).
-  comp_fbram #(.FB_QWORDS(19200), .AW(AW)) dut(
+  comp_fbram #(.FB_QWORDS(`FB_QWORDS), .AW(AW)) dut(
     .clk(clk), .wr_en(wr_en), .wr_qw(wr_qw), .wr_lane(wr_lane), .wr_pix(wr_pix),
     .rd_en(rd_en), .rd_qw(rd_qw), .rd_qword(rd_qword));
 

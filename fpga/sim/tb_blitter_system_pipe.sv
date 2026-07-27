@@ -11,6 +11,12 @@
 
 module tb_blitter_system_pipe;
   localparam [28:0] WBASE = 29'h07400000;    // window base; mem index = addr-WBASE
+  // Geometry derived from the FB root (blitter_defs.vh) — never retype a dimension.
+  // Bound through sized localparams (not inlined bare expressions) per the Task 3/4
+  // sizing rule, so the widths the DUT ports see are explicit.
+  localparam integer RD_BURST_QW = `FB_STRIDE_QW;      // one FB row = 72 qwords @288
+  localparam [7:0]   RD_BURST_B  = 8'(`FB_STRIDE_QW);  // reader burst-beat count
+  localparam [15:0]  SD_STRIDE_B = 16'(`FB_W * 2);     // SDRAM FB row stride in BYTES (576 @288)
   localparam        MEMQW = (`SRC_QW - 29'h07400000) + 29'h10000;  // [#52] tracks SRC_QW heap base       // 131072 qwords window
 
   reg clk=0, reset=1; always #5 clk=~clk;
@@ -159,12 +165,12 @@ module tb_blitter_system_pipe;
     .surf_wr_en(sf_wr_en), .surf_wr_qw(sf_wr_qw), .surf_wr_lane(sf_wr_lane), .surf_wr_pix(sf_wr_pix),
     .surf_rd_en(sf_rd_en), .surf_rd_qw(sf_rd_qw), .surf_rd_qword(sf_rd_qword));
 
-  // FB pixel (dx,dy) lives in comp_fbram WORK: qword = dy*80 + (dx>>2), lane = dx[1:0]
-  // (dy*320 contributes 0 to the lane since 320%4==0). Peek the four lane banks.
+  // FB pixel (dx,dy) lives in comp_fbram WORK: qword = dy*`FB_STRIDE_QW + (dx>>2), lane = dx[1:0]
+  // (dy*`FB_W contributes 0 to the lane since `FB_W%4==0). Peek the four lane banks.
   function [15:0] getpx(input integer dx, input integer dy);
     integer qw; integer lane;
     begin
-      qw   = dy*80 + (dx>>2);
+      qw   = dy*`FB_STRIDE_QW + (dx>>2);
       lane = dx & 3;
       getpx = (lane==0) ? fbram.bank0[qw] :
               (lane==1) ? fbram.bank1[qw] :
@@ -264,18 +270,18 @@ module tb_blitter_system_pipe;
       sdword = schip.store[k];
     end
   endfunction
-  // FB pixel (x,y) in SDRAM FB0/FB1: byte = base + (y*320 + x)*2.
+  // FB pixel (x,y) in SDRAM FB0/FB1: byte = base + (y*`FB_W + x)*2.
   function [15:0] sdram_fb0_px(input integer py, input integer px);
-    sdram_fb0_px = sdword(`SDRAM_FB0_BASE + ((py*320+px)*2));
+    sdram_fb0_px = sdword(`SDRAM_FB0_BASE + ((py*`FB_W+px)*2));
   endfunction
   function [15:0] sdram_fb1_px(input integer py, input integer px);
-    sdram_fb1_px = sdword(`SDRAM_FB1_BASE + ((py*320+px)*2));
+    sdram_fb1_px = sdword(`SDRAM_FB1_BASE + ((py*`FB_W+px)*2));
   endfunction
   // direct seed into SDRAM chip store at a FBx pixel (carry-forward pre-seed / dst wipe)
   task seed_sd_px(input [26:0] fb_base, input integer py, input integer px, input [15:0] v);
     reg [26:0] ba; reg [12:0] row; reg [1:0] bank; reg [9:0] col; reg [22:0] k;
     begin
-      ba = fb_base + ((py*320+px)*2);
+      ba = fb_base + ((py*`FB_W+px)*2);
       row = ba[25:13]; bank = ba[12:11]; col = ba[10:1];
       k   = {row[12], row[9:0], bank, col};
       schip.store[k] = v;
@@ -355,16 +361,16 @@ module tb_blitter_system_pipe;
   end
 `endif
 
-  // ---- concurrent reader: periodic 80-beat bursts, check every beat ----
+  // ---- concurrent reader: periodic `FB_STRIDE_QW-beat bursts, check every beat ----
   integer errs=0, nbursts=0, gap, k;
   task rd_burst(input [28:0] base);
     begin
       while(r_busy) @(posedge clk);
-      r_addr<=base; r_burst<=8'd80; r_rd<=1'b1;     // 80-beat BURST read (like the real reader)
+      r_addr<=base; r_burst<=RD_BURST_B; r_rd<=1'b1; // one-FB-row BURST read (like the real reader)
       @(posedge clk);
       gap=0; while(r_busy) begin @(posedge clk); gap=gap+1; if(gap>20000) begin $display("READER STARVED"); $finish; end end
       r_rd<=1'b0;
-      for(k=0;k<80;k=k+1) begin @(posedge clk); while(!(d_dready && r_grant)) @(posedge clk);
+      for(k=0;k<RD_BURST_QW;k=k+1) begin @(posedge clk); while(!(d_dready && r_grant)) @(posedge clk);
         if(d_dout !== mem[(base-WBASE)+k]) errs=errs+1; end
       nbursts=nbursts+1;
     end
@@ -380,7 +386,7 @@ module tb_blitter_system_pipe;
   integer p4_errs=0;            // PHASE4: FB1->FB0 carry-forward errors
   integer p5_errs=0;            // [app-surface v1] PHASE5: full-frame surface render+sample
   // [app-surface v1] golden WORK for the two-pass surface scene (blt_execute of the ring)
-  reg [15:0] sys_exp [0:320*240-1];
+  reg [15:0] sys_exp [0:`FB_PIXELS-1];
   reg phase1_ok=0;
   // Probe: latch if comp_pipeline ever drives the system source-read port while it
   // owns the bus. After Task 5, src_sdram_rd is replaced by p0_rd (the cache-ok
@@ -541,7 +547,7 @@ module tb_blitter_system_pipe;
     fork
       begin : reader_proc
         forever begin
-          rd_burst(29'h07408008 + (nbursts%16)*80);
+          rd_burst(29'h07408008 + (nbursts%16)*RD_BURST_QW);
           repeat(300) @(posedge clk);   // idle gap > QUIET_MAX (like the real reader between scanlines)
         end
       end
@@ -663,9 +669,9 @@ module tb_blitter_system_pipe;
     // qword-aligned at col 8 (single-qword fetch, serve_x=0).
     for (k=0;k<4;k=k+1) seed_fb1_px(5, 8+k, 16'(16'h6000+k));      // FB1 row5 cols 8..11
     for (k=0;k<4;k=k+1) wipe_fb0_px(60, 60+k);                     // clear dest
-    // src_off = SDRAM_FB1_BASE; stride = 320*2 = 640; src_x=8, src_y=5.
+    // src_off = SDRAM_FB1_BASE; stride = `FB_W*2 (576 @288); src_x=8, src_y=5.
     run_pipe_copy_sdram(16'd60, 16'd60, 16'd4, 16'd1,
-                        32'(`SDRAM_FB1_BASE), 16'd640, 16'd8, 16'd5);
+                        32'(`SDRAM_FB1_BASE), SD_STRIDE_B, 16'd8, 16'd5);
     for (k=0;k<4;k=k+1) begin
       $display("P4 carry[%0d,60]=%h (exp %h)", 60+k, dstpix(60+k,60), 16'(16'h6000+k));
       if (dstpix(60+k,60) !== 16'(16'h6000+k)) begin
@@ -719,8 +725,8 @@ module tb_blitter_system_pipe;
         p5_errs=p5_errs+1; $display("  P5 FAIL: frame never completed (hang/timeout)");
       end
       // full-frame diff of WORK (comp_fbram) vs the blt_execute golden
-      for (sy=0; sy<240; sy=sy+1) for (sx=0; sx<320; sx=sx+1) begin
-        sgot = getpx(sx,sy); sexp = sys_exp[sy*320+sx];
+      for (sy=0; sy<`FB_H; sy=sy+1) for (sx=0; sx<`FB_W; sx=sx+1) begin
+        sgot = getpx(sx,sy); sexp = sys_exp[sy*`FB_W+sx];
         if (sgot !== sexp) begin
           p5_errs=p5_errs+1;
           if (p5_errs<=20) $display("  P5 MISMATCH (%0d,%0d): got %04h exp %04h", sx,sy,sgot,sexp);
@@ -728,7 +734,7 @@ module tb_blitter_system_pipe;
       end
       // spot-log the four observable layers
       $display("P5 sprite(0,0)=%h (exp F81F)  surf(50,50)=%h (exp 0410)", getpx(0,0), getpx(50,50));
-      $display("P5 clear(160,0)=%h (exp 001F)  bg(300,10)=%h (exp 07E0)", getpx(160,0), getpx(300,10));
+      $display("P5 clear(160,0)=%h (exp 001F)  bg(280,10)=%h (exp 07E0)", getpx(160,0), getpx(280,10));
       if (p5_errs==0) $display("PHASE5 (surface render+sample): PASS");
       else            $display("PHASE5 (surface render+sample): FAIL (p5_errs=%0d)", p5_errs);
     end

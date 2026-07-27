@@ -14,8 +14,10 @@
 // Copyright (C) 2026 — GPL-3.0
 `default_nettype none
 `timescale 1ns/1ps
+`include "blitter_defs.vh"
 module tb_fb_dma;
-    localparam integer FB_QWORDS = 19200;
+    // Frame size derived from the FB geometry root (blitter_defs.vh) — never retype it.
+    localparam integer FB_QWORDS = `FB_QWORDS;
     localparam integer AW        = 15;
     localparam integer MAW       = 32;
     localparam [28:0]  FB        = 29'd0;

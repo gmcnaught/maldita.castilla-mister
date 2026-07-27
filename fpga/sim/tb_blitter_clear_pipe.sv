@@ -1,7 +1,7 @@
 // tb_blitter_clear_pipe.sv — validate CLEAR-before-list routed through comp_pipeline
 // as a full-screen FILL into comp_fbram [FB-in-BRAM]. The control-block CLEAR flag
 // (bit0) used to drive blitter_top's bm_* SDRAM clear loop; it now dispatches a
-// FILL(clear_color) over the whole 320x240 to comp_pipeline -> comp_fbram.
+// FILL(clear_color) over the whole `FB_W x `FB_H to comp_pipeline -> comp_fbram.
 //
 // TEST 1: CLEAR=blue only (cmd list = END). Whole FB must become blue.
 // TEST 2: CLEAR=red + a FILL(green rect). FB = red everywhere except the rect = green.
@@ -60,7 +60,7 @@ module tb_blitter_clear_pipe;
   integer errs=0, x, y, to, qw, lane;
   function [15:0] getpx(input integer dx, input integer dy);
     begin
-      qw = dy*80 + (dx>>2); lane = dx & 3;
+      qw = dy*`FB_STRIDE_QW + (dx>>2); lane = dx & 3;
       getpx = (lane==0) ? fbram.bank0[qw] : (lane==1) ? fbram.bank1[qw] :
               (lane==2) ? fbram.bank2[qw] : fbram.bank3[qw];
     end
@@ -101,8 +101,8 @@ module tb_blitter_clear_pipe;
     repeat(8) @(posedge clk); rst<=0;
     await_submit(32'd1);
     $display("=== TEST1 CLEAR=blue (to=%0d) ===", to);
-    ckpix(0,0,    BLUE, "t1-tl");   ckpix(319,0,   BLUE, "t1-tr");
-    ckpix(0,239,  BLUE, "t1-bl");   ckpix(319,239, BLUE, "t1-br");
+    ckpix(0,0,    BLUE, "t1-tl");   ckpix(`FB_W-1,0,       BLUE, "t1-tr");
+    ckpix(0,`FB_H-1,      BLUE, "t1-bl");   ckpix(`FB_W-1,`FB_H-1, BLUE, "t1-br");
     ckpix(160,120,BLUE, "t1-mid");  ckpix(7,7,     BLUE, "t1-near");
 
     // ---- TEST 2: CLEAR=red + FILL(green rect 64x48 @ (128,96)) ----
@@ -120,7 +120,7 @@ module tb_blitter_clear_pipe;
     await_submit(32'd2);
     $display("=== TEST2 CLEAR=red + FILL green (to=%0d) ===", to);
     // cleared red everywhere outside the rect
-    ckpix(0,0,    RED, "t2-bg-tl");  ckpix(319,239, RED, "t2-bg-br");
+    ckpix(0,0,    RED, "t2-bg-tl");  ckpix(`FB_W-1,`FB_H-1, RED, "t2-bg-br");
     ckpix(127,96, RED, "t2-bg-left");ckpix(192,96,  RED, "t2-bg-right"); // x=128..191 is the rect
     ckpix(128,95, RED, "t2-bg-above");
     // green inside the rect [128..191] x [96..143]

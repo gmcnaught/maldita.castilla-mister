@@ -12,8 +12,8 @@
 //   c_w/h          — sprite dimensions (unsigned, pixels)
 //   c_flags        — F_HFLIP=8'h01, F_VFLIP=8'h02
 //   span_valid     — one span per visible row
-//   span_dst_x     — clipped destination X (0..319)
-//   span_dst_y     — destination Y (0..239)
+//   span_dst_x     — clipped destination X (0..FB_W-1)
+//   span_dst_y     — destination Y (0..FB_H-1)
 //   span_len       — pixel count for this row
 //   span_src_x0    — flip-resolved source X at start of span
 //   span_src_y     — flip-resolved source Y for this row
@@ -22,6 +22,7 @@
 //                    if fully offscreen); clears all output flags
 
 `default_nettype none
+`include "blitter_defs.vh"
 
 module comp_span_setup (
     input  wire        clk,
@@ -43,9 +44,9 @@ module comp_span_setup (
     output reg         done
 );
 
-    // ---- constants (matching blitter_defs.vh) --------------------------------
-    localparam signed [31:0] FB_W = 32'sd320;
-    localparam signed [31:0] FB_H = 32'sd240;
+    // ---- constants (from blitter_defs.vh — was a drifting private copy) ------
+    localparam signed [31:0] FB_W = `FB_W;
+    localparam signed [31:0] FB_H = `FB_H;
     localparam [7:0] F_HFLIP = 8'h01;
     localparam [7:0] F_VFLIP = 8'h02;
 

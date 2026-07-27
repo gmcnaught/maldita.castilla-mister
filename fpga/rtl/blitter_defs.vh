@@ -18,9 +18,14 @@
 `ifndef BLITTER_DEFS_VH
 `define BLITTER_DEFS_VH
 
-`define FB_W        320
-`define FB_H        240
-`define FB_QWORDS   19200                 // 320*240*2 / 8
+// GEOMETRY ROOT (this repo's Verilog domain). MUST equal the refmodel's
+// BLT_FB_WIDTH/HEIGHT — enforced by fpga/sim/gen_tri_golden.mk contract-check.
+`define FB_W        288
+`define FB_H        216
+// Derived — never retype a dimension (native-288x216 single-source rule).
+`define FB_QWORDS   (`FB_W * `FB_H / 4)   // 15552 (2 B/px, 8 B/qword)
+`define FB_PIXELS   (`FB_W * `FB_H)       // 62208
+`define FB_STRIDE_QW (`FB_W / 4)          // 72 qwords per framebuffer row
 
 `define FB0_QW      29'h07400008          // 0x3A000040 (BUF0, existing)
 `define FB1_QW      29'h07408008          // 0x3A040040 (BUF1, existing)
@@ -39,7 +44,7 @@
 // and every DISPLAYED frame stays a consistent full frame (cache->fb + dynamic),
 // never a static-only snapshot. 0x3BF00000 = near the top of the 16 MiB region, clear
 // of the bump heap (grows from 0x3B008000). Also the SRC for the cache->fb blit.
-`define CACHE_QW    29'h077E0000          // 0x3BF00000 (off-screen bg-cache, 320x240)
+`define CACHE_QW    29'h077E0000          // 0x3BF00000 (off-screen bg-cache, 288x216)
 
 // control-block field offsets (qwords from BLTCTRL_QW), low 32 bits used
 `define C_SUBMIT    29'd0

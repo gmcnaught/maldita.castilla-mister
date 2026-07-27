@@ -186,51 +186,30 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 assign DDRAM_CLK = clk_sys;
 
-// CE_PIXEL: exact Genesis H40 timing from CLK_VIDEO (53.693 MHz).
-// Active pixels: /8 (6.712 MHz). Blanking uses variable /8,/9,/10 widths
-// so that total MCLK per line = 3420, matching Genesis exactly (H_TOTAL=420).
-// Pattern per line: 320 active @/8 + blanking @mixed = 3420 MCLK total.
+// CE_PIXEL: uniform /9 from CLK_VIDEO (53.693 MHz) — native 288-wide raster.
+// 380 px/line x 9 MCLK = 3420 MCLK/line (same as the Genesis H40 line we used
+// at 320 wide), so the 15,700 Hz H rate and 59.92 Hz refresh are unchanged.
+// The old mixed /8,/9,/10 blanking schedule is gone: every pixel is 9 MCLK.
 reg [3:0] ce_cnt;
 reg ce_pix_gen;
-reg [9:0] pix_in_line;
-
-// Blanking pixel width schedule: Genesis uses 28@/10 + 4@/9 + 68@/8 = 100 blanking pixels
-// 28*10 + 4*9 + 68*8 = 280+36+544 = 860 MCLK blanking. 320*8 + 860 = 3420 total.
-wire in_active = (pix_in_line < 10'd320);
-wire in_blank_10 = (pix_in_line >= 10'd320) && (pix_in_line < 10'd348);
-wire in_blank_9  = (pix_in_line >= 10'd348) && (pix_in_line < 10'd352);
-wire [3:0] pix_width = in_active   ? 4'd7 :   // /8: count 0-7
-                        in_blank_10 ? 4'd9 :   // /10: count 0-9
-                        in_blank_9  ? 4'd8 :   // /9: count 0-8
-                                      4'd7;    // /8: remaining blanking
 
 always @(posedge CLK_VIDEO) begin
 	if (RESET) begin
 		ce_cnt <= 4'd0;
 		ce_pix_gen <= 1'b0;
-		pix_in_line <= 10'd0;
 	end
 	else begin
 		ce_pix_gen <= (ce_cnt == 4'd0);
-		if (ce_cnt == pix_width) begin
-			ce_cnt <= 4'd0;
-			if (pix_in_line == 10'd419)
-				pix_in_line <= 10'd0;
-			else
-				pix_in_line <= pix_in_line + 10'd1;
-		end
-		else begin
-			ce_cnt <= ce_cnt + 4'd1;
-		end
+		ce_cnt <= (ce_cnt == 4'd8) ? 4'd0 : (ce_cnt + 4'd1);
 	end
 end
 assign CE_PIXEL = ce_pix_gen;
 
 assign VGA_SL = 0;
 assign VGA_F1 = 0;
-// OpenBOR renders at 320x240, 4:3 aspect ratio. When Vertical Crop (status[18])
-// is off, freak_arx/freak_ary (video_freak, instantiated below near h_pos/v_pos)
-// equal these same fixed values, so this is a no-op until the option is enabled.
+// The core renders at native 288x216, 4:3. freak_arx/freak_ary (video_freak,
+// instantiated below near h_pos/v_pos) equal these same fixed values (CROP is
+// permanently off at native 216p), so this is a no-op passthrough.
 assign VIDEO_ARX = NATIVE_VID_ACTIVE ? freak_arx : 13'd4;
 assign VIDEO_ARY = NATIVE_VID_ACTIVE ? freak_ary : 13'd3;
 assign VGA_DISABLE = 0;
@@ -271,7 +250,6 @@ localparam CONF_STR = {
 	"-;",
 	"OCE,H Position (CRT),0,+1,+2,+3,-3,-2,-1;",
 	"OFH,V Position (CRT),0,+1,+2,+3,-3,-2,-1;",
-	"OI,Vertical Crop (224p),Disabled,Enabled;",
 	"-;",
 	"OK,FPS Overlay,Off,On;",
 	"TJ,Reset;",
@@ -545,7 +523,7 @@ comp_fbram u_fbram (
 // to FB_BYTE_BASE via a DDR write master on the freed arbiter reader slot (rdr_*, below).
 wire        dma_mem_wr;   wire [31:0] dma_mem_addr; wire [7:0] dma_mem_burstcnt;
 wire [63:0] dma_mem_din;  wire [7:0]  dma_mem_be;
-comp_fb_dma #(.FB_QWORDS(19200), .AW(15), .MAW(32)) u_fb_dma (
+comp_fb_dma #(.AW(15), .MAW(32)) u_fb_dma (
 	.clk          (clk_sys),
 	.rst          (RESET),
 	.start        (fb_dma_start),
@@ -924,26 +902,19 @@ wire FB  = status[5];
 wire [2:0] led = status[8:6];
 wire [2:0] h_pos = status[14:12];  // OSD H Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
 wire [2:0] v_pos = status[17:15];  // OSD V Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
-wire       crop_on     = status[18];  // OSD Vertical Crop (224p): 0=off, 1=on (Task 2: video_freak)
+// status[18] is unused (was OSD Vertical Crop (224p); removed — meaningless at 216
+// active lines, the native height IS the full framebuffer now).
 wire       osd_restart = status[19];  // OSD Reset (momentary toggle); taken by the wrapper (feat #4)
                                        // via C_STATUS low32 bit0 (blitter_top S_WR_STATUS below)
 wire       osd_fps_on  = status[20];  // OSD FPS Overlay: 0=off, 1=on; mirrored to ARM via
                                        // C_STATUS low32 bit1 (blitter_top S_WR_STATUS below)
 
-// [320x224 crop] video_freak recomputes VGA_DE + VIDEO_ARX/ARY for a 224-line
-// active window. CROP_SIZE=0 is video_freak's own "disabled" convention (the
-// same pattern sonic-mania-mister uses: `status[32] ? 12'd216 : 12'd0`) — tying
-// it to crop_on gates the whole feature with no separate enable port. CROP_OFF
-// is tied to 0: video_freak's internal math centers the window symmetrically at
-// offset 0 (8 lines blanked top and bottom of the 240-line frame -> 224 visible).
-// SCALE is tied to 0 (Normal / no integer rescale) — non-goal per the design doc;
-// the framework's ascal (fpga/sys/sys_top.v) does the final HDMI scale from
-// whatever VIDEO_ARX/ARY this produces, same as it already does for h_pos/v_pos.
-// HW-confirmed 2026-07-08: a drastic diagnostic crop (160 lines) was visibly
-// obvious on real hardware, proving the video_freak/ascal auto-detect mechanism
-// works end-to-end. 224 (a ~7% reduction) is subtle by comparison — a small
-// zoom, not a letterbox — but is the correct, spec'd value.
-wire [11:0] freak_crop_size = crop_on ? 12'd224 : 12'd0;
+// CROP is permanently off at native 216p (video_freak's CROP_SIZE=0 convention):
+// the active area already equals the full framebuffer, so there is nothing left
+// to crop. SCALE is tied to 0 (Normal / no integer rescale) — non-goal per the
+// design doc; the framework's ascal (fpga/sys/sys_top.v) does the final HDMI
+// scale from whatever VIDEO_ARX/ARY this produces, same as it already does for
+// h_pos/v_pos.
 wire        vga_de_cropped;
 wire [12:0] freak_arx, freak_ary;
 
@@ -964,7 +935,7 @@ video_freak video_freak
 	.VGA_DE_IN    (~(HBlank | VBlank)),
 	.ARX          (12'd4),
 	.ARY          (12'd3),
-	.CROP_SIZE    (freak_crop_size),
+	.CROP_SIZE    (12'd0),
 	.CROP_OFF     (5'd0),
 	.SCALE        (3'd0)
 );

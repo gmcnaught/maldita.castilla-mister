@@ -67,6 +67,7 @@ Usage:
 import argparse
 import glob
 import hashlib
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -105,16 +106,27 @@ def ssh(host, cmd, check=False):
 
 
 def scp(host, src, dst):
+    # Remote path stays RAW and unquoted: this scp speaks SFTP, which takes the path
+    # literally rather than through a remote shell, so shell-quoting it would embed the
+    # quote characters in the filename. Safe because subprocess passes it as one argv
+    # element — the space in "Maldita Castilla" never gets word-split locally.
     return sh(["scp", "-q", str(src), f"{USER}@{host}:{dst}"], check=True)
 
 
 def scp_verified(host, src, dst, retries=3):
     """scp + sha1 verify, retrying on mismatch (FAT truncation guard)."""
     want = hashlib.sha1(Path(src).read_bytes()).hexdigest()
+    # ssh() runs its argument through a shell ON THE DEVICE, so paths bound for rm/sha1sum
+    # MUST be shell-quoted — the handler lives under "Maldita Castilla" (CONF_STR setname,
+    # space included), and unquoted it word-split into two bogus paths: sha1sum then
+    # reported nothing, every retry "mismatched", and the deploy died BEFORE the RBF
+    # upload — leaving a new engine beside a stale core, the exact mismatched pair the
+    # no-handshake contract cannot detect.
+    q = shlex.quote(dst)
     for attempt in range(1, retries + 1):
-        ssh(host, f"rm -f {dst}")
+        ssh(host, f"rm -f {q}")
         scp(host, src, dst)
-        got = ssh(host, f"sha1sum {dst} 2>/dev/null").stdout.split()[:1]
+        got = ssh(host, f"sha1sum {q} 2>/dev/null").stdout.split()[:1]
         if got and got[0] == want:
             print(f"    sha1 ok ({want[:12]})  {dst}")
             return

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # run_sims.sh — build + run every fpga/sim testbench under Icarus Verilog and
-# report PASS/FAIL. Used both locally and by .github/workflows/sim.yml.
+# report PASS/FAIL. Run LOCALLY ONLY — there is no sim workflow in .github/workflows/
+# (build-rbf.yml is the sole workflow, and it does not invoke this script). That matters:
+# the geometry contract-check below is the only gate covering the production RTL's root,
+# so nothing catches a root change automatically. Adding a sim workflow would close it.
 #
 # Why a runner instead of per-test filelists: every tb_*.sv resolves its RTL
 # deps through iverilog's library search (-y over ../rtl ../sys and this dir,
@@ -195,7 +198,27 @@ esac; }
 # ── prerequisites ───────────────────────────────────────────────────────────
 command -v iverilog >/dev/null || { echo "ERROR: iverilog not found"; exit 2; }
 command -v vvp      >/dev/null || { echo "ERROR: vvp not found"; exit 2; }
+command -v make     >/dev/null || { echo "ERROR: make not found (needed for contract-check)"; exit 2; }
 TIMEOUT=$(command -v timeout || command -v gtimeout || true)   # optional
+
+# ── contract gate (runs BEFORE any TB) ──────────────────────────────────────
+# gen_tri_golden.mk's contract-check asserts that the refmodel the goldens are
+# generated from and the RTL the fabric is built from still agree on (a) the
+# TRILIST/SET_TARGET opcodes and (b) the FB geometry root (FB_W x FB_H vs
+# BLT_FB_WIDTH x BLT_FB_HEIGHT). It used to fire ONLY when someone regenerated
+# vectors — i.e. never in the battery — so a geometry/opcode divergence could sit
+# in the tree while the bit-exact TBs happily compared against stale goldens.
+# Run it here so divergence is an immediate, hard failure of the whole run.
+if ! contract_out=$(make -f gen_tri_golden.mk contract-check 2>&1); then
+  echo "!!!==========================================================================!!!"
+  echo "!!! CONTRACT-CHECK FAILED — refmodel/RTL disagree; goldens do NOT gate the fabric."
+  printf '%s\n' "$contract_out" | sed 's/^/!!!   /'
+  echo "!!! Fix the contract (or regenerate vectors) before trusting any TB result."
+  echo "!!!==========================================================================!!!"
+  echo "RESULT: FAIL"
+  exit 1
+fi
+printf '%s\n' "$contract_out" | grep -E '^contract-check' || true
 
 BUILD=.simbuild; rm -rf "$BUILD"; mkdir -p "$BUILD"
 RESULTS="$BUILD/results"; mkdir -p "$RESULTS"

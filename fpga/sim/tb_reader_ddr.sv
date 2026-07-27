@@ -5,7 +5,7 @@
 // frame_counter and sets active_buffer.
 //
 // Checks:
-//   (a) FETCH address (Y): each 80-beat read == buf_base + display_line*80 (FORWARD).
+//   (a) FETCH address (Y): each `FB_STRIDE_QW-beat read == buf_base + display_line*`FB_STRIDE_QW (FORWARD).
 //   (b) FETCH data 1:1: every line-buffer qword == the active buffer's qword at the fetched
 //       (Y-reversed) line.
 //   (c) OUTPUT orientation (Y only): during active display, the output pixel cur_pix at screen
@@ -15,6 +15,7 @@
 // Copyright (C) 2026 — GPL-3.0
 `default_nettype none
 `timescale 1ns/1ps
+`include "blitter_defs.vh"
 module tb_reader_ddr;
     localparam [28:0] FB      = 29'd0;             // FB_QW_BASE: CTRL@0, BUF0@8, BUF1@0x8008
     localparam [28:0] CTRLA   = FB;
@@ -26,10 +27,12 @@ module tb_reader_ddr;
     // SCANOUT_ONLY builds — the engine reads them from /dev/mem (P1 +0x008, P2 +0x018).
     localparam [31:0] JOY0_VAL = 32'h0000_0113;    // right+up+Sword+Pause pattern
     localparam [31:0] JOY1_VAL = 32'h0000_0025;    // right+down+Action pattern
-    localparam integer NQW    = 19200;
-    localparam integer STRIDE = 80;
-    localparam integer VACT   = 240;
-    localparam integer HACT   = 320;
+    // Geometry from the FB root (blitter_defs.vh) — never retype a dimension.
+    localparam integer NQW    = `FB_QWORDS;      // qwords per framebuffer (15552 @288x216)
+    localparam integer STRIDE = `FB_STRIDE_QW;   // qwords per FB row (72 @288)
+    localparam [7:0]   BURST_B = 8'(`FB_STRIDE_QW); // reader per-line burst-beat count (sized)
+    localparam integer VACT   = `FB_H;
+    localparam integer HACT   = `FB_W;
 
     reg clk = 1'b0; always #5 clk = ~clk;          // single clock (clk_vid == ddr_clk)
     reg reset = 1'b1;
@@ -77,7 +80,7 @@ module tb_reader_ddr;
         .dbg_blt(32'd0), .dbg_addr(32'd0), .dbg_diag(32'd0)
     );
 
-    // ── per-pixel test pattern: pix(buf,x,y) packed into the buffer (qw=y*80+x/4, lane=x%4) ──
+    // ── per-pixel test pattern: pix(buf,x,y) packed into the buffer (qw=y*`FB_STRIDE_QW+x/4, lane=x%4) ──
     function [15:0] pix(input integer b, input integer x, input integer y);
         pix = {b[0], x[7:0], y[6:0]};
     endfunction
@@ -158,7 +161,7 @@ module tb_reader_ddr;
     integer addr_checks = 0, data_checks = 0, orient_checks = 0;
 
     // (a) burst address: FORWARD source line (display_line).
-    wire burst_issue = r_rd && (r_burstcnt == 8'd80) && !serving;
+    wire burst_issue = r_rd && (r_burstcnt == BURST_B) && !serving;
     always @(posedge clk) begin
         if (!reset && burst_issue) begin
             if (r_addr !== ((u_reader.active_buffer ? BUF1 : BUF0)
@@ -202,7 +205,7 @@ module tb_reader_ddr;
             && u_reader.hcol < HACT && tim_vc < (VACT-1)) begin
             // Display (col c, row d) must show framebuffer pixel (col c, row d) UNCHANGED:
             // comp_fb_dma publishes a top-down frame, so scanout must not re-order it. Both an
-            // X reversal (col 319-c) and a Y reversal (row 239-d) fail this.
+            // X reversal (col `FB_W-1-c) and a Y reversal (row `FB_H-1-d) fail this.
             if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc)) begin
                 if (orient_errs < 8) $display("  ORIENT MISMATCH screen(%0d,%0d) got=%h exp=%h (buf px %0d,%0d)",
                     u_reader.hcol, tim_vc, u_reader.cur_pix,

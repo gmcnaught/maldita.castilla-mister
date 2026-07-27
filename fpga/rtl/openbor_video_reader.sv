@@ -1,11 +1,12 @@
 `include "vram_defs.vh"
+`include "blitter_defs.vh"
 //============================================================================
 //
 //  OpenBOR Native Video DDR3 Reader
 //
-//  Reads 320x240 RGB565 frames from DDR3 and outputs them 1:1 (no scaling).
+//  Reads 288x216 RGB565 frames from DDR3 and outputs them 1:1 (no scaling).
 //
-//  OpenBOR's software render path produces 320x240 pixels natively, so we
+//  OpenBOR's software render path produces 288x216 pixels natively, so we
 //  do not need pixel doubling or line doubling like the PICO-8 reader does.
 //  This simplifies the pixel output state machine considerably.
 //
@@ -23,12 +24,12 @@
 //    0x3A000000 + 0x028     : Joystick P4
 //    0x3A000000 + 0x030     : Audio ring write pointer (ARM writes)
 //    0x3A000000 + 0x038     : Audio ring read pointer  (FPGA writes)
-//    0x3A000000 + 0x040     : Buffer 0 (320x240 RGB565 = 153,600 bytes; 256KB region)
-//    0x3A040040             : Buffer 1 (320x240 RGB565; 256KB region)
+//    0x3A000000 + 0x040     : Buffer 0 (288x216 RGB565 = 124,416 bytes; 256KB region)
+//    0x3A040040             : Buffer 1 (288x216 RGB565; 256KB region)
 //    0x3A080000             : Cart data buffer (past video buffers)
 //    0x3A0D0000             : Audio ring buffer (64 KiB, 16,384 stereo S16 frames)
 //
-//  Bandwidth: 153,600 bytes x 60fps = 9.2 MB/s (DDR3 can do >1000)
+//  Bandwidth: 124,416 bytes x 60fps = 7.46 MB/s (7.1 MiB/s) (DDR3 can do >1000)
 //
 //  Adapted from MiSTer_PICO-8 by MiSTer Organize
 //  Copyright (C) 2026 MiSTer Organize -- GPL-3.0
@@ -128,7 +129,7 @@ assign ddr_be  = 8'hFF;
 // -- DDR3 Address Constants --------------------------------------------
 // 29-bit qword addresses = physical >> 3
 //
-// Buffer layout: 320*240*2 = 153,600 bytes per buffer.
+// Buffer layout: 288*216*2 = 124,416 bytes per buffer.
 // Round up to 256KB per buffer for clean addressing and headroom.
 // 256KB = 0x40000 bytes = 0x8000 qwords.
 //
@@ -143,8 +144,8 @@ assign ddr_be  = 8'hFF;
 //   0x3A040040        29'h07408008       Buffer 1 base
 //   0x3A080000        29'h07410000       Cart data buffer (past video buffers)
 //
-// Each buffer holds 240 lines × 320 pixels × 2 bytes = 153,600 bytes
-// = 19,200 qwords. The next buffer starts 256KB later (0x40000 bytes
+// Each buffer holds 216 lines × 288 pixels × 2 bytes = 124,416 bytes
+// = 15,552 qwords. The next buffer starts 256KB later (0x40000 bytes
 // = 0x8000 qwords) leaving plenty of headroom. Cart data lives well
 // past the end of BUF1 to allow hot-swap during gameplay without overlap.
 // [DDR-scanout custom-reader] all region addresses are now RELATIVE to FB_QW_BASE so the
@@ -179,12 +180,13 @@ localparam [31:0] AUDIO_RING_MASK  = 32'h0000FFFF;
 // FIFO is 512 entries deep; 384 leaves 128 qwords (~5.3 ms) headroom.
 localparam [9:0]  AUDIO_REFILL_THRESHOLD = 10'd384;
 
-// 320 pixels × 2 bytes / 8 bytes per qword = 80 beats per scanline
-localparam [7:0]  LINE_BURST   = 8'd80;
-// Each scanline takes 80 qword addresses
-localparam [28:0] LINE_STRIDE  = 29'd80;
-// Display lines (no doubling — source = display)
-localparam [8:0]  V_ACTIVE     = 9'd240;
+// `FB_W px x 2 B / 8 B per qword = 72 beats per scanline (derived — never retype)
+localparam [7:0]  LINE_BURST   = 8'(`FB_STRIDE_QW);
+// Each scanline takes `FB_STRIDE_QW qword addresses
+localparam [28:0] LINE_STRIDE  = 29'(`FB_STRIDE_QW);
+// Display lines (== timing V_ACTIVE == `FB_H, so every fetched row is displayed —
+// the old 240-vs-224 bottom-crop mismatch is structurally gone)
+localparam [8:0]  V_ACTIVE     = 9'(`FB_H);
 
 localparam [19:0] TIMEOUT_MAX = 20'hF_FFFF;
 
@@ -603,7 +605,7 @@ always @(posedge ddr_clk) begin
                     // (bytes 0x008/0x018/0x020/0x028) are the OpenBOR-contract input path:
                     // the engine reads them from /dev/mem (same mechanism as OpenBOR_7533 /
                     // sonic-mania). Cost: 4 extra 1-qword DDR writes per frame — negligible
-                    // vs the ~19200-qword scanout copy. SCANOUT_ONLY still gates the audio
+                    // vs the ~15552-qword scanout copy. SCANOUT_ONLY still gates the audio
                     // ring, cart, and (in ship builds) the vsync writeback: ST_WRITE_JOY3
                     // routes back to ST_POLL_CTRL for the SCANOUT_ONLY ship path.
                     state <= ST_WRITE_JOY0;
@@ -804,7 +806,7 @@ always @(posedge ddr_clk) begin
 
             ST_READ_LINE: begin
                 // [DDR-scanout custom-reader / Option A] Issue ONE ddr_* BURST read of the
-                // whole scanline (LINE_BURST=80 qwords = 640 bytes) from the ACTIVE DDR buffer,
+                // whole scanline (LINE_BURST=`FB_STRIDE_QW qwords = 576 bytes) from the ACTIVE DDR buffer,
                 // selected by active_buffer (latched at ST_CHECK_CTRL, held for the whole frame
                 // -> tear-free; a mid-frame comp_fb_dma flip cannot switch the displayed buffer
                 // mid-scan). ddr_rd is held-until-accepted by the top-of-always default; gate on
@@ -833,7 +835,7 @@ always @(posedge ddr_clk) begin
                     // fetch showed FB rows 239..16 — a 16-row offset with rows 0-15 never
                     // displayed. Forward addressing does not depend on the pivot at all.
                     ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
-                    ddr_burstcnt <= LINE_BURST;      // 80-beat burst
+                    ddr_burstcnt <= LINE_BURST;      // `FB_STRIDE_QW-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;
                     timeout_cnt  <= 20'd0;
@@ -842,8 +844,8 @@ always @(posedge ddr_clk) begin
             end
 
             ST_WAIT_LINE: begin
-                // Collect the 80 burst beats (captured into linebuf in the shared block above,
-                // which increments beat_count on each ddr_dout_ready). The f2h auto-increments
+                // Collect the `FB_STRIDE_QW (72) burst beats (captured into linebuf in the shared
+                // block above, which increments beat_count on each ddr_dout_ready). The f2h auto-increments
                 // the burst address; the reader just counts beats. TIMEOUT_MAX guards a hang.
                 if (beat_count == LINE_BURST[6:0]) begin
                     state <= ST_LINE_DONE;
@@ -1017,8 +1019,8 @@ end
 // -- Line-buffer read port + position-addressed pixel output ----------
 //
 // Read side is anchored to DISPLAY POSITION, not buffer occupancy:
-//   * hcol counts output pixels 0..319, reset at new_line, advanced on ce_pix
-//     within de. word group = hcol[8:2] (0..79), sub-pixel lane = hcol[1:0].
+//   * hcol counts output pixels 0..`FB_W-1 (0..287), reset at new_line, advanced on ce_pix
+//     within de. word group = hcol[8:2] (0..71 = `FB_STRIDE_QW-1), sub-pixel lane = hcol[1:0].
 //   * the buffer for the current display line = vcount[0] (line L -> buf L%2),
 //     which matches the fill (line L written to buf L%2). No swap toggle needed.
 //   * BRAM read has 1 clk_vid latency; ce_pix is ~1-in-8, so lb_q is always
@@ -1074,7 +1076,7 @@ always @(posedge clk_vid) begin
         if (new_line)
             hcol <= 9'd0;
         else if (de)
-            hcol <= (hcol == 9'd319) ? hcol : (hcol + 9'd1);
+            hcol <= (hcol == 9'(`FB_W-1)) ? hcol : (hcol + 9'd1);
     end
 end
 

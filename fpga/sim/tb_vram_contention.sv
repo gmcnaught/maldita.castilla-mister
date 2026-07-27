@@ -69,7 +69,7 @@ module tb_vram_contention;
   reg reset = 1;
 
   // SIM: full-rate ce_pix shrinks the video frame ~8x. The reader's first sync is
-  // gated by new_frame (one full 240-line frame away); at the HW ÷8 pixel rate
+  // gated by new_frame (one full `FB_H-line frame away); at the HW ÷8 pixel rate
   // that's ~1.5M clk_sys cycles of dead time before any P_SCAN activity. Full-rate
   // pixels remove that without changing capture (line-buffer fill is on clk_sys).
   reg       ce_pix = 1'b0;
@@ -267,12 +267,15 @@ module tb_vram_contention;
   // Gating: composite a reduced-height (full-width) fill so each frame's P_DST
   // band-RMW completes quickly. The contention coverage is P_DST writes overlapping
   // P_SCAN reads over the rewritten rows — preserved at FILL_H=48; only the number
-  // of composited rows shrinks. Full 240-row composite via +define+VRAM_CONTENTION_FULL.
+  // of composited rows shrinks. Full-height composite via +define+VRAM_CONTENTION_FULL.
 `ifdef VRAM_CONTENTION_FULL
-  localparam integer FILL_H = 240;
+  localparam integer FILL_H = `FB_H;
 `else
   localparam integer FILL_H = 48;
 `endif
+  // Full-width FILL, bound through a sized localparam (never a bare expression on a
+  // command field) — width comes from the FB geometry root in blitter_defs.vh.
+  localparam [15:0] FILL_W = 16'(`FB_W);
   integer submit_n = 0;
   task submit_fill_frame(input [15:0] color);
     begin
@@ -280,10 +283,10 @@ module tb_vram_contention;
       wmem(32'h200004, 64'd0);          // flags = 0 (no legacy CLEAR; compositor does the work)
       wmem(32'h200007, 64'd0);          // C_SRCSEL=0, throttle=0 (arb prioritizes P_SCAN)
       wmem(32'h200001, 64'd2);          // cmd_count = 2 (FILL + END)
-      // cmd0 FILL: op=2, full screen 320x240 at (0,0), color in u32[7].
+      // cmd0 FILL: op=2, full-width x FILL_H at (0,0), color in u32[7].
       // qw0 u32[0]=opcode|blend<<8|fmt<<16|flags<<24 ; u32[1]=src_off (unused for FILL)
       wmem(32'h200008, 64'h0000_0000_0000_0002);            // op=FILL(2)
-      wmem(32'h200009, {16'(FILL_H), 16'd320, 32'd0});      // u32[3]=h(FILL_H)<<16|w(320); u32[2]=0
+      wmem(32'h200009, {16'(FILL_H), FILL_W, 32'd0});       // u32[3]=h(FILL_H)<<16 | w(FILL_W); u32[2]=0
       wmem(32'h20000A, 64'd0);                              // u32[5]=dst_y(0)<<16|dst_x(0); u32[4]=0
       wmem(32'h20000B, {16'd0, color, 32'd0});              // u32[7]=color; u32[6]=0
       wmem(32'h20000C, 64'd1);          // cmd1 = END

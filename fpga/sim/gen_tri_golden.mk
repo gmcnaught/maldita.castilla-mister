@@ -20,10 +20,16 @@
 # an opcode this fabric decodes as nothing — turning the bit-exact gate into a
 # check of the WRONG contract while still "passing".
 #
-# Pin to the gmloader-next SUBMODULE instead: it is fixed by a recorded commit
-# pointer, and it is the exact source the engine binary is compiled from, so the
-# golden and the device are guaranteed to share one contract. contract-check
-# below enforces that agreement on every generator build.
+# Read the gmloader-next refmodel instead: it is the exact source the engine binary is
+# compiled from, so the golden and the device share one contract, and contract-check below
+# enforces that agreement on every generator build.
+#
+# CAVEAT (be honest about what this path is): maldita is NOT a submodule of mister-gmloader,
+# so this resolves to the SIBLING WORKING CHECKOUT of gmloader-next on whatever branch it
+# happens to be on — it is NOT pinned by a recorded commit pointer. Since contract-check
+# joined run_sims.sh, the whole battery hard-fails at step 0 if that checkout drifts or is
+# absent (a fresh clone without it runs ZERO testbenches). Pinning this properly is an open
+# follow-up.
 REFMODEL  := ../../../gmloader-next/3rdparty/mfgpu/refmodel
 RTLDEFS   := ../rtl/blitter_defs.vh
 CC        ?= cc
@@ -58,6 +64,19 @@ contract-check:
 	  exit 1; \
 	fi; \
 	echo "contract-check: refmodel and RTL agree on TRILIST/SET_TARGET"
+	@cw=$$(sed -n 's/#define BLT_FB_WIDTH[[:space:]]*\([0-9]*\).*/\1/p' $(REFMODEL)/blitter_ref.h); \
+	ch=$$(sed -n 's/#define BLT_FB_HEIGHT[[:space:]]*\([0-9]*\).*/\1/p' $(REFMODEL)/blitter_ref.h); \
+	vw=$$(sed -n 's/`define FB_W[[:space:]]*\([0-9]*\).*/\1/p' $(RTLDEFS)); \
+	vh=$$(sed -n 's/`define FB_H[[:space:]]*\([0-9]*\).*/\1/p' $(RTLDEFS)); \
+	if [ -z "$$cw" ] || [ -z "$$vw" ] || [ -z "$$ch" ] || [ -z "$$vh" ]; then \
+	  echo "CONTRACT DIMS: could not extract (c=$$cw x $$ch, v=$$vw x $$vh)"; \
+	  echo "       The \\([0-9]*\\) captures match the EMPTY string, so a root that stops"; \
+	  echo "       being a bare integer would otherwise compare '' == '' and PASS vacuously."; \
+	  exit 1; \
+	fi; \
+	if [ "$$cw" != "$$vw" ] || [ "$$ch" != "$$vh" ]; then \
+	  echo "CONTRACT DIMS MISMATCH: refmodel $$cw x $$ch vs blitter_defs.vh $$vw x $$vh"; exit 1; \
+	fi; echo "contract-check dims OK ($$cw x $$ch)"
 
 gen_tri_golden: gen_tri_golden.c blt_tri.c | contract-check
 	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_tri_golden.c
