@@ -806,11 +806,12 @@ end
 reg [15:0] mt32_i2s_r, mt32_i2s_l;
 wire midi_rx;
 
-// [DDR-scanout] The FPGA-side native audio (openbor_video_reader's DDR3 ring / MT32pi I2S)
-// is retired with native_video. Audio in the gmloader-GPU core is owned by the HPS loader,
-// not the FPGA, so the emu audio outputs are tied silent.
-assign AUDIO_L = 16'd0;
-assign AUDIO_R = 16'd0;
+// [native-audio] The FPGA owns the audio path again: openbor_video_reader drains
+// the DDR3 ring the HPS loader fills (0x3A0D0000) into a dual-clock FIFO on
+// CLK_AUDIO. MT32pi I2S capture stays retired.
+wire [15:0] nv_audio_l, nv_audio_r;
+assign AUDIO_L = nv_audio_l;
+assign AUDIO_R = nv_audio_r;
 assign AUDIO_S = 1;
 
 assign USER_OUT[0]   = 1;
@@ -1017,8 +1018,8 @@ wire [7:0] comp_v = (cos_g >= rnd_c) ? {cos_g - rnd_c, 2'b00} : 8'd0;
 // The custom openbor_video_timing (exact Genesis H40) + openbor_video_reader read the DDR3
 // double-buffer that comp_fb_dma writes and drive VGA_* directly (VGA_SCALER=0 -> video_mixer/
 // analog, the timing the TV syncs to). We instantiate the timing + reader DIRECTLY (NOT
-// openbor_video_top) — its audio/ioctl HPS-I/O is DEFERRED (tied off; SCANOUT_ONLY
-// gates the reader's out-of-region audio-ring DDR path). joystick_0/1 are LIVE
+// openbor_video_top) — its audio HPS-I/O is LIVE (at absolute 0x3A ring addresses), ioctl is
+// DEFERRED (tied off). joystick_0/1 are LIVE
 // ([joy-ddr-writeback]): the reader publishes them to DDR +0x008/+0x018 each frame,
 // the OpenBOR-contract input path the engine reads. The reader's ddr_* master is the
 // rd_ddr_* side of the rdr time-share mux above.
@@ -1070,7 +1071,7 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.new_frame      (tim_new_frame),
 	.new_line       (tim_new_line),
 	.vcount         (tim_vcount),
-	// ioctl/audio HPS-I/O DEFERRED — tied off (SCANOUT_ONLY gates the audio path internally)
+	// ioctl HPS-I/O DEFERRED — tied off; audio is LIVE (absolute ring map)
 	.ioctl_download (1'b0),
 	.ioctl_wr       (1'b0),
 	.ioctl_addr     (27'd0),
@@ -1087,10 +1088,10 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.r_out          (reader_r),
 	.g_out          (reader_g),
 	.b_out          (reader_b),
-	// audio DEFERRED
+	// native audio: DDR3 ring -> dual-clock FIFO -> AUDIO_L/R
 	.clk_audio      (CLK_AUDIO),
-	.audio_l        (),
-	.audio_r        (),
+	.audio_l        (nv_audio_l),
+	.audio_r        (nv_audio_r),
 	.enable         (NATIVE_VID),
 	.frame_ready    (),
 	.disp_active    (reader_disp_active),   // [device-fix] displayed buffer -> comp_fb_dma back-buffer select

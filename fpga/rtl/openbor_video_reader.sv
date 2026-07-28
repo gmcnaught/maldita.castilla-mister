@@ -42,9 +42,9 @@ module openbor_video_reader #(
     // (0x3BF40000) so the framebuffer lives above the host texture heap, disjoint from
     // gmloader's 0x3A region. CTRL @ base, BUF0 @ base+8, BUF1 @ base+0x8008 stay relative.
     parameter [28:0] FB_QW_BASE   = 29'h07400000,
-    // SCANOUT_ONLY=1 gates the deferred HPS-side audio-ring DDR path (its ring lives at
-    // base+0xD0000, which falls OUTSIDE the 16 MiB window once repointed). Scanout + the
-    // in-region joystick/cart writes are unaffected.
+    // SCANOUT_ONLY=1 gates the ioctl/cart path and (in ship builds) the vsync writeback.
+    // The audio-ring DDR path is LIVE (its addresses are absolute: 0x3A000030/38/0x3A0D0000,
+    // independent of FB_QW_BASE). Joystick writes run in both SCANOUT_ONLY and fabric builds.
     parameter        SCANOUT_ONLY = 1'b0
 )(
     // DDR3 Avalon-MM master
@@ -156,12 +156,16 @@ localparam [28:0] CART_CTRL_ADDR = FB_QW_BASE + 29'h00002;
 localparam [28:0] JOY1_ADDR      = FB_QW_BASE + 29'h00003;
 localparam [28:0] JOY2_ADDR      = FB_QW_BASE + 29'h00004;
 localparam [28:0] JOY3_ADDR      = FB_QW_BASE + 29'h00005;
-localparam [28:0] AUDIO_WR_ADDR   = FB_QW_BASE + 29'h00006;
-localparam [28:0] AUDIO_RD_ADDR   = FB_QW_BASE + 29'h00007;
+// [audio-map] The audio triplet is ABSOLUTE, not FB_QW_BASE-relative: it is the
+// shared map Solarus and OpenBOR use (openbor_video_reader.sv:144-158 there), so
+// all three ports agree and a future framebuffer relocation cannot strand the
+// ring outside the host's mapped window again.
+localparam [28:0] AUDIO_WR_ADDR   = 29'h07400006;  // 0x3A000030
+localparam [28:0] AUDIO_RD_ADDR   = 29'h07400007;  // 0x3A000038
 localparam [28:0] BUF0_ADDR      = FB_QW_BASE + 29'h00008;  // Buffer 0 (+0x40 bytes)
 localparam [28:0] BUF1_ADDR      = FB_QW_BASE + 29'h08008;  // Buffer 1 (+0x40040 bytes)
 localparam [28:0] CART_DATA_ADDR = FB_QW_BASE + 29'h10000;  // cart path gated off (ioctl deferred)
-localparam [28:0] AUDIO_RING_ADDR = FB_QW_BASE + 29'h1A000; // audio path gated by SCANOUT_ONLY
+localparam [28:0] AUDIO_RING_ADDR = 29'h0741A000; // 0x3A0D0000, 64 KiB ring
 // VSYNC writeback (anti-tearing): the scanout writes an incrementing counter here at
 // the start of EACH displayed frame (vblank) so the ARM/engine can vsync-PACE its
 // producer — produce exactly one frame per scan into the non-displayed buffer instead
@@ -445,9 +449,10 @@ wire        audio_fifo_low = (audio_fifo_wrusedw < AUDIO_REFILL_THRESHOLD);
 
 // Audio fetch eligibility (combinational)
 wire [31:0] audio_bytes_avail = (audio_wr_ptr - audio_rd_ptr) & AUDIO_RING_MASK;
-// [DDR-scanout custom-reader] SCANOUT_ONLY gates the audio-ring DDR path (its ring at
-// base+0xD0000 is out-of-window once repointed; HPS audio is deferred).
-wire        audio_wake        = !SCANOUT_ONLY && enable_ddr && audio_fifo_low && (audio_backoff == 20'd0);
+// [audio-map] The ring is back at its absolute address and inside the host's
+// mapping, so SCANOUT_ONLY no longer gates this path. SCANOUT_ONLY still gates
+// the ioctl/cart and vsync-writeback paths -- do not remove it there.
+wire        audio_wake        = enable_ddr && audio_fifo_low && (audio_backoff == 20'd0);
 
 // Burst planning (combinational, used in ST_PLAN_AUDIO).
 wire [31:0] audio_plan_cand_a  = (audio_bytes_avail > 32'd256) ? 32'd256 : audio_bytes_avail;
@@ -627,9 +632,9 @@ always @(posedge ddr_clk) begin
                     // (bytes 0x008/0x018/0x020/0x028) are the OpenBOR-contract input path:
                     // the engine reads them from /dev/mem (same mechanism as OpenBOR_7533 /
                     // sonic-mania). Cost: 4 extra 1-qword DDR writes per frame — negligible
-                    // vs the ~15552-qword scanout copy. SCANOUT_ONLY still gates the audio
-                    // ring, cart, and (in ship builds) the vsync writeback: ST_WRITE_JOY3
-                    // routes back to ST_POLL_CTRL for the SCANOUT_ONLY ship path.
+                    // vs the ~15552-qword scanout copy. SCANOUT_ONLY still gates the cart
+                    // and (in ship builds) the vsync writeback: ST_WRITE_JOY3 routes back to
+                    // ST_POLL_CTRL for the SCANOUT_ONLY ship path.
                     state <= ST_WRITE_JOY0;
                 end
                 else if (cart_write_pending)
