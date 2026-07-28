@@ -86,7 +86,8 @@ module blitter_top #(
     input  wire [63:0]   fb_rd_qword,
     // ---- vblank WORK->DDR framebuffer-DMA handshake [DDR-scanout] ----------------------
     // The SCAN buffer + WORK->SCAN snapshot are retired: scanout now reads a DDR3
-    // framebuffer written by the external comp_fb_dma. Once per frame, during vblank, the
+    // framebuffer written by the external comp_fb_dma. Once per frame — as soon as the frame
+    // completes, NOT at vblank (that wait was deleted in Phase 1 A1) — the
     // S_SNAP_* FSM pulses fb_dma_start and waits on fb_dma_busy for comp_fb_dma to copy the
     // completed WORK buffer out to DDR (which the framework's ascal then scans). The WORK
     // read during the copy is comp_fb_dma's own port, muxed onto comp_fbram at the emu top.
@@ -257,6 +258,11 @@ module blitter_top #(
     // below stay single 16x16 DSPs (timing-closed pipeline — do not widen).
     localparam [15:0] FB_STRIDE_QW16 = `FB_STRIDE_QW;
     reg   [5:0]   snap_guard;
+    // [Phase 1 A1] vs_rise now has NO consumer: S_SNAP_WAIT was its sole user and no longer
+    // gates on it. The vs input, the vs_sync chain and this edge-detect are RETAINED
+    // deliberately — dropping them would change blitter_top's port list and every
+    // instantiation (emu top + benches) for no functional gain, and synthesis strips the
+    // unused logic anyway. Kept so a future task can re-derive frame timing if needed.
     wire          vs_rise = ~vs_sync[2] & vs_sync[1];
     always @(posedge clk or posedge rst) begin
         if (rst) vs_sync <= 3'b0;
@@ -640,7 +646,8 @@ module blitter_top #(
     // counters: during an 18s host-observed stall perf_frame_cyc stays NORMAL (~34ms). That
     // counter spans S_CHK_NEW -> the C_DONE write, so a normal value proves the dwell is OUTSIDE
     // it — i.e. in the S_SNAP_* tail, not the rasterizer. Of those, S_SNAP_WAIT cannot park
-    // (vs_rise is free-running off tim_vblank) and S_SNAP_BUSY is bounded by SNAP_GUARD, leaving
+    // (post-A1 it is an unconditional pass-through; it formerly could not park because vs_rise
+    // was free-running off tim_vblank) and S_SNAP_BUSY is bounded by SNAP_GUARD, leaving
     // S_SNAP_DRAIN (:1543 `if (!fb_dma_busy)`) as the only unbounded wait. v3 therefore adds the
     // signal that confirms or kills that chain: how long fb_dma_busy stays continuously high.
     // If comp_fb_dma really is stuck mid-copy, max_fbdma_run reaches ~1.7e9 (18s @98.4MHz) and
@@ -1646,9 +1653,27 @@ module blitter_top #(
                 state<=S_WR_WAIT;
             end
 
-            // Wait for vblank to start (scanout not fetching the DDR framebuffer), then
-            // trigger the WORK->DDR copy (external comp_fb_dma).
-            S_SNAP_WAIT: if (vs_rise) begin fb_dma_start<=1'b1; snap_guard<=6'd0; state<=S_SNAP_BUSY; end
+            // [Phase 1 A1] The vblank wait is DELETED. It cost up to a full 16.69 ms
+            // scanout period per frame and guarded nothing: comp_fb_dma latches
+            // wr_target = ~disp_active at `start` and writes only the BACK DDR buffer,
+            // publishing its control word after the entire copy is accepted, so the
+            // reader can never observe a partial frame. The `vs_rise` condition was
+            // stale rationale from before that double buffer existed.
+            //
+            // Consequence to EXPECT, not debug: above 60 fps the compositor can finish
+            // two frames inside one scanout period. comp_fb_dma gates on
+            // (disp_active == published) and simply DROPS the surplus start pulse
+            // (comp_fb_dma.sv:185/195) rather than copying twice — the reader has not yet
+            // swapped onto the last publish, so re-writing that buffer would tear. Excess
+            // frames are therefore dropped at the producer, never queued. A dropped start
+            // does NOT stall us: fb_dma_busy simply never asserts, so S_SNAP_BUSY falls
+            // through on SNAP_GUARD (32 cyc ~= 0.33 us @98.44 MHz).
+            //
+            // Those drops increment comp_fb_dma's skip_cnt, whose SKIP_MAX=32 watchdog
+            // assumed `start` was vblank-gated. Still safe by a wide margin: tripping it
+            // needs 33 starts inside ONE scanout period, i.e. a ~0.5 ms frame (~2000 fps).
+            // Phase 1 targets ~90 fps, so worst case is 1 skip — ~22x of headroom.
+            S_SNAP_WAIT: begin fb_dma_start<=1'b1; snap_guard<=6'd0; state<=S_SNAP_BUSY; end
             // fb_dma_start pulsed; wait for comp_fb_dma to raise busy — but bounded by
             // SNAP_GUARD so an absent DMA engine (sim/WIP, fb_dma_busy never asserts) proceeds
             // instead of wedging. The real comp_fb_dma asserts busy at start+1 (well inside).
