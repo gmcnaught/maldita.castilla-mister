@@ -680,8 +680,9 @@ module blitter_top #(
     // what distinguishes "0.17s saturated" from a brief hiccup. bit14 = fbdma_at_peak (new).
     wire [31:0] wedge_snap  = {peak_stuck[23:8], 1'b0, fbdma_at_peak, fill_at_peak,
                                pb_at_peak, pa_at_peak, state_at_peak};
-    // word B (host 0x3B000034): the bbox is retired (maxx/maxy read 319/239 = the legitimate
-    // full-screen composite quad, never diagnostic). Carries the copy-stall severity instead.
+    // word B (host 0x3B000034): the bbox is retired (maxx/maxy read `FB_W-1/`FB_H-1 = 287/215,
+    // the legitimate full-screen composite quad, never diagnostic). Carries the copy-stall
+    // severity instead. (Pre-fix these saturated at the stale 319/239 clamp — see tri_maxx_cl.)
     wire [31:0] wedge_snap2 = max_fbdma_run;
 `endif
 
@@ -778,8 +779,20 @@ module blitter_top #(
                                                  :((tri_vy1>tri_vy2)?tri_vy1:tri_vy2);
     wire signed [31:0] tri_maxx_c = ($signed(tri_hx) + 32'sd15) >>> 4;
     wire signed [31:0] tri_maxy_c = ($signed(tri_hy) + 32'sd15) >>> 4;
-    wire [15:0] tri_maxx_cl = (tri_maxx_c > 32'sd319) ? 16'd319 : (tri_maxx_c < 0 ? 16'd0 : tri_maxx_c[15:0]);
-    wire [15:0] tri_maxy_cl = (tri_maxy_c > 32'sd239) ? 16'd239 : (tri_maxy_c < 0 ? 16'd0 : tri_maxy_c[15:0]);
+    // Clamp to the ACTUAL framebuffer extent (`FB_W-1/`FB_H-1), never a retyped
+    // dimension: the old hardcoded 319/239 was a stale 320x240 leftover. Because the
+    // destination address (dst_qw_q = pys*`FB_STRIDE_QW + pxs>>2) has no bounds guard,
+    // a walk that overran to px=288..319 wrote row py+1 columns 0..31 — device-visible
+    // as the right-edge overhang of a scrolling layer wrapping onto the left of the
+    // screen with a hard vertical seam at x=32. The refmodel (blt_tri.c: maxx>=
+    // BLT_FB_WIDTH -> BLT_FB_WIDTH-1) always clamped correctly; no trilist bench places
+    // a vertex past x=287, so the bit-exact gate had zero coverage of the overhang.
+    localparam signed [31:0] TRI_MAXX_LIM = `FB_W - 1;   // 287
+    localparam signed [31:0] TRI_MAXY_LIM = `FB_H - 1;   // 215
+    wire [15:0] tri_maxx_cl = (tri_maxx_c > TRI_MAXX_LIM) ? TRI_MAXX_LIM[15:0]
+                            : (tri_maxx_c < 0 ? 16'd0 : tri_maxx_c[15:0]);
+    wire [15:0] tri_maxy_cl = (tri_maxy_c > TRI_MAXY_LIM) ? TRI_MAXY_LIM[15:0]
+                            : (tri_maxy_c < 0 ? 16'd0 : tri_maxy_c[15:0]);
 
     // [pipeline stage 1] advance the walk cursor one pixel: within a row step the
     // running edge/attr accumulators by their per-x deltas; at row end wrap x to the
