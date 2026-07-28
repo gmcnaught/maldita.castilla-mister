@@ -335,6 +335,18 @@ localparam [4:0] ST_WAIT_AUDIO_RING = 5'd18;
 localparam [4:0] ST_WRITE_AUDIO_RD  = 5'd19;
 localparam [4:0] ST_PAINT            = 5'd20;  // blitter paint-test rectangle
 localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti-tearing)
+localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
+localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven liveness beacon
+
+// [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
+// {dbg_blt, beacon_cnt} to VSYNC_ADDR+2 (byte 0x3A070010) from ST_IDLE. Timer-
+// driven, so it does NOT depend on the frame-start (new_frame CDC) chain — it
+// stays alive as long as the reader FSM and the f2h write path are alive.
+// Reading it names a wedge: beacon frozen = f2h/m0 dead; beacon climbing with
+// dbg state frozen = blitter parked (state in dbg_blt[5:0]).
+reg [21:0] beacon_tick;
+reg        beacon_pending;
+reg [31:0] beacon_cnt;
 
 reg  [4:0]  state;
 reg  [31:0] ctrl_word;
@@ -499,8 +511,18 @@ always @(posedge ddr_clk) begin
         audio_backoff      <= 20'd0;
         audio_fifo_wr      <= 1'b0;
         audio_fifo_wr_data <= 64'd0;
+        // beacon_tick resets to 1, NOT 0: the pending trigger is tick==0, so a
+        // 0-init would fire the beacon on the first post-reset cycle — inside the
+        // core-load port-bring-up danger window (and, in sim, before the bench
+        // settles). Starting at 1 defers the first fire one full 2^22 period.
+        beacon_tick        <= 22'd1;
+        beacon_pending     <= 1'b0;
+        beacon_cnt         <= 32'd0;
     end
     else begin
+        // [wedge probe v5] beacon timer — free-running, independent of new_frame.
+        beacon_tick <= beacon_tick + 22'd1;
+        if (beacon_tick == 22'd0) beacon_pending <= 1'b1;
         lb_we         <= 1'b0;
         audio_fifo_wr <= 1'b0;
         if (audio_backoff != 20'd0) audio_backoff <= audio_backoff - 20'd1;
@@ -616,6 +638,21 @@ always @(posedge ddr_clk) begin
                     state <= ST_WRITE_CART_SIZE;
                 else if (audio_wake)
                     state <= ST_POLL_AUDIO_WR;
+                else if (beacon_pending)          // [wedge probe v5] lowest priority
+                    state <= ST_BEACON;
+            end
+
+            // [wedge probe v5] liveness beacon + live blitter dbg publish.
+            ST_BEACON: begin
+                if (!ddr_busy) begin
+                    ddr_addr       <= VSYNC_ADDR + 29'd2;   // byte 0x3A070010
+                    ddr_din        <= {dbg_blt, beacon_cnt};
+                    ddr_burstcnt   <= 8'd1;
+                    ddr_we         <= 1'b1;
+                    beacon_cnt     <= beacon_cnt + 32'd1;
+                    beacon_pending <= 1'b0;
+                    state          <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
+                end
             end
 
             ST_WRITE_JOY0: begin
@@ -695,7 +732,10 @@ always @(posedge ddr_clk) begin
                                      last_uf_line, first_uf_line, max_dline};
 `else
                     ddr_addr     <= VSYNC_ADDR;
-                    ddr_din      <= {32'd0, vsync_count};   // ship: low word = engine vsync pacing
+                    // [wedge probe v4] high word carries the LIVE blitter FSM snapshot
+                    // ({stuck>>16, rd_issued, state}) — the reader outlives a blitter
+                    // park, so devmem 0x3A070004 names the frozen state.
+                    ddr_din      <= {dbg_blt, vsync_count};
 `endif
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
@@ -708,6 +748,19 @@ always @(posedge ddr_clk) begin
                     max_fetch_stall <= 16'd0;
                     cur_stall       <= 16'd0;
 `endif
+                    state        <= ST_WRITE_DBGA;
+                end
+            end
+
+            // [wedge probe v4] publish the blitter's live mem_addr (+ diag) one qword
+            // above VSYNC_ADDR: byte 0x3A070008 = dbg_addr, 0x3A07000C = dbg_diag.
+            // Names WHICH access is parked (control block / ring / SRC heap read).
+            ST_WRITE_DBGA: begin
+                if (!ddr_busy) begin
+                    ddr_addr     <= VSYNC_ADDR + 29'd1;
+                    ddr_din      <= {dbg_diag, dbg_addr};
+                    ddr_burstcnt <= 8'd1;
+                    ddr_we       <= 1'b1;
                     state        <= ST_POLL_CTRL;
                 end
             end
@@ -742,7 +795,22 @@ always @(posedge ddr_clk) begin
             end
 
             ST_POLL_CTRL: begin
-                if (!ddr_busy) begin
+                // [input fix + wedge probe v5] Service the per-vblank JOY writeback and
+                // the liveness beacon from HERE, not ST_IDLE: once frames stream, the
+                // fetch loop (CHECK_CTRL stale/new branches) cycles POLL->CHECK->READ
+                // without visiting ST_IDLE, so IDLE-anchored work starves. Device 2026-
+                // 07-27: joy words frozen at boot values (the .62 "input death") and the
+                // beacon fired exactly once. POLL_CTRL provably runs every frame (the
+                // ctrl word is seen flipping), so anchor both here. The JOY chain ends
+                // back at ST_POLL_CTRL (SCANOUT_ONLY path), consuming new_frame_pending
+                // — once per display vblank, same contract as before.
+                if (enable_ddr && new_frame_pending) begin
+                    new_frame_pending <= 1'b0;
+                    state <= ST_WRITE_JOY0;
+                end
+                else if (beacon_pending)
+                    state <= ST_BEACON;
+                else if (!ddr_busy) begin
                     ddr_addr     <= CTRL_ADDR;
                     ddr_burstcnt <= 8'd1;
                     ddr_rd       <= 1'b1;

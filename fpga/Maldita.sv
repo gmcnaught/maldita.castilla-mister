@@ -584,6 +584,10 @@ wire use_nv = NATIVE_VID;
 // 0x3A0E0000 (in the proven 1 MiB region), composites into the existing
 // double-buffer, and writes the video control word as a drop-in producer.
 // Set ENABLE=0 for a normal core (blitter inert, reader owns the bus).
+// [wedge probe v4] live blitter FSM snapshot ({stuck>>16, rd_issued, state}) +
+// live mem_addr, published by the READER (which survives a blitter park) into
+// the vsync-writeback words: 0x3A070004 = blt_dbg, 0x3A070008 = blt mem_addr.
+wire [31:0] blt_dbg_live;
 wire  [7:0] arb_ddr_burstcnt;
 wire [28:0] arb_ddr_addr;
 wire        arb_ddr_rd;
@@ -670,7 +674,7 @@ blitter_top blitter
 	.surf_rd_qw     (surf_rd_qw),
 	.surf_rd_qword  (surf_rd_qword),
 	.idle           (),
-	.dbg            ()              // #34 debug probe stripped for shipping core
+	.dbg            (blt_dbg_live)  // [wedge probe v4] live state -> reader vsync writeback
 );
 
 // [DDR-scanout custom-reader] the arbiter reader slot (rdr_*, the DEFAULT/priority owner) is
@@ -1090,8 +1094,8 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.enable         (NATIVE_VID),
 	.frame_ready    (),
 	.disp_active    (reader_disp_active),   // [device-fix] displayed buffer -> comp_fb_dma back-buffer select
-	.dbg_blt        (32'd0),
-	.dbg_addr       (32'd0),
+	.dbg_blt        (blt_dbg_live),          // [wedge probe v4] -> 0x3A070004
+	.dbg_addr       (blt_mem_addr),          // [wedge probe v4] -> 0x3A070008
 	.dbg_diag       (32'd0)
 );
 
