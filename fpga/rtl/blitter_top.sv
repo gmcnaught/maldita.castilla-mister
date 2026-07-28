@@ -538,13 +538,24 @@ module blitter_top #(
     localparam integer TEXQ_N     = 256;
     localparam integer TEXQ_AW    = 8;      // $clog2(TEXQ_N)
     localparam integer TEXQ_TW    = 24 - TEXQ_AW;  // tag width = qtag[23:TEXQ_AW] (widens as N shrinks)
-    // tq_data + tq_tag are read ONLY by pb (B_LOOK, registered) and written ONLY by the
-    // catcher -> both infer M10K (registered-read BRAM), so neither the 64-bit data nor
-    // the 18-bit tag read is a distributed 256:1 mux on the fabric clock. This is only
-    // possible because pa no longer reads the tag RAM (it uses the last_pf_qtag filter
+    // tq_data + tq_tag are read ONLY via the dedicated read-port block below and written
+    // ONLY by the catcher -> both infer M10K (registered-read BRAM), so neither the 64-bit
+    // data nor the 16-bit tag read is a distributed 256:1 mux on the fabric clock. This is
+    // only possible because pa no longer reads the tag RAM (it uses the last_pf_qtag filter
     // below instead of a full residency check) — a registered+combinational mixed read of
     // tq_tag previously crashed Quartus 17.0 Verific ("read to RAM wasn't mapped to a
     // specific read port"), which is why the tag was distributed before.
+    //
+    // [inference] The read MUST stay in its own unconditional `always @(posedge clk)` block
+    // (see below) — NOT nested inside the main FSM's case(state)/case(pb) arms. When the read
+    // lived in B_LOOK, Quartus 17.0 reported both arrays as "uninferred due to asynchronous
+    // read logic" (map.rpt Info 276007) and built them from LABs instead: 256*64 + 256*16 =
+    // 20,480 flops, ~45% of the whole design's registers, and b_qtag[7:0] became the top
+    // non-global fan-out net in the design (~1,735) driving a real 256:1 distributed mux.
+    // That cost -0.983ns setup on the fabric clock, a single 9.565ns route from the fbcache
+    // mux straight into the flop array with no logic in between. Same AUTO-inference
+    // fragility class as solarus-mister's frt_bram/clut_bram ("Task 3 LAB-overflow chase");
+    // solarus's clut_bram uses exactly this dedicated-block form. Don't re-nest these reads.
     (* ramstyle = "no_rw_check, M10K" *) reg [63:0] tq_data [0:TEXQ_N-1];        // cached qwords
     (* ramstyle = "no_rw_check, M10K" *) reg [TEXQ_TW-1:0] tq_tag [0:TEXQ_N-1];  // qtag[23:TEXQ_AW]
     reg  [TEXQ_N-1:0] tq_valid;             // per-slot valid; packed for a 1-cycle SYNCHRONOUS clear on the per-command barrier
@@ -553,6 +564,15 @@ module blitter_top #(
     reg  [63:0]  tq_rdata;                  // registered tq_data[slot] (M10K read)
     reg  [TEXQ_TW-1:0] tq_rtag;             // registered tq_tag[slot]  (M10K read)
     reg          tq_rvalid;                 // registered tq_valid[slot]
+    // [RDW guard] With tq_data/tq_tag as real M10K under `no_rw_check`, a read that collides
+    // with the catcher's write to the SAME slot in the SAME cycle returns UNDEFINED data --
+    // unlike the old flop array, where non-blocking semantics guaranteed the old value. pa's
+    // speculative prefetch shares fill_slot and can land in any cycle, including the one the
+    // read port is sampling, so the collision is reachable (same slot index, different tag).
+    // Flag it and force B_FILL to take the MISS path: B_WAIT re-reads once the fill has
+    // landed, which is defined. Costs a redundant re-read on a rare event; without it a
+    // garbage tag that happens to match (~1/65536) would silently yield a wrong texel.
+    reg          tq_rdw_bad;                // snapshot cycle collided with a catcher write
     // pa best-effort prefetch de-dup: skip re-issuing a fill for the qword it just
     // prefetched (catches the dominant consecutive-same-qword case; 4 texels share a
     // qword). NOT a residency check — pb's B_LOOK/B_FILL demand path is the correctness
@@ -568,6 +588,28 @@ module blitter_top #(
     reg  [12:0] wd_stall;                   // continuous (fill_busy && !p0_ok) cycles, saturates at WD_TIMEOUT
     reg  [23:0] wd_fire_count;              // saturating count of watchdog fires (reset only on rst)
     wire        wd_fire = (wd_stall == WD_TIMEOUT);
+
+    // ---- texel-qword cache READ PORT (dedicated block -> clean M10K inference) -----------
+    // Deliberately its OWN unconditional always block rather than an arm of the main FSM:
+    // that is what lets Quartus extract a real BRAM read port (see the tq_data decl above for
+    // what nesting it inside B_LOOK cost). Reading every cycle is free and safe -- b_qtag is
+    // written ONLY in B_IDLE (the pf_head unpack), so it is stable across B_LOOK -> B_FILL and
+    // the value B_FILL consumes is identical to the old B_LOOK-gated capture. tq_valid stays
+    // flops (it needs the 1-cycle synchronous bulk clear) but is sampled here too, so all
+    // three snapshot registers stay coherent with one another.
+    always @(posedge clk) begin
+        tq_rdata  <= tq_data [b_qtag[TEXQ_AW-1:0]];
+        tq_rtag   <= tq_tag  [b_qtag[TEXQ_AW-1:0]];
+        tq_rvalid <= tq_valid[b_qtag[TEXQ_AW-1:0]];
+    end
+    // RDW collision flag, kept OUT of the block above on purpose: that block must stay a bare
+    // BRAM read port (a reset on it risks pushing the read back into LABs, which is the whole
+    // bug being fixed here). This one carries the reset so the flag is never X out of reset --
+    // an X would poison B_FILL's hit test and trip the suite's x-guards.
+    always @(posedge clk) begin
+        if (rst) tq_rdw_bad <= 1'b0;
+        else     tq_rdw_bad <= (fill_busy && p0_ok) && (fill_slot == b_qtag[TEXQ_AW-1:0]);
+    end
 
 `ifdef SOLARUS_DBG_PROBES
     // [wedge probe v2] The fabric stall was PINNED to S_TRI_PIX (state 50) — the rasterizer's
@@ -1367,21 +1409,17 @@ module blitter_top #(
                     tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
                 end else begin dst_q <= 16'd0; pb<=B_WR; end
             end
-            // Registered qword-cache read (the M10K read cycle): capture data/tag/valid for
-            // b_qtag's slot into registers — an atomic snapshot. tq_data + tq_tag are
-            // single-reader here -> both infer M10K, so neither is a distributed mux on the
-            // fabric clock. b_qtag was registered in B_IDLE so the address carries no adder.
-            B_LOOK: begin
-                tq_rdata  <= tq_data [b_qtag[TEXQ_AW-1:0]];
-                tq_rtag   <= tq_tag  [b_qtag[TEXQ_AW-1:0]];
-                tq_rvalid <= tq_valid[b_qtag[TEXQ_AW-1:0]];
-                pb <= B_FILL;
-            end
+            // The M10K read cycle. The read itself lives in the dedicated read-port block near
+            // the tq_data declaration (nesting it HERE is what broke M10K inference); this arm
+            // only spends the cycle the BRAM needs, so tq_rdata/tq_rtag/tq_rvalid are the valid
+            // snapshot of b_qtag's slot by the time B_FILL runs. b_qtag was registered in
+            // B_IDLE, so the read address carries no adder.
+            B_LOOK: pb <= B_FILL;
             // Resolve the texel off the REGISTERED snapshot. HIT (valid & tag match) -> latch
             // texel_q and go to dst/blend. MISS -> demand-fetch through the single-outstanding
             // arbiter (if idle), then B_WAIT for the in-flight fill and re-read via B_LOOK.
             B_FILL: begin
-                if (tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
+                if (!tq_rdw_bad && tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
                     texel_q <= tq_rdata[b_tex_lane*16 +: 16];
                     if (tri_need_dst) begin
                         tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
