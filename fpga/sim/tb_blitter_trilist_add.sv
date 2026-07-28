@@ -68,6 +68,12 @@ module tb_blitter_trilist_add;
     .fb_rd_en(fb_rd_en), .fb_rd_qw(fb_rd_qw), .fb_rd_qword(fb_rd_qword),
     .idle(bt_idle));
 
+  // [Phase 1 A2] THE WIN IS MEASURED HERE. This bench takes the dst-read path on every
+  // pixel (dstw_cyc = 3200, measured), so pb is exactly 8.00 cyc/px before A2 and exactly
+  // 6.00 after — a real RED -> GREEN. Threshold 7.0 sits between them.
+  `define A2_PB_MAX 7.0
+  `include "a2_cycle_gate.vh"
+
   always @(posedge clk) begin
     d_dready <= 1'b0;
     d_dout   <= 64'hDEAD_BEEF_DEAD_BEEF;
@@ -116,6 +122,10 @@ module tb_blitter_trilist_add;
     while (mem[32'h200005][31:0] !== mem[32'h200000][31:0] && to<4000000) begin @(posedge clk); to=to+1; end
     repeat(10) @(posedge clk);
     $display("=== done_seq=%0d submit=%0d (to=%0d) ===", mem[32'h200005][31:0], mem[32'h200000][31:0], to);
+
+    // [Phase 1 A2] cycle gate, before the framebuffer diff. A cycle win with a broken
+    // diff is not a win, so both must hold.
+    a2_report_cycles;
 
     bad=0;
     for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin

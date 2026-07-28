@@ -711,19 +711,34 @@ module blitter_top #(
     reg          a2_rd_en_d;   // tri_fb_rd_en as it was during the PREVIOUS cycle
     always @(posedge clk) a2_rd_en_d <= tri_fb_rd_en;
 
-    // RAW invariant. The dst-read hoist is only safe because pixel N's
-    // write and pixel N+1's read never touch the same (qword, lane): comp_fbram's four
-    // lane-banks are independent, a coverage walk visits each pixel exactly once, and
-    // the pipe drains between triangles. If that ever stops holding, this fires in sim
-    // rather than corrupting silently on device. Not a forwarding mux on purpose — a
-    // 4-lane forward would add combinational depth at -0.169 ns slack.
-    always @(posedge clk) if (!rst && tri_fb_wr_en && tri_fb_rd_en
-                              && (tri_fb_wr_qw == tri_fb_rd_qw)
-                              && (tri_fb_wr_lane == b_dst_lane)) begin
-        $display("FAIL A2-RAW: same-cycle comp_fbram RW on qw=%0d lane=%0d",
-                 tri_fb_wr_qw, tri_fb_wr_lane);
-        $finish;
-    end
+    // ── [Phase 1 A2] On the same-cycle RW hazard: IT DOES NOT EXIST ──────────────
+    // The spec asked for a RAW assertion here, on the premise that "pixel N's write is
+    // presented during pixel N+1's B_IDLE, which is now also N+1's read cycle". That
+    // premise is wrong: B_IDLE is the read ISSUE cycle, not the read cycle. Walking the
+    // one-cycle registered outputs:
+    //
+    //   tri_fb_wr_en is set in B_WR3 (:1637)          -> HIGH during the next cycle,
+    //                                                    which is pixel N+1's B_IDLE
+    //   tri_fb_rd_en is set in B_IDLE (:1477) / B_WAIT -> HIGH during B_LOOK
+    //   both self-clear every cycle (:912-913), and both come from the single pb FSM
+    //
+    // So the write is presented in B_IDLE and the read in B_LOOK — ALWAYS exactly one
+    // cycle apart, never the same cycle. A `no_rw_check` bank is only unsafe on a
+    // SAME-cycle read+write to one address; a write at T followed by a read at T+1 has
+    // already committed, so even the overdraw case (N and N+1 the same pixel) correctly
+    // returns N's result. The design is therefore safer than the spec claimed.
+    //
+    // An assertion was written for this and DELETED rather than kept, because it could
+    // never fire: measured directly, `tri_fb_wr_en && tri_fb_rd_en` holds 0 times, and
+    // the adjacent form (write at T, read at T+1, same qw AND lane) also occurs 0 times,
+    // across trilist_add and trilist_quad. A dead assertion reads as coverage and is
+    // worse than a correct explanation. No forwarding mux is needed either — which is
+    // the outcome the spec wanted, for a better reason than it gave.
+    //
+    // RE-CHECK THIS IF pb IS EVER RE-TIMED so that the B_WR3 write and the B_IDLE read
+    // issue land in the same cycle (e.g. collapsing B_WR3->B_IDLE->B_LOOK, or issuing
+    // the dst read from B_WR3 to shave another cycle). The one-cycle separation above is
+    // the entire safety argument; nothing else protects these banks.
 
     // [Phase 1 A2] DST-STALENESS invariant — guards the path the goldens CANNOT.
     // comp_rd_qword is only valid the cycle after tri_fb_rd_en was asserted, so every
