@@ -486,13 +486,18 @@ module blitter_top #(
     // slot as a REGISTERED read address so tq_data infers M10K) and B_WAIT (stall on a
     // demand/prefetch fill, then re-read). This breaks the b_qtag -> 256-entry distributed
     // tag/data mux -> dst_q combinational path that failed STA at -1.732ns on the fabric clk.
+    // [Phase 1 A2] B_DSTW=4'd4 / B_DSTC=4'd5 are DELETED (the dst read is hoisted into
+    // B_IDLE). The remaining encodings are deliberately NOT renumbered — 4 and 5 are left
+    // as a hole because tb_blitter_trilist_pipe's cycle gate and the wedge-probe
+    // state_at_peak snapshots both key off literal pb values.
     localparam [3:0] B_IDLE=4'd0, B_LOOK=4'd1, B_FILL=4'd2, B_WAIT=4'd3,
-                     B_DSTW=4'd4, B_DSTC=4'd5, B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8,
+                     B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8,
                      // [app-surface v1] surface texel read: issue surf_rd (B_SURF_W is the
                      // 1-cyc BRAM latency), latch the texel (B_SURF_C), then dst/blend.
                      B_SURF_W=4'd9, B_SURF_C=4'd10;
     reg  [2:0]   pa;                       // address-gen sub-FSM state
     reg  [3:0]   pb;                       // consume+blend sub-FSM state
+
     // [Task 2] depth-D payload FIFO decouples pa from pb: pa pushes each pixel's
     // payload as it finishes address-gen and races ahead up to TEXFIFO_D pixels; pb
     // pops the head and resolves/blends. Replaces the old single-deep h_full handoff.
@@ -525,6 +530,7 @@ module blitter_top #(
     reg          tri_p0_rd;   reg [26:0] tri_p0_addr;
     reg          tri_fb_rd_en; reg [14:0] tri_fb_rd_qw;
     reg          tri_fb_wr_en; reg [14:0] tri_fb_wr_qw; reg [1:0] tri_fb_wr_lane; reg [15:0] tri_fb_wr_pix;
+
     // [app-surface v1] TRILIST texel-source = surface (BLT_F_SRC_SURFACE). Latched at
     // OP_TRILIST setup. The surface texel read is a 1-cyc comp_fbram surf_rd BRAM hit
     // (NO tq cache / P_SRC): surf_qw_q/lane computed in A_ADDR2, read in B_SURF_*.
@@ -694,6 +700,50 @@ module blitter_top #(
 `endif
 
     wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
+
+`ifndef SYNTHESIS
+    // ── [Phase 1 A2] sim-only invariants for the hoisted dst read ─────────────────
+    // Placed HERE, below tri_need_dst / tri_fb_* / pb, because iverilog binds by
+    // declaration order. Both are `ifndef SYNTHESIS so they cost nothing on device,
+    // and both are ASSERTIONS rather than hardware fixes on purpose: a forwarding mux
+    // or a validity interlock would add combinational depth on the fabric clock, which
+    // sits at -0.169 ns worst-case setup slack.
+    reg          a2_rd_en_d;   // tri_fb_rd_en as it was during the PREVIOUS cycle
+    always @(posedge clk) a2_rd_en_d <= tri_fb_rd_en;
+
+    // RAW invariant. The dst-read hoist is only safe because pixel N's
+    // write and pixel N+1's read never touch the same (qword, lane): comp_fbram's four
+    // lane-banks are independent, a coverage walk visits each pixel exactly once, and
+    // the pipe drains between triangles. If that ever stops holding, this fires in sim
+    // rather than corrupting silently on device. Not a forwarding mux on purpose — a
+    // 4-lane forward would add combinational depth at -0.169 ns slack.
+    always @(posedge clk) if (!rst && tri_fb_wr_en && tri_fb_rd_en
+                              && (tri_fb_wr_qw == tri_fb_rd_qw)
+                              && (tri_fb_wr_lane == b_dst_lane)) begin
+        $display("FAIL A2-RAW: same-cycle comp_fbram RW on qw=%0d lane=%0d",
+                 tri_fb_wr_qw, tri_fb_wr_lane);
+        $finish;
+    end
+
+    // [Phase 1 A2] DST-STALENESS invariant — guards the path the goldens CANNOT.
+    // comp_rd_qword is only valid the cycle after tri_fb_rd_en was asserted, so every
+    // site that latches dst_q from it must have issued the read in the immediately
+    // preceding cycle. This catches an off-by-one re-issue on the texel-MISS retry,
+    // which no bench covers: every dst-path bench (trilist_add/calpha) runs a pure
+    // 8.00 cyc/px hit path with zero B_WAIT, so a stale dst read there would produce
+    // bit-identical goldens and slip through the +-1 LSB diff entirely.
+    always @(posedge clk) if (!rst && tri_need_dst && !a2_rd_en_d) begin
+        if ((pb == B_FILL) && !tq_rdw_bad && tq_rvalid
+                           && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
+            $display("FAIL A2-DSTALE: B_FILL latched dst_q with no dst read issued last cycle");
+            $finish;
+        end
+        if (pb == B_SURF_C) begin
+            $display("FAIL A2-DSTALE: B_SURF_C latched dst_q with no dst read issued last cycle");
+            $finish;
+        end
+    end
+`endif
 
     // per-pixel interpolation. The six W*area_recip products are PIPELINED across
     // a dedicated register layer: S_TRI_PIX latches the operands into single-fanout
@@ -1408,9 +1458,24 @@ module blitter_top #(
             case (pb)
             // Wait for a queued pixel; unpack the FIFO head into B-local regs and pop.
             // Packing order MUST match pa's A_ISSUE push exactly.
+            // [Phase 1 A2] Issue the comp_fbram dst read HERE, concurrently with the
+            // texel read, instead of waiting for the texel to resolve in B_FILL. The
+            // dst qword has no dependency on the texel — it arrives in the FIFO payload
+            // — and comp_fbram and the tq texel M10K are different memories, so both
+            // reads can be in flight together. This deletes B_DSTW/B_DSTC: 8 -> 6 cyc/px.
+            //
+            // b_dst_qw is not valid until the END of this cycle, so read it straight off
+            // the FIFO head, exactly as the surface path already does for the texel qword.
+            // Payload packing (from A_ISSUE's push at :1396, LSB up):
+            //   tex_lane[1:0] qtag[25:2] dst_lane[27:26] dst_qw[42:28]
+            // tri_need_dst is a TRIANGLE constant (derived from c_blend, stable while
+            // pixels are in flight), so it is already valid this cycle.
             B_IDLE: if (!pf_empty) begin
                 {b_ca, b_cb, b_cg, b_cr, b_dst_qw, b_dst_lane, b_qtag, b_tex_lane} <= pf_head;
                 pf_rd <= pf_rd + 1'b1;
+                if (tri_need_dst) begin
+                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= pf_head[28 +: 15];
+                end
                 if (tri_src_surface) begin
                     // [app-surface v1] issue the surface texel read now. surf_qw is the low
                     // 15 bits of the qtag field (pf_head[16:2]); b_qtag isn't valid until
@@ -1423,11 +1488,14 @@ module blitter_top #(
             // latency; B_SURF_C latches the texel (lane-select), then dst-read/blend —
             // mirrors B_FILL's HIT tail (no tq cache, no P_SRC).
             B_SURF_W: pb <= B_SURF_C;
+            // [Phase 1 A2] Surface path: the dst read was issued in B_IDLE and B_SURF_W
+            // served as its latency cycle, so comp_rd_qword is valid alongside the
+            // surface texel. Mirrors the B_FILL hit tail.
             B_SURF_C: begin
                 texel_q <= surf_rd_qword[b_tex_lane*16 +: 16];
-                if (tri_need_dst) begin
-                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
-                end else begin dst_q <= 16'd0; pb<=B_WR; end
+                if (tri_need_dst) dst_q <= comp_rd_qword[b_dst_lane*16 +: 16];
+                else              dst_q <= 16'd0;
+                pb<=B_WR;
             end
             // The M10K read cycle. The read itself lives in the dedicated read-port block near
             // the tq_data declaration (nesting it HERE is what broke M10K inference); this arm
@@ -1441,9 +1509,12 @@ module blitter_top #(
             B_FILL: begin
                 if (!tq_rdw_bad && tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
                     texel_q <= tq_rdata[b_tex_lane*16 +: 16];
-                    if (tri_need_dst) begin
-                        tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw; pb<=B_DSTW;
-                    end else begin dst_q <= 16'd0; pb<=B_WR; end
+                    // [Phase 1 A2] The dst read was issued in B_IDLE and B_LOOK served as
+                    // its latency cycle, so comp_rd_qword is valid NOW. Latch it and go
+                    // straight to blend — B_DSTW/B_DSTC are gone.
+                    if (tri_need_dst) dst_q <= comp_rd_qword[b_dst_lane*16 +: 16];
+                    else              dst_q <= 16'd0;
+                    pb<=B_WR;
                 end else begin
                     if (!fill_busy) begin
                         // demand-fetch (arbiter idle): issue the read for b_qtag's qword.
@@ -1462,13 +1533,26 @@ module blitter_top #(
             // Stall until the single outstanding fill lands (catcher writes tq_data[slot]
             // and clears fill_busy), then re-issue the registered read. On device this is
             // the per-pixel texel-fetch wait; the perf counter attributes it to texwait.
-            B_WAIT: if (!fill_busy) pb <= B_LOOK;
-            // comp_fbram read has 1-cycle latency: B_DSTW presents rd_en, B_DSTC
-            // captures the registered qword and lane-selects the dst pixel.
-            B_DSTW: pb<=B_DSTC;
-            B_DSTC: begin
-                dst_q <= comp_rd_qword[b_dst_lane*16 +: 16];   // [app-surface v1] WORK or surface
-                pb<=B_WR;
+            // [Phase 1 A2] Re-issue the dst read on the retry. The read issued in B_IDLE
+            // did NOT survive this stall — comp_rd_qword is a shared, single-registered
+            // output that other clients drive — so it must be re-issued.
+            //
+            // It is re-issued HERE, on the B_WAIT -> B_LOOK edge, and deliberately NOT in
+            // B_FILL's miss branch: rd_en asserted from the miss branch would go high
+            // during B_WAIT, making comp_rd_qword valid one cycle BEFORE B_FILL even in
+            // the fastest case (miss -> 1-cyc B_WAIT -> B_LOOK -> B_FILL), and N-1 cycles
+            // stale for an N-cycle stall. Issuing at this edge makes B_LOOK the latency
+            // cycle again, exactly mirroring the B_IDLE -> B_LOOK path.
+            //
+            // NOTE: no bench currently exercises miss + tri_need_dst (every dst-path bench
+            // — trilist_add/calpha — runs a pure 8.00 cyc/px hit path with zero B_WAIT),
+            // so the framebuffer diff CANNOT catch a mistake here. That is why the
+            // A2-DSTAGE assertion below guards it instead of relying on the golden.
+            B_WAIT: if (!fill_busy) begin
+                if (tri_need_dst) begin
+                    tri_fb_rd_en <= 1'b1; tri_fb_rd_qw <= b_dst_qw;
+                end
+                pb <= B_LOOK;
             end
             // ── blend stage A (comp_mixer stage A analogue) ──────────────────────
             // Tint the source channels (red255(texel*c)), split the dst channels, and

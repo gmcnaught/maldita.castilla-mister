@@ -99,6 +99,66 @@ module tb_blitter_trilist_pipe;
     .fb_rd_en(fb_rd_en), .fb_rd_qw(fb_rd_qw), .fb_rd_qword(fb_rd_qword),
     .idle(bt_idle));
 
+  // ── [Phase 1 A2] Per-pixel throughput gate ────────────────────────────────────
+  // A2's whole purpose is a cycle reduction, so this measures cycles, not just
+  // correctness. Unlike A1's assertion (which deliberately watched a PORT so the
+  // verdict stayed on the published interface), the SUBJECT here IS internal
+  // microarchitecture — pb's state occupancy — so a hierarchical probe is the only
+  // honest way to measure it. `pb` is not, and should not become, a port.
+  //
+  // TWO numbers are collected, because one alone can mislead:
+  //
+  //   pb-occupancy = cycles pb is actually working / pixels retired.
+  //     This is exactly what A2 changes: 8 -> 6 on the texel-hit path.
+  //
+  //   wall-clock   = total elapsed cycles / pixels retired.
+  //     pa and pb run CONCURRENTLY behind the depth-8 payload FIFO, so end-to-end
+  //     throughput is max(pa, pb), not pb. pa is 7 states (A_PIX, A_MUL0, A_MUL1,
+  //     A_MUL, A_ADDR, A_ADDR2, A_ISSUE), so once pb drops to 6, pa becomes the
+  //     limiter and wall-clock is expected to land at 7 — NOT 6.
+  //
+  // Reporting only the first would overstate the win; reporting only the second
+  // would make a working A2 look like a failure. The gate is on pb-occupancy (the
+  // thing A2 controls) at the brief's 7.0 threshold — pre-change ~8 fails, post-
+  // change ~6 passes, so it keeps the brief's discriminating power. The wall-clock
+  // number is printed unconditionally so the pa limit can never hide.
+  // EXPIRY: this reasoning holds only while pa >= pb. If a later task cuts pa below
+  // 6, re-derive — wall-clock would then track pb again and these two converge.
+  integer a2_pb_cyc, a2_wall_cyc, a2_pixels;
+  reg     a2_started;
+  initial begin a2_pb_cyc=0; a2_wall_cyc=0; a2_pixels=0; a2_started=1'b0; end
+  always @(posedge clk) if (!rst) begin
+    // pb is "occupied" whenever it is not parked in B_IDLE with an empty FIFO.
+    if ((blt.pb != 4'd0) || !blt.pf_empty) begin
+      a2_pb_cyc  <= a2_pb_cyc + 1;
+      a2_started <= 1'b1;
+    end
+    if (a2_started)      a2_wall_cyc <= a2_wall_cyc + 1;
+    if (blt.pb == 4'd8)  a2_pixels   <= a2_pixels + 1;   // B_WR3 is single-cycle: one retire
+  end
+
+  task a2_report_cycles;
+    real pb_avg, wall_avg;
+    begin
+      if (a2_pixels == 0) begin
+        $display("FAIL A2: no pixels retired");
+        $finish;
+      end
+      pb_avg   = $itor(a2_pb_cyc)   / $itor(a2_pixels);
+      wall_avg = $itor(a2_wall_cyc) / $itor(a2_pixels);
+      $display("A2 pb-occupancy: %0d cyc / %0d px = %.2f cyc/px  (target 6, was 8)",
+               a2_pb_cyc, a2_pixels, pb_avg);
+      $display("A2 wall-clock  : %0d cyc / %0d px = %.2f cyc/px  (max(pa,pb)-limited; pa=7)",
+               a2_wall_cyc, a2_pixels, wall_avg);
+      if (pb_avg > 7.0) begin
+        $display("FAIL A2: pb occupancy %.2f cyc/px exceeds the 6-cycle hit path (+ texel stalls)",
+                 pb_avg);
+        $finish;
+      end
+      $display("PASS A2: pb %.2f cyc/px", pb_avg);
+    end
+  endtask
+
   always @(posedge clk) begin
     d_dready <= 1'b0;
     d_dout   <= 64'hDEAD_BEEF_DEAD_BEEF;
@@ -157,6 +217,10 @@ module tb_blitter_trilist_pipe;
     $display("=== PERF tri=%0d texwait=%0d dpath=%0d covered_px=%0d | dpath_cyc/px=%0d ===",
              blt.perf_tri_cyc, blt.perf_texwait_cyc, blt.perf_tri_cyc-blt.perf_texwait_cyc,
              ncov, (ncov>0)?((blt.perf_tri_cyc-blt.perf_texwait_cyc)/ncov):0);
+
+    // [Phase 1 A2] cycle gate, before the framebuffer diff below. A cycle win with a
+    // broken diff is not a win, so both must hold.
+    a2_report_cycles;
 
     bad=0;
     for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin
