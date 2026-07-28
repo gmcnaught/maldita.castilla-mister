@@ -1,4 +1,6 @@
 _Other/*.rbf
+# deploy.py --fetch-rbf provenance sidecars (local artifact metadata, not source)
+_Other/*.provenance.json
 build/
 work/
 deploy/solarus-run
