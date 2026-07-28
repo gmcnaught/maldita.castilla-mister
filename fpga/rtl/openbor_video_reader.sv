@@ -813,6 +813,12 @@ always @(posedge ddr_clk) begin
                     new_frame_pending <= 1'b0;
                     state <= ST_WRITE_JOY0;
                 end
+                else if (audio_wake)
+                    // [audio POLL-anchor] audio_wake was only evaluated in ST_IDLE,
+                    // which starves once frames stream (same defect as the JOY
+                    // writeback) — in-game the ring would never drain. Service it
+                    // here; the audio chain's exits return here too.
+                    state <= ST_POLL_AUDIO_WR;
                 else if (beacon_pending)
                     state <= ST_BEACON;
                 else if (!ddr_busy) begin
@@ -993,9 +999,11 @@ always @(posedge ddr_clk) begin
                     state        <= ST_PLAN_AUDIO;
                 end
                 // [#39] a lost f2h read-response must not wedge the shared scanout
-                // FSM: recover to ST_IDLE (mirrors ST_WAIT_CTRL / ST_WAIT_LINE).
+                // FSM: recover (mirrors ST_WAIT_CTRL / ST_WAIT_LINE). [audio
+                // POLL-anchor] exits return to ST_POLL_CTRL, the live hub — ST_IDLE
+                // starves once frames stream.
                 else if (timeout_cnt == TIMEOUT_MAX)
-                    state <= ST_IDLE;
+                    state <= ST_POLL_CTRL;
                 else
                     timeout_cnt <= timeout_cnt + 20'd1;
             end
@@ -1005,14 +1013,14 @@ always @(posedge ddr_clk) begin
                 if (audio_bytes_avail == 32'd0) begin
                     // Ring empty -- back off briefly to avoid DDR3 spam.
                     audio_backoff <= 20'h01000;  // ~42 us at 98.44 MHz clk_sys
-                    state         <= ST_IDLE;
+                    state         <= ST_POLL_CTRL;
                 end
                 else if (!audio_fifo_low) begin
                     // FIFO filled up while we were polling; don't fetch.
-                    state <= ST_IDLE;
+                    state <= ST_POLL_CTRL;
                 end
                 else if (audio_plan_bytes == 32'd0) begin
-                    state <= ST_IDLE;
+                    state <= ST_POLL_CTRL;
                 end
                 else begin
                     // Plan a burst: min(bytes_avail, 256, ring_wrap_room),
@@ -1050,8 +1058,9 @@ always @(posedge ddr_clk) begin
                 // wedged the single shared scanout FSM forever -> vsync freeze ->
                 // black screen. Abandon the partial burst and re-plan next wake;
                 // do NOT advance audio_rd_ptr -- the burst didn't complete.
+                // [audio POLL-anchor] recover to ST_POLL_CTRL (ST_IDLE starves).
                 else if (timeout_cnt == TIMEOUT_MAX)
-                    state <= ST_IDLE;
+                    state <= ST_POLL_CTRL;
                 else
                     timeout_cnt <= timeout_cnt + 20'd1;
             end
@@ -1062,7 +1071,7 @@ always @(posedge ddr_clk) begin
                     ddr_din      <= {32'd0, audio_rd_ptr};
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
-                    state        <= ST_IDLE;
+                    state        <= ST_POLL_CTRL;   // [audio POLL-anchor]
                 end
             end
 

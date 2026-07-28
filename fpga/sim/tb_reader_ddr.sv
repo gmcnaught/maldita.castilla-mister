@@ -87,7 +87,12 @@ module tb_reader_ddr;
 
     reg [63:0] mem0 [0:NQW-1];
     reg [63:0] mem1 [0:NQW-1];
-    reg [31:0] ctrl_word;
+    // ctrl_word must be a WIRE: an `always @(*)` version never evaluates at t=0
+    // (declaration-time inits fire no change event in iverilog), leaving it X
+    // until the first fc toggle at ~4.4ms. The POLL-anchored audio path issues
+    // the first ctrl read at ~165us, which captured that X into
+    // prev_frame_counter and poisoned frame detection for the whole run.
+    wire [31:0] ctrl_word;
     integer i, qw, ln, xx;
     // active buffer pixel at STORAGE (x,y)
     function [15:0] bufpix(input integer act, input integer x, input integer y);
@@ -103,6 +108,11 @@ module tb_reader_ddr;
             if (a == CTRLA)                              mem_read = {32'd0, ctrl_word};
             else if (a >= BUF0 && a < BUF0 + NQW)        mem_read = mem0[a - BUF0];
             else if (a >= BUF1 && a < BUF1 + NQW)        mem_read = mem1[a - BUF1];
+            // Audio ring pointers (ABSOLUTE addresses since the native-audio PR):
+            // model an IDLE ring (wr==rd==0) so the un-gated audio_wake takes the
+            // backoff path instead of burst-reading a garbage 0xDEADDEAD wr_ptr —
+            // which is what a real idle device reads there.
+            else if (a == 29'h07400006 || a == 29'h07400007) mem_read = 64'd0;
             else                                         mem_read = 64'hDEAD_DEAD_DEAD_DEAD;
         end
     endfunction
@@ -154,7 +164,7 @@ module tb_reader_ddr;
         nf_q <= tim_nf;
         if (!reset && tim_nf && !nf_q) fc <= fc + 30'd1;
     end
-    always @(*) ctrl_word = {fc, 1'b0, model_active};
+    assign ctrl_word = {fc, 1'b0, model_active};
 
     // ── checks ────────────────────────────────────────────────────────────────────
     integer addr_errs = 0, data_errs = 0, orient_errs = 0, active_err = 0;
