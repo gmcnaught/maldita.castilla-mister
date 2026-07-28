@@ -67,7 +67,30 @@ export GMLOADER_RASTER=mfgpu
 # already has a usable LD_LIBRARY_PATH — always test via the daemon, not by hand.
 export LD_LIBRARY_PATH="$GAMEDIR/mesa:$GAMEDIR"
 
+# Optional bench-only override hook (perf diagnostics harness only — see
+# mister-gmloader scripts/mister_run.sh). Sourced IFF $GAMEDIR/bench.env
+# exists; production launches never create that file, so this block is a
+# no-op and the log line below is byte-identical to before this hook existed.
+# Placed AFTER the hardcoded exports above so a staged bench.env can ADD
+# diagnostic knobs (GMLOADER_MFSUBMIT_STAT, GMLOADER_BLITTER_PROF,
+# GMLOADER_DRAW_TRACE, GMLOADER_JOY_SHM, ...) — but note `.` sourcing DOES
+# override any variable bench.env also sets, including BLITTER/RASTER: a
+# staged `--preset gl` (GMLOADER_BLITTER=0) demonstrably replaces the
+# hardcoded BLITTER=2 above. That is intentional (it's how the harness runs
+# non-fabric presets), but it means a leftover bench.env is not merely inert
+# extra knobs — it silently overrides the required BLITTER/RASTER pair on
+# the next unrelated production launch too.
+# The harness removes bench.env during its own teardown; a leftover file here
+# would silently steer a later, unrelated production launch, so treat one as
+# a bug, not a feature.
+BENCH_ENV="$GAMEDIR/bench.env"
+BENCH_NOTE=""
+if [ -f "$BENCH_ENV" ]; then
+    . "$BENCH_ENV"
+    BENCH_NOTE=" BENCH_ENV=sourced($BENCH_ENV)"
+fi
+
 echo "maldita handler: CORENAME='$(cat /tmp/CORENAME 2>/dev/null)' \
-BLITTER=$GMLOADER_BLITTER RASTER=$GMLOADER_RASTER" > "$LOGDIR/maldita.log"
+BLITTER=$GMLOADER_BLITTER RASTER=$GMLOADER_RASTER${BENCH_NOTE}" > "$LOGDIR/maldita.log"
 
 exec ./gmloader -c gmloader.json >> "$LOGDIR/maldita.log" 2>&1
