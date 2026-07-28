@@ -287,6 +287,11 @@ module blitter_top #(
     // ddram_busy -> scanout FIFO underflow -> rolling image). jtframe lfbuf discipline:
     // the writer must not steal the display's bus window. 0 = no throttle.
     reg  [7:0]  throttle_cfg;
+    // [Phase 1 A3] Command-ring select. 0 -> `RING_QW (ring A), 1 -> `RING_B_QW (ring B).
+    // Latched once per frame from C_SRCSEL bit 2 in the control-block prologue, so a frame
+    // can never straddle two rings. See blitter_defs.vh C_RINGSEL_BIT for the ABI note.
+    reg         ring_sel;
+    wire [28:0] ring_base = ring_sel ? `RING_B_QW : `RING_QW;
     reg  [63:0] rd_data;
 
     reg  [31:0] submit_reg, done_reg, cmd_count, cmd_idx, frame_counter;
@@ -906,6 +911,7 @@ module blitter_top #(
             perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;
             perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;
             throttle_cnt<=8'd0; throttle_cfg<=8'd0;
+            ring_sel<=1'b0;                   // [Phase 1 A3] default to ring A
             pipe_start<=1'b0;
             src_sdram_we<=1'b0; src_sdram_din<=16'd0; stage_waddr_fsm<=27'd0;
             stage_we_burst_fsm<=1'b0; stage_din64_fsm<=64'd0;
@@ -1008,6 +1014,10 @@ module blitter_top #(
                 // [collapse-single-source] bit0 (DDR3-vs-SDRAM source select) ignored:
                 // the source read is hardwired to SDRAM. Only the throttle field is used.
                 throttle_cfg<=rd_data[15:8];      // [#34] f2h write-throttle (spare bits)
+                // [Phase 1 A3] Ring select. Latched here in the control-block prologue,
+                // which runs before any command is fetched, so the whole frame reads one
+                // ring. Bits 0/1 remain dead (see the comments above/below).
+                ring_sel<=rd_data[`C_RINGSEL_BIT];
                 // C_PIPE bit (bit1) is also a documented no-op: comp_pipeline is the
                 // sole renderer and every FILL/BLIT routes to it unconditionally.
                 bm_rd<=1; bm_addr<=`BLTCTRL_QW+`C_CLEAR;
@@ -1059,7 +1069,7 @@ module blitter_top #(
             S_FETCH: begin
                 if (cmd_idx>=cmd_count) state<=S_FRAME_VCTRL;
                 else begin
-                    fetch_k<=0; bm_rd<=1; bm_addr<=`RING_QW+cmd_idx*4;
+                    fetch_k<=0; bm_rd<=1; bm_addr<=ring_base+cmd_idx*4;
                     rd_ret<=S_COLLECT; state<=S_RD_WAIT;
                 end
             end
@@ -1067,7 +1077,7 @@ module blitter_top #(
                 cmd_qw[fetch_k]<=rd_data;
                 if (fetch_k==2'd3) state<=S_DECODE;
                 else begin
-                    bm_rd<=1; bm_addr<=`RING_QW+cmd_idx*4+(fetch_k+2'd1);
+                    bm_rd<=1; bm_addr<=ring_base+cmd_idx*4+(fetch_k+2'd1);
                     fetch_k<=fetch_k+2'd1; rd_ret<=S_COLLECT; state<=S_RD_WAIT;
                 end
             end

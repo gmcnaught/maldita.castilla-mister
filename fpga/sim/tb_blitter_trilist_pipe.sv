@@ -109,6 +109,35 @@ module tb_blitter_trilist_pipe;
   `define A2_PB_MAX 7.0
   `include "a2_cycle_gate.vh"
 
+  // ── [Phase 1 A3] ring-select check ────────────────────────────────────────────
+  // With C_SRCSEL bit 2 set, every command fetch must address ring B and NONE may
+  // address ring A. Both directions are checked: a positive-only test would pass with
+  // the selector hardwired to 1, and a stuck-at-0 selector is the failure this exists
+  // to catch. Regions are derived from the macros, never retyped.
+  //   ring A = [`RING_QW, `RING_B_QW)     ring B = [`RING_B_QW, `SRC_QW)
+  // The control block sits BELOW `RING_QW (`BLTCTRL_QW + offsets 0..7), so control
+  // reads/writes cannot trip the ring-A probe.
+  reg a3_saw_ring_a, a3_saw_ring_b;
+  initial begin a3_saw_ring_a = 1'b0; a3_saw_ring_b = 1'b0; end
+  always @(posedge clk) if (b_rd) begin
+    if ((bt_addr[28:0] >= `RING_QW)   && (bt_addr[28:0] < `RING_B_QW)) a3_saw_ring_a <= 1'b1;
+    if ((bt_addr[28:0] >= `RING_B_QW) && (bt_addr[28:0] < `SRC_QW))    a3_saw_ring_b <= 1'b1;
+  end
+
+  task a3_check_ring_select;
+    begin
+      if (!a3_saw_ring_b) begin
+        $display("FAIL A3: command fetch never addressed RING_B_QW with C_SRCSEL bit2 set");
+        $finish;
+      end
+      if (a3_saw_ring_a) begin
+        $display("FAIL A3: command fetch addressed ring A while C_SRCSEL bit2 was set");
+        $finish;
+      end
+      $display("PASS A3: command fetch used ring B, and never ring A");
+    end
+  endtask
+
   always @(posedge clk) begin
     d_dready <= 1'b0;
     d_dout   <= 64'hDEAD_BEEF_DEAD_BEEF;
@@ -143,10 +172,37 @@ module tb_blitter_trilist_pipe;
     end
   endfunction
 
+  // [Phase 1 A3] indices into `mem` (index = qword addr - WBASE), derived from the
+  // canonical macros so a base move cannot silently desync this bench.
+  localparam integer A3_CTRL_IDX  = `BLTCTRL_QW - WBASE;
+  localparam integer A3_RINGA_IDX = `RING_QW    - WBASE;
+  localparam integer A3_RINGB_IDX = `RING_B_QW  - WBASE;
+
+  integer a3_i, a3_ncmd;
   initial begin
     for(i=0;i<MEMQW;i=i+1) mem[i]=64'd0;
     $readmemh("vectors/tri_copy_ddr.hex", mem);
     $readmemh("vectors/tri_copy_exp.hex", exp);
+
+    // [Phase 1 A3] Move the whole command list to ring B, POISON ring A, and set the
+    // selector — done here, at the tail of the block that loads the vectors, so the
+    // ordering against $readmemh is deterministic rather than relying on #0 between
+    // initial blocks.
+    //
+    // Ring A is poisoned with 64'd0 = OP_NOP (blitter_top.sv:199), which is DELIBERATE:
+    // the fabric walks cmd_count NOPs and terminates cleanly via S_NEXT_CMD, so a
+    // stuck-at-0 selector produces a BLANK framebuffer rather than a hang. That gives
+    // two independent detections of the same fault — the ±1 LSB diff goes red AND the
+    // address probe goes red — instead of a timeout that could be mistaken for anything.
+    a3_ncmd = mem[A3_CTRL_IDX + `C_CMDCOUNT][31:0];
+    for (a3_i = 0; a3_i < a3_ncmd*4; a3_i = a3_i + 1) begin
+      mem[A3_RINGB_IDX + a3_i] = mem[A3_RINGA_IDX + a3_i];
+      mem[A3_RINGA_IDX + a3_i] = 64'd0;
+    end
+    // Set ring-select, preserving every other bit — [15:8] is the LIVE f2h throttle.
+    mem[A3_CTRL_IDX + `C_SRCSEL][`C_RINGSEL_BIT] = 1'b1;
+    $display("A3 setup: %0d cmds relocated to ring B, ring A poisoned with OP_NOP, C_SRCSEL=%08h",
+             a3_ncmd, mem[A3_CTRL_IDX + `C_SRCSEL][31:0]);
   end
 
   integer to;
@@ -168,6 +224,11 @@ module tb_blitter_trilist_pipe;
              blt.perf_tri_cyc, blt.perf_texwait_cyc, blt.perf_tri_cyc-blt.perf_texwait_cyc,
              ncov, (ncov>0)?((blt.perf_tri_cyc-blt.perf_texwait_cyc)/ncov):0);
 
+    // [Phase 1 A3] ring-select check runs FIRST, deliberately. Ring A is poisoned with
+    // NOPs, so a ring-select fault renders nothing — which trips A2's "no pixels retired"
+    // guard and would report a cycle-gate failure for what is really a ring fault.
+    // Diagnosing the more fundamental fault first keeps the message honest.
+    a3_check_ring_select;
     // [Phase 1 A2] cycle gate, before the framebuffer diff below. A cycle win with a
     // broken diff is not a win, so both must hold.
     a2_report_cycles;

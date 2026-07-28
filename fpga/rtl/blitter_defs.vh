@@ -31,7 +31,26 @@
 `define FB1_QW      29'h07408008          // 0x3A040040 (BUF1, existing)
 `define VCTRL_QW    29'h07400000          // 0x3A000000 (video control word)
 `define BLTCTRL_QW  29'h07600000          // 0x3B000000 (blitter control block)
-`define RING_QW     29'h07600008          // 0x3B000040 (command ring; [#52] spans to 0x3B080000)
+// [Phase 1 A3] DOUBLE-BUFFERED command ring. The 512 KiB region is split into two
+// 256 KiB rings so the host can build frame N+1 while the fabric reads N. Selected by
+// C_SRCSEL bit 2 (see C_RINGSEL_BIT below).
+//
+// CROSS-REPO ABI — these four values must match gmloader-next exactly. A mismatch is
+// invisible to BOTH sides' test suites (each is internally consistent; only the pairing
+// is wrong) and shows up only as the fabric reading a ring the host never wrote:
+//   ring A base 0x3B000040, ring B base 0x3B040000, selector = C_SRCSEL bit 2,
+//   SRC_QW unmoved at 0x3B080000.
+//
+// Capacity, derived from these addresses rather than asserted (commands are 4 qwords
+// = 32 B): ring A spans 0x3B040000-0x3B000040 = 0x3FFC0 B = 8190 cmds; ring B spans
+// 0x3B080000-0x3B040000 = 0x40000 B = 8192 cmds. Down from ~16382 for the single ring.
+// The overflow that forced the original 32 KiB -> 512 KiB growth was >1022 cmds in
+// Solarus tile-heavy areas, so this keeps ~8x headroom. The host logs a cmd_count
+// high-water mark so an approach to the cap is visible rather than silent.
+//
+// SRC_QW is deliberately NOT moved — see the must-match-across-repos note on it below.
+`define RING_QW     29'h07600008          // 0x3B000040 (ring A, 256 KiB)
+`define RING_B_QW   29'h07608000          // 0x3B040000 (ring B, 256 KiB)
 `define SRC_QW      29'h07610000          // 0x3B080000 ([#52] heap base moved up 480 KiB to grow the
                                           // command ring 32 KiB->512 KiB: 8x8-tile heavy areas emit
                                           // >1022 cmds/frame and overflowed the old ring -> black.
@@ -75,6 +94,14 @@
 // and BIT 1 is the pipe-select. C_PIPE names that word; pipe_en = word[1].
 `define C_PIPE      29'd7        // same word as C_SRCSEL; pipe_en = word bit 1
 `define C_PIPE_BIT  1            // bit within the C_PIPE word that enables the pipe
+// [Phase 1 A3] Ring select, carried in a SPARE BIT of the C_SRCSEL word for the same
+// reason C_PIPE is: control-block offset 8 aliases ring command 0, so there is no free
+// qword. Bit 0 (srcsel) and bit 1 (pipe) are both dead — the source read is hardwired
+// to SDRAM (blitter_top.sv: `wire src_in_sdram = 1'b1;`) and comp_pipeline is the sole
+// renderer — so bit 2 is unambiguous. Bits [15:8] are the LIVE f2h write-throttle and
+// must be preserved by anything writing this word.
+//   word bit 2 == 0 -> RING_QW (ring A);  == 1 -> RING_B_QW (ring B).
+`define C_RINGSEL_BIT 2
 
 // ── [v2 escape-elim] command-ABI mirror (values FROZEN in blitter_ref.h) ────────
 // blend_mode (cmd byte 1) extends past PALPHA=3; F_COLORMOD is the next free flag.
