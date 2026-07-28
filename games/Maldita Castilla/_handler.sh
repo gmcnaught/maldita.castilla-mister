@@ -72,8 +72,14 @@ export LD_LIBRARY_PATH="$GAMEDIR/mesa:$GAMEDIR"
 # exists; production launches never create that file, so this block is a
 # no-op and the log line below is byte-identical to before this hook existed.
 # Placed AFTER the hardcoded exports above so a staged bench.env can ADD
-# knobs (GMLOADER_MFSUBMIT_STAT, GMLOADER_BLITTER_PROF, GMLOADER_DRAW_TRACE,
-# GMLOADER_JOY_SHM, ...) without overriding the required BLITTER/RASTER pair.
+# diagnostic knobs (GMLOADER_MFSUBMIT_STAT, GMLOADER_BLITTER_PROF,
+# GMLOADER_DRAW_TRACE, GMLOADER_JOY_SHM, ...) — but note `.` sourcing DOES
+# override any variable bench.env also sets, including BLITTER/RASTER: a
+# staged `--preset gl` (GMLOADER_BLITTER=0) demonstrably replaces the
+# hardcoded BLITTER=2 above. That is intentional (it's how the harness runs
+# non-fabric presets), but it means a leftover bench.env is not merely inert
+# extra knobs — it silently overrides the required BLITTER/RASTER pair on
+# the next unrelated production launch too.
 # The harness removes bench.env during its own teardown; a leftover file here
 # would silently steer a later, unrelated production launch, so treat one as
 # a bug, not a feature.
