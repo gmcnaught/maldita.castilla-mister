@@ -346,6 +346,35 @@ static int build(const char *s) {
         put_verts(v,6);
         set_hdr(BLT_BLEND_COPY, 128,128,256, 0, 255);
         hdr.src_off = TEX_OFF;
+    } else if (!strcmp(s, "tri_missdst")) {
+        /* [Phase 1 2b] The one combination no other scenario reaches: a texel MISS
+         * on a triangle that ALSO reads its destination.
+         *   - texture/geometry are tri_uvfull's: a 128x128 stride-256 texture at a
+         *     non-zero src_off with u,v sweeping 0..127 across a 2-tri quad. That is
+         *     thousands of distinct qwords through a direct-mapped tq cache, so it
+         *     thrashes and B_WAIT is entered constantly (uvfull measures texwait=39834).
+         *   - blend is CONST_ALPHA, so tri_need_dst is TRUE for every pixel (verified:
+         *     tri_calpha reaches B_DSTW on 3200/3200 px).
+         * uvfull alone has tri_need_dst FALSE; add/calpha alone have zero B_WAIT. Only
+         * the combination exercises A2's B_WAIT -> B_LOOK dst re-issue.
+         *
+         * Per-vertex alpha is 128, NOT 255, and that is load-bearing: at alpha 255 the
+         * blend result is the source regardless of the destination, so a STALE dst read
+         * would produce a bit-identical golden and this bench would be as blind as the
+         * ones it exists to supplement. At ~50% the destination materially changes every
+         * pixel, which is what makes the +-1 LSB diff discriminating on this path. */
+        tex_coord128(TEX_OFF);
+        blt_vtx_t v[6] = {
+            VTX(40,40,        0,      0, 255,255,255,128),
+            VTX(168,40,  127*16,      0, 255,255,255,128),
+            VTX(168,168, 127*16, 127*16, 255,255,255,128),
+            VTX(40,40,        0,      0, 255,255,255,128),
+            VTX(168,168, 127*16, 127*16, 255,255,255,128),
+            VTX(40,168,       0, 127*16, 255,255,255,128),
+        };
+        put_verts(v,6);
+        set_hdr(BLT_BLEND_CONST_ALPHA, 128,128,256, 0, 255);
+        hdr.src_off = TEX_OFF;
     } else {
         fprintf(stderr, "unknown scenario '%s'\n", s);
         return -1;

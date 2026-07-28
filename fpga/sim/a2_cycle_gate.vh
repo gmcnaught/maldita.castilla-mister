@@ -28,6 +28,13 @@
 // EXPIRY: the wall commentary above holds only while pa >= pb. If a later task cuts pa
 // below 6, wall tracks pb again and the two numbers converge. The pb figure itself does
 // not expire — it measures pb occupancy directly, independent of pa.
+//
+// pb states are referenced HIERARCHICALLY (blt.B_IDLE / blt.B_WR3), not as literals.
+// With literals, renumbering pb would make this gate MISCOUNT rather than error — a
+// silent wrong number — and that hazard had leaked back into blitter_top.sv as a comment
+// forbidding renumbering *because of this file*. A test-side shortcut had become a
+// constraint on future RTL work. Binding to the localparams removes both: renumber pb
+// freely and this follows.
 
 integer a2_pb_cyc, a2_wall_cyc, a2_pixels, a2_wall_at_last_retire;
 reg     a2_started;
@@ -37,12 +44,12 @@ initial begin
 end
 always @(posedge clk) if (!rst) begin
   // pb is "occupied" whenever it is not parked in B_IDLE with an empty FIFO.
-  if ((blt.pb != 4'd0) || !blt.pf_empty) begin
+  if ((blt.pb != blt.B_IDLE) || !blt.pf_empty) begin
     a2_pb_cyc  <= a2_pb_cyc + 1;
     a2_started <= 1'b1;
   end
   if (a2_started) a2_wall_cyc <= a2_wall_cyc + 1;
-  if (blt.pb == 4'd8) begin                  // B_WR3 is single-cycle: one pixel retires
+  if (blt.pb == blt.B_WR3) begin             // B_WR3 is single-cycle: one pixel retires
     a2_pixels <= a2_pixels + 1;
     // Anchor the wall span's END at the last retire. Without this the counter keeps
     // running through the frame-end FSM until $finish, inflating wall/px with trailing
@@ -70,3 +77,16 @@ task a2_report_cycles;
     $display("PASS A2: pb %.2f cyc/px", pb_avg);
   end
 endtask
+
+// Each including bench `define`s its own budget immediately before the `include`; undef it
+// here so a second bench in the SAME compilation unit redefines cleanly instead of erroring.
+//
+// NO INCLUDE GUARD, deliberately. This is a per-MODULE include, not a per-compilation-unit
+// header: every including bench needs its own copy of the counters and the task inside its
+// own scope. A `ifndef guard would emit the body only for the FIRST bench — verified, not
+// assumed: with a guard, compiling tb_blitter_trilist_add.sv and tb_blitter_trilist_calpha.sv
+// in one iverilog invocation fails with
+//     tb_blitter_trilist_calpha.sv:129: error: Enable of unknown task `a2_report_cycles'
+// i.e. the guard breaks exactly the multi-bench compilation it was meant to protect. The
+// `undef` alone is what makes that case work.
+`undef A2_PB_MAX

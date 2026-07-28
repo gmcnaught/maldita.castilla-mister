@@ -492,9 +492,17 @@ module blitter_top #(
     // demand/prefetch fill, then re-read). This breaks the b_qtag -> 256-entry distributed
     // tag/data mux -> dst_q combinational path that failed STA at -1.732ns on the fabric clk.
     // [Phase 1 A2] B_DSTW=4'd4 / B_DSTC=4'd5 are DELETED (the dst read is hoisted into
-    // B_IDLE). The remaining encodings are deliberately NOT renumbered — 4 and 5 are left
-    // as a hole because tb_blitter_trilist_pipe's cycle gate and the wedge-probe
-    // state_at_peak snapshots both key off literal pb values.
+    // B_IDLE), leaving 4 and 5 as a hole.
+    //
+    // [Phase 1 2b] The sim cycle gate no longer constrains this encoding. a2_cycle_gate.vh
+    // used to key off LITERAL pb values, so renumbering would have made it MISCOUNT rather
+    // than error — and that test-side shortcut had leaked back HERE as a rule forbidding
+    // renumbering, i.e. a testbench convenience had become a constraint on RTL. It now binds
+    // hierarchically (blt.B_IDLE / blt.B_WR3) and follows any renumbering automatically.
+    //
+    // Still check the wedge-probe state_at_peak snapshots before renumbering: those raw pb
+    // values are decoded by eye when reading device dumps, so a changed encoding silently
+    // reinterprets historical probe data instead of failing loudly.
     localparam [3:0] B_IDLE=4'd0, B_LOOK=4'd1, B_FILL=4'd2, B_WAIT=4'd3,
                      B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8,
                      // [app-surface v1] surface texel read: issue surf_rd (B_SURF_W is the
@@ -745,13 +753,33 @@ module blitter_top #(
     // the dst read from B_WR3 to shave another cycle). The one-cycle separation above is
     // the entire safety argument; nothing else protects these banks.
 
-    // [Phase 1 A2] DST-STALENESS invariant — guards the path the goldens CANNOT.
-    // comp_rd_qword is only valid the cycle after tri_fb_rd_en was asserted, so every
-    // site that latches dst_q from it must have issued the read in the immediately
-    // preceding cycle. This catches an off-by-one re-issue on the texel-MISS retry,
-    // which no bench covers: every dst-path bench (trilist_add/calpha) runs a pure
-    // 8.00 cyc/px hit path with zero B_WAIT, so a stale dst read there would produce
-    // bit-identical goldens and slip through the +-1 LSB diff entirely.
+    // [Phase 1 A2] DST-STALENESS invariant — a design-CONTRACT guard.
+    // Contract: comp_rd_qword must be consumed in the cycle immediately after
+    // tri_fb_rd_en was asserted, at every site that latches dst_q from it.
+    //
+    // [Phase 1 2b] WHAT THIS DOES AND DOES NOT CATCH — measured, after
+    // tb_blitter_trilist_missdst made the miss+dst path reachable (1809 retry re-issues,
+    // B_WAIT=39834). Moving the re-issue back into B_FILL's miss branch (the original,
+    // rejected placement) gives:
+    //     with this assertion   -> FAIL A2-DSTALE
+    //     with it SUPPRESSED    -> bad = 0/62208, RESULT: PASS
+    // So this assertion is the ONLY thing that distinguishes the two placements — the
+    // golden diff does not, even on a bench that genuinely reaches the path.
+    //
+    // Be precise about why, because it is NOT that the pixels are silently corrupt: both
+    // placements read the SAME address (b_dst_qw), and comp_fbram's read registers update
+    // only under `if (rd_en)` (comp_fbram.sv:76), so rd_qword HOLDS its value until the
+    // next read. During a triangle the tri path is the sole reader
+    // (cr_en = tri_busy ? tri_fb_rd_en : pipe_fb_rd_en), so nothing can overwrite it in
+    // between. The early read therefore still yields the correct data TODAY.
+    //
+    // The rejected placement is thus a LATENT fault, not an active one: it is correct only
+    // by relying on (a) comp_fbram holding rd_qword and (b) the tri path having exclusive
+    // read access for the whole stall. Break either — a shared read port, a client added
+    // under tri_busy, a comp_fbram that returns X when rd_en is low — and it silently
+    // reads someone else's qword. This assertion pins the invariant that makes the
+    // correctness argument independent of both, which is why it is kept even though the
+    // frame comes out bit-exact without it.
     always @(posedge clk) if (!rst && tri_need_dst && !a2_rd_en_d) begin
         if ((pb == B_FILL) && !tq_rdw_bad && tq_rvalid
                            && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
