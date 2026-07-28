@@ -11,3 +11,8 @@ incremental_db/
 # Icarus sim build artifacts (fpga/sim/run_sims.sh)
 fpga/sim/.simbuild/
 .serena/
+
+# Compiled tree-sitter SystemVerilog grammar for ast-grep (~21 MB build artifact).
+# Rebuild with scripts/provision_ast_grep_sv.sh; CI does this in the ast-grep workflow.
+.ast-grep/*.so
+.ast-grep/*.dylib

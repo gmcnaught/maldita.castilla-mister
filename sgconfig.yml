@@ -1,0 +1,19 @@
+# ast-grep project config. All paths are REPO-RELATIVE so the lint runs in CI and on any
+# machine (the solarus-mister original was hard-coded to one laptop's absolute ruleDir and
+# .dylib, so `ast-grep scan` ran nowhere but the author's machine and gated nothing).
+#
+# The SystemVerilog grammar is a custom tree-sitter language: ast-grep needs a compiled
+# shared library, which is NOT committed (21 MB build artifact). Build it once with
+# scripts/provision_ast_grep_sv.sh — it emits .ast-grep/systemverilog.so, the relative path
+# referenced below. CI does this in the hdl-lint job.
+#
+# NOTE: any command that loads THIS config fails hard if the grammar .so is absent, and
+# `ast-grep scan` AUTO-DISCOVERS this repo-root sgconfig.yml even for an unrelated scan
+# (there is no --no-config flag). A scan that must not load the SV grammar has to pass its
+# OWN minimal `-c <tmp>` config (ruleDirs: [], no customLanguages).
+ruleDirs:
+- rules
+customLanguages:
+  systemverilog:
+    extensions: ["sv", "svh", "v"]
+    libraryPath: .ast-grep/systemverilog.so

@@ -1,0 +1,95 @@
+name: ast-grep HDL lint
+
+# Two jobs, deliberately different strictness:
+#
+#   ramstyle-gate  — GATING. The M10K inference check (scripts/tests/test_ast_grep_ramstyle.sh).
+#                    The tree is at zero findings, so there is no legacy debt to grandfather
+#                    and any regression fails the build. This is the guard for the defect
+#                    fixed in 476a422: a ramstyle array read nested in an FSM case arm, which
+#                    Quartus silently declines to infer as BRAM (map.rpt Info 276007) and
+#                    builds from LAB flops instead — 20,480 stray registers and -0.983 ns
+#                    setup, with nothing in the build log saying so.
+#
+#   hdl-advisory   — ADVISORY. rules/hdl-lint.yaml (inferred latch, blocking-in-sequential,
+#                    nested ternary). 19 pre-existing findings at time of writing, 2 of the
+#                    4 errors inside vendored fpga/rtl/jtframe/, so this reports into the job
+#                    summary and never fails the run. Tighten to a diff-scoped ratchet (see
+#                    solarus-mister/scripts/tests/test_ast_grep_hdl.sh) if the debt is cleared.
+
+on:
+  push:
+    paths:
+      - 'fpga/rtl/**'
+      - 'rules/**'
+      - 'sgconfig.yml'
+      - 'scripts/provision_ast_grep_sv.sh'
+      - 'scripts/tests/test_ast_grep_ramstyle.sh'
+      - 'scripts/tests/fixtures/**'
+      - '.github/workflows/ast-grep.yml'
+  pull_request:
+    paths:
+      - 'fpga/rtl/**'
+      - 'rules/**'
+      - 'sgconfig.yml'
+      - 'scripts/provision_ast_grep_sv.sh'
+      - 'scripts/tests/test_ast_grep_ramstyle.sh'
+      - 'scripts/tests/fixtures/**'
+      - '.github/workflows/ast-grep.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ast-grep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ramstyle-gate:
+    name: M10K inference gate (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ast-grep
+        run: npm install -g @ast-grep/cli
+      # gmlarumbe/tree-sitter-systemverilog ships a pre-generated parser.c with no external
+      # scanner, so the default runner toolchain (cc) builds it in one command.
+      - name: Build the SystemVerilog tree-sitter grammar
+        run: bash scripts/provision_ast_grep_sv.sh
+      # The script self-tests against scripts/tests/fixtures/ before scanning the tree: the
+      # known-bad fixture must fire and the known-good one must stay silent. A rule that
+      # matched nothing would otherwise pass this gate forever while guarding nothing.
+      - name: M10K inference gate
+        run: ./scripts/tests/test_ast_grep_ramstyle.sh
+
+  hdl-advisory:
+    name: HDL structural lint (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ast-grep
+        run: npm install -g @ast-grep/cli
+      - name: Build the SystemVerilog tree-sitter grammar
+        run: bash scripts/provision_ast_grep_sv.sh
+      - name: Scan (never fails the run)
+        run: |
+          ast-grep scan -c sgconfig.yml fpga/rtl 2>&1 | tee hdl-lint.log || true
+          {
+            echo "### HDL structural lint (advisory)"
+            echo ""
+            echo '```'
+            ast-grep scan -c sgconfig.yml fpga/rtl --json 2>/dev/null | python3 -c "
+          import sys, json, collections
+          d = json.load(sys.stdin)
+          c = collections.Counter((x['ruleId'], x.get('severity')) for x in d)
+          print(f'total findings: {len(d)}')
+          for (r, s), n in c.most_common():
+              print(f'  {n:4d}  {s:8s} {r}')
+          " || echo "(scan produced no parseable JSON)"
+            echo '```'
+            echo "<details><summary>full findings</summary>"
+            echo ""
+            echo '```'
+            cat hdl-lint.log
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
