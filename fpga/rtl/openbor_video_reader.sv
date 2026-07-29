@@ -180,9 +180,32 @@ localparam [28:0] DIAG_ADDR       = FB_QW_BASE + 29'h16000; // = byte 0x3BFF0000
 localparam [31:0] AUDIO_RING_BYTES = 32'h00010000; // 64 KiB
 localparam [31:0] AUDIO_RING_MASK  = 32'h0000FFFF;
 
-// Audio refill threshold: trigger a fetch when FIFO has < this qwords used.
-// FIFO is 512 entries deep; 384 leaves 128 qwords (~5.3 ms) headroom.
-localparam [9:0]  AUDIO_REFILL_THRESHOLD = 10'd384;
+// [audio-throughput] Refill sizing. Device-measured 2026-07-29 (.62, Tier 2
+// counters): the FIFO ran DRY -- low-water 0 of 1024 -- with 699.7 underflow pops/s,
+// which is 1.458% of 48 kHz against a 1.463% measured drain deficit. Underflow
+// accounted for the entire deficit, and audio_wake was permanently asserted, so the
+// reader was already trying to refill continuously and simply could not move enough
+// data per unit of arbitration.
+//
+// The cost is per BURST, not per byte: each refill spends three DDR round-trips
+// (poll wr_ptr, the ring read, write rd_ptr) and a return through ST_POLL_CTRL,
+// sharing one FSM and the ram1 port with the ~966K qword/s scanout fetch. At the old
+// 256 B burst, sustaining 48 kHz needed 750 bursts/s = 2250 round-trips/s and the
+// reader topped out ~1.5-2.9% short. Quadrupling the burst to 1024 B cuts that to
+// 188 bursts/s -- the same bytes for a quarter of the arbitration exposure.
+//
+// The FIFO is 1024 qwords (see the dcfifo below; the previous "512 entries" comment
+// here was wrong). Raising the threshold to 640 lifts the operating band to
+// 640..768 so a stall has ~13 ms of cushion instead of ~8 ms, at the cost of ~13 ms
+// of added output latency -- worth it against a starvation failure, and small beside
+// the host's 100 ms ring.
+//
+// INVARIANT: AUDIO_REFILL_THRESHOLD + AUDIO_BURST_MAX_QW <= 1024 (the FIFO depth).
+// Bursts are serialised, so worst-case fill is threshold-1 + one full burst = 767.
+// Violating this would silently overflow the dcfifo and drop audio.
+localparam [9:0]  AUDIO_REFILL_THRESHOLD  = 10'd640;
+localparam [31:0] AUDIO_BURST_MAX_BYTES   = 32'd1024;
+localparam [9:0]  AUDIO_BURST_MAX_QW      = 10'd128;   // = MAX_BYTES/8
 
 // `FB_W px x 2 B / 8 B per qword = 72 beats per scanline (derived — never retype)
 localparam [7:0]  LINE_BURST   = 8'(`FB_STRIDE_QW);
@@ -357,14 +380,15 @@ localparam [4:0] ST_AUD_STATS        = 5'd24;  // [audio-tier2] audio refill sta
 //   [15:0]  aud_uf_cnt        underflow pops: aud_tick with an empty FIFO. This is
 //                             the sample-hold that stretches playback.
 //   [31:16] aud_short_cnt     ST_WAIT_AUDIO_RING short-burst recoveries.
-//   [47:32] aud_orphan_cnt    beats pushed into the FIFO by a burst that was then
-//                             abandoned without advancing audio_rd_ptr -- these are
-//                             re-fetched on the next wake, i.e. duplicated audio.
+//   [47:32] aud_recov_cnt     beats salvaged from short bursts by the partial
+//                             audio_rd_ptr advance. Before [audio-partial-advance]
+//                             these were ORPHANED -- pushed to the FIFO but not
+//                             accounted, hence re-fetched as duplicate audio.
 //   [63:48] aud_fifo_min      minimum audio_fifo_wrusedw seen since the last
 //                             publish (per-interval, not since reset).
-// aud_short_cnt/aud_orphan_cnt near zero while aud_uf_cnt is large ⇒ scheduling
-// starvation, and the fix is the DDR port / burst-overhead work. Non-zero
-// aud_orphan_cnt ⇒ the abandonment path is duplicating audio and is its own bug.
+// Device 2026-07-29 read short_cnt=0 and uf_cnt=699.7/s, i.e. pure scheduling
+// starvation -- which is what the burst-size change above targets. aud_uf_cnt is
+// the number to watch after the fix: it should fall to ~0.
 localparam [28:0] AUDIO_STAT_ADDR = 29'h0741C000;  // byte 0x3A0E0000
 
 // Publish cadence: 2^22 ddr_clk (~42.6 ms at 98.44 MHz), reusing the beacon's
@@ -373,7 +397,7 @@ localparam [28:0] AUDIO_STAT_ADDR = 29'h0741C000;  // byte 0x3A0E0000
 // contention it is measuring.
 reg        aud_stat_pending;
 reg [15:0] aud_short_cnt;
-reg [15:0] aud_orphan_cnt;
+reg [15:0] aud_recov_cnt;
 reg [9:0]  aud_fifo_min;
 
 // [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
@@ -521,11 +545,18 @@ wire [31:0] audio_bytes_avail = (audio_wr_ptr - audio_rd_ptr) & AUDIO_RING_MASK;
 wire        audio_wake        = enable_ddr && audio_fifo_low && (audio_backoff == 20'd0);
 
 // Burst planning (combinational, used in ST_PLAN_AUDIO).
-wire [31:0] audio_plan_cand_a  = (audio_bytes_avail > 32'd256) ? 32'd256 : audio_bytes_avail;
+wire [31:0] audio_plan_cand_a  = (audio_bytes_avail > AUDIO_BURST_MAX_BYTES)
+                                 ? AUDIO_BURST_MAX_BYTES : audio_bytes_avail;
 wire [31:0] audio_plan_wrap    = AUDIO_RING_BYTES - (audio_rd_ptr & AUDIO_RING_MASK);
 wire [31:0] audio_plan_cand_b  = (audio_plan_cand_a > audio_plan_wrap) ? audio_plan_wrap : audio_plan_cand_a;
 wire [31:0] audio_plan_bytes   = audio_plan_cand_b & 32'hFFFFFFF8;
 wire [7:0]  audio_plan_qwords  = audio_plan_bytes[10:3];
+
+// [audio-partial-advance] Beats actually delivered by the burst in flight. The plan
+// is re-derived from audio_burst_bytes (latched at ST_PLAN_AUDIO) rather than kept
+// in a second register, so it cannot drift out of step with audio_burst_rem, which
+// the ST_WAIT_AUDIO_RING beat handler decrements. Meaningful only in that state.
+wire [7:0]  aud_beats_got      = audio_burst_bytes[10:3] - audio_burst_rem;
 
 // -- FIFO async clear -------------------------------------------------
 reg [3:0] fifo_aclr_cnt;
@@ -591,7 +622,7 @@ always @(posedge ddr_clk) begin
         beacon_cnt         <= 32'd0;
         aud_stat_pending   <= 1'b0;
         aud_short_cnt      <= 16'd0;
-        aud_orphan_cnt     <= 16'd0;
+        aud_recov_cnt      <= 16'd0;
         aud_fifo_min       <= 10'h3FF;
     end
     else begin
@@ -748,7 +779,7 @@ always @(posedge ddr_clk) begin
             ST_AUD_STATS: begin
                 if (!ddr_busy) begin
                     ddr_addr         <= AUDIO_STAT_ADDR;
-                    ddr_din          <= {{6'd0, aud_fifo_min}, aud_orphan_cnt,
+                    ddr_din          <= {{6'd0, aud_fifo_min}, aud_recov_cnt,
                                          aud_short_cnt, aud_uf_ddr};
                     ddr_burstcnt     <= 8'd1;
                     ddr_we           <= 1'b1;
@@ -1160,17 +1191,28 @@ always @(posedge ddr_clk) begin
                 // do NOT advance audio_rd_ptr -- the burst didn't complete.
                 // [audio POLL-anchor] recover to ST_POLL_CTRL (ST_IDLE starves).
                 else if (timeout_cnt == TIMEOUT_MAX) begin
-                    // [audio-tier2] Record the abandonment AND the damage it does.
-                    // Beats already received were pushed into the FIFO above, but
-                    // audio_rd_ptr is deliberately not advanced -- so the next wake
-                    // re-fetches those same qwords and the FIFO gets a duplicate of
-                    // audio it has already been handed. Unlike ST_WAIT_LINE, where
-                    // this recovery came from, a stream FIFO has no per-line
-                    // re-anchor that discards the stale partial.
-                    aud_short_cnt  <= aud_short_cnt + 16'd1;
-                    aud_orphan_cnt <= aud_orphan_cnt
-                                    + {8'd0, (audio_burst_bytes[10:3] - audio_burst_rem)};
-                    state <= ST_POLL_CTRL;
+                    // [audio-partial-advance] A short burst used to abandon WITHOUT
+                    // advancing audio_rd_ptr. The beats it did deliver were already
+                    // pushed into the FIFO by the branch above, so the re-plan
+                    // re-fetched the same qwords and the FIFO was handed the same
+                    // audio twice (tb_audio_burst_wedge measured 63 FIFO writes for
+                    // 32 qwords of ring data). That "abandon the partial" recovery
+                    // was copied from ST_WAIT_LINE, where it is harmless because the
+                    // line buffer is position-addressed and re-anchors every line --
+                    // a stream FIFO has no such re-anchor, so the copy was never
+                    // correct here.
+                    //
+                    // Advance by what was ACTUALLY consumed. The next wake then
+                    // resumes at the right offset: no duplicate, no gap. Beats are
+                    // qwords, hence the <<3.
+                    aud_short_cnt <= aud_short_cnt + 16'd1;
+                    aud_recov_cnt <= aud_recov_cnt + {8'd0, aud_beats_got};
+                    audio_rd_ptr  <= (audio_rd_ptr + {21'd0, aud_beats_got, 3'b000})
+                                     & AUDIO_RING_MASK;
+                    // Publish the corrected pointer rather than dropping straight to
+                    // ST_POLL_CTRL: the host sizes its submits from rd_ptr, so
+                    // leaving a stale value would understate the free space.
+                    state <= ST_WRITE_AUDIO_RD;
                 end
                 else
                     timeout_cnt <= timeout_cnt + 20'd1;

@@ -59,7 +59,9 @@
  * Layout must match openbor_video_reader.sv's AUDIO_STAT_ADDR write:
  *   low32  [15:0]  aud_uf_cnt      FIFO underflow pops (sample-hold)
  *   low32  [31:16] aud_short_cnt   short-burst abandonments
- *   high32 [15:0]  aud_orphan_cnt  beats committed to the FIFO then re-fetched
+ *   high32 [15:0]  aud_recov_cnt   beats salvaged from short bursts by the
+ *                                  partial rd_ptr advance (were duplicated audio
+ *                                  before the [audio-partial-advance] fix)
  *   high32 [31:16] aud_fifo_min    per-interval FIFO low-water (qwords, of 1024)
  * All three counters are 16-bit free-running; at a 100 ms host sample the fastest
  * (aud_uf_cnt) advances <5000, far inside the 65536 wrap, so a masked subtraction
@@ -243,30 +245,27 @@ int main(int argc, char **argv) {
     else
         printf("  engine frames  : unavailable (blitter region not mapped)\n");
 
-    /* [audio-tier2] Reader-side counters, and the arithmetic that decides which
-     * mechanism owns the deficit. Each orphaned qword is 2 stereo frames of audio
-     * the FIFO was handed twice, so it is 2 frames of playback time that carried
-     * no new content — predicted_deficit = orphaned_frames_per_s / 48000. If that
-     * lands on the measured deficit, abandonment explains it and there is nothing
-     * left to attribute to scheduling. */
+    /* [audio-tier2] Reader-side counters. The accounting identity that matters is
+     * underflow-pops vs the drain deficit: every pop with an empty FIFO is a 48 kHz
+     * tick that consumed no sample, so uf_hz/48000 should equal the measured
+     * shortfall. On .62 before the throughput fix these agreed to 0.005 percentage
+     * points (1.458% vs 1.463%), which is what established starvation as the whole
+     * story. After the fix uf_hz should collapse toward zero. */
     puts("");
     if (!stats_present) {
         puts("  reader counters : absent (RBF predates the audio-tier2 counters)");
     } else {
-        const double uf_hz   = (double)uf_total / elapsed;
-        const double sh_hz   = (double)sh_total / elapsed;
-        const double orph_hz = (double)orph_total / elapsed;
-        const double dup_frames_hz = orph_hz * 2.0;
-        const double predicted = dup_frames_hz / NOMINAL_HZ * 100.0;
+        const double uf_hz    = (double)uf_total / elapsed;
+        const double sh_hz    = (double)sh_total / elapsed;
+        const double recov_hz = (double)orph_total / elapsed;
+        const double explained = uf_hz / NOMINAL_HZ * 100.0;
         const double measured  = (1.0 - drain_hz / NOMINAL_HZ) * 100.0;
 
         printf("  underflow pops : %.1f/s   (FIFO empty at a 48 kHz tick)\n", uf_hz);
-        printf("  short bursts   : %.1f/s   (abandoned refills)\n", sh_hz);
-        printf("  orphaned beats : %.1f/s   = %.0f duplicated frames/s\n",
-               orph_hz, dup_frames_hz);
+        printf("  short bursts   : %.1f/s   (recovered beats %.1f/s)\n", sh_hz, recov_hz);
         printf("  FIFO low-water : %u qwords of 1024\n", fifo_min_seen);
-        printf("  deficit explained by duplication: %.2f%% predicted vs %.2f%% "
-               "measured\n", predicted, measured);
+        printf("  deficit explained by underflow: %.3f%% vs %.3f%% measured\n",
+               explained, measured);
     }
 
     /* Reading, per the plan's §3 decision table. The dead-quiet case is checked
