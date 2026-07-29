@@ -127,6 +127,22 @@ SKIP="tb_profile"
 # defect. Left NON-GATING as a dev tool (real SDRAM co-sim, ~45s wall) rather than
 # promoted to gating; re-promote if it proves stably green over time. See
 # .superpowers/sdd/task-3-report.md, .superpowers/sdd/task-8-report.md.
+#
+# [Phase 3A Task 5] tb_blitter_trilist_stream is GATING (not in NONGATING below).
+# It replays a CAPTURED DEVICE FRAME of Maldita's draw stream — vectors/stream_quiet_f0_*
+# from gen_tri_stream.c, 106 TRILIST commands / 212 triangles / 48 texture pages — through
+# the production blitter_top and diffs the whole composited WORK bank against the
+# refmodel golden. It is the only bench whose scene is real device geometry rather than a
+# hand-written scenario, so it catches coverage/blend/addressing breakage that only shows
+# up at production scale (48 distinct strides, 78 COLORKEY + 28 COPY draws in one ring, a
+# BLT_F_SRC_SURFACE composite, and triangles clipped off all four screen edges).
+# bad=0/62208 AND bit-exact (0 strict mismatches). ~32 s standalone -> 300 s budget below.
+# It also prints the CYC/CYCX/MS cycle decomposition Tasks 6-8 predict against; those
+# lines are informational, the PASS gate is the pixel diff plus four internal cross-checks
+# (TB buckets vs the RTL's own perf_tri_cyc / perf_texwait_cyc / perf_covered_px, and the
+# bucket partition summing to the total) — any of which prints RESULT: FAIL.
+# Other frames are runnable by name after regenerating their vectors; see the tb header
+# and gen_tri_golden.mk's stream-vectors target.
 NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
@@ -181,6 +197,9 @@ timeout_s() { case "$1" in
   # co-simulates the bit-level SDRAM chip model, unlike every stub-P_SRC sibling).
   # Generous budget so ordinary CI contention doesn't spuriously non-gate-fail it.
   tb_blitter_trilist_sdram)                echo 480 ;;
+  # [Phase 3A Task 5] Captured-device-frame replay: 1.56 M sim cycles (a real frame is
+  # ~10x the synthetic scenarios), ~32 s standalone. 300 s covers CI-core contention.
+  tb_blitter_trilist_stream)               echo 300 ;;
   # [gmloader-GPU slim] tb_bgplane_equivalence/write_pipe_xl/3plane_xl/maptrans/
   # inval_teeth and tb_pal8_bgplane were RETIRED with OP_BGPLANE_WRITE/OP_CLUT_
   # UPLOAD (see the SKIP-block note above); their budget entries are gone too.

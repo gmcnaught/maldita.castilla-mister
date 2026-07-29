@@ -26,3 +26,14 @@ fpga/sim/gen_system_golden
 # Tier 0 audio/video sync probe build outputs (tools/Makefile.audio_ring_probe)
 tools/*.armhf
 tools/*.native
+
+# [Phase 3A Task 5] regenerable stream-replay vectors. Only stream_quiet_f0 (what
+# tb_blitter_trilist_stream.sv loads by default / run_sims.sh gates on), the shared
+# stream_surf.hex and the tiny stream_synth_quad are committed; the other captured
+# frames are ~800 KiB each and are rebuilt on demand — see gen_tri_golden.mk's
+# stream-vectors target and the tb header.
+fpga/sim/vectors/stream_quiet_f1_*.hex
+fpga/sim/vectors/stream_quiet_f2_*.hex
+fpga/sim/vectors/stream_arrival_*.hex
+# host-built stream-replay golden generator (Mach-O/ELF; rebuilt by gen_tri_golden.mk)
+fpga/sim/gen_tri_stream
