@@ -54,6 +54,20 @@
 #define BLT_SPAN        0x00001000u
 #define BLT_C_SUBMIT    0x00000000u
 
+/* [audio-tier2] Reader-published audio refill statistics, one qword written by
+ * ST_AUD_STATS every ~42.6 ms. Inside the same 1 MB window, so no extra mapping.
+ * Layout must match openbor_video_reader.sv's AUDIO_STAT_ADDR write:
+ *   low32  [15:0]  aud_uf_cnt      FIFO underflow pops (sample-hold)
+ *   low32  [31:16] aud_short_cnt   short-burst abandonments
+ *   high32 [15:0]  aud_orphan_cnt  beats committed to the FIFO then re-fetched
+ *   high32 [31:16] aud_fifo_min    per-interval FIFO low-water (qwords, of 1024)
+ * All three counters are 16-bit free-running; at a 100 ms host sample the fastest
+ * (aud_uf_cnt) advances <5000, far inside the 65536 wrap, so a masked subtraction
+ * unwraps them. Reads as 0 on an RBF without the counters — reported as such
+ * rather than silently printed as "no problem found". */
+#define AUD_STAT_OFF    0x000E0000u
+#define STAT_MASK16     0xFFFFu
+
 #define BYTES_PER_FRAME 4u            /* stereo S16 */
 #define NOMINAL_HZ      48000.0
 #define SCANOUT_HZ      59.923        /* 380x262 @ 53.693 MHz / 9 */
@@ -102,6 +116,17 @@ int main(int argc, char **argv) {
     volatile uint32_t *rd_reg = (volatile uint32_t *)(aud + AUD_RD_OFF);
     volatile uint32_t *sub_reg =
         blt ? (volatile uint32_t *)(blt + BLT_C_SUBMIT) : NULL;
+    volatile uint32_t *stat_lo = (volatile uint32_t *)(aud + AUD_STAT_OFF);
+    volatile uint32_t *stat_hi = (volatile uint32_t *)(aud + AUD_STAT_OFF + 4);
+
+    uint32_t uf_prev  = *stat_lo & STAT_MASK16;
+    uint32_t sh_prev  = (*stat_lo >> 16) & STAT_MASK16;
+    uint32_t orph_prev = *stat_hi & STAT_MASK16;
+    /* An all-zero stats word at start is the signature of an RBF built before
+     * the counters existed. Distinguish it from a genuine "no events" reading. */
+    bool stats_present = (*stat_lo != 0u) || (*stat_hi != 0u);
+    uint64_t uf_total = 0, sh_total = 0, orph_total = 0;
+    uint32_t fifo_min_seen = 1023;
 
     uint32_t wr_prev = *wr_reg & RING_MASK;
     uint32_t rd_prev = *rd_reg & RING_MASK;
@@ -156,6 +181,18 @@ int main(int argc, char **argv) {
                t_now - t0, drain_hz, submit_hz, occ, eng_fps, d_rd);
         fflush(stdout);
 
+        const uint32_t sl = *stat_lo, sh = *stat_hi;
+        const uint32_t uf_cur   = sl & STAT_MASK16;
+        const uint32_t shb_cur  = (sl >> 16) & STAT_MASK16;
+        const uint32_t orph_cur = sh & STAT_MASK16;
+        const uint32_t fmin     = (sh >> 16) & STAT_MASK16;
+        if (sl || sh) stats_present = true;
+        uf_total   += (uf_cur   - uf_prev)   & STAT_MASK16;
+        sh_total   += (shb_cur  - sh_prev)   & STAT_MASK16;
+        orph_total += (orph_cur - orph_prev) & STAT_MASK16;
+        if (fmin < fifo_min_seen) fifo_min_seen = fmin;
+        uf_prev = uf_cur; sh_prev = shb_cur; orph_prev = orph_cur;
+
         wr_total += d_wr;
         rd_total += d_rd;
         sub_total += d_sub;
@@ -194,6 +231,32 @@ int main(int argc, char **argv) {
                eng_fps, SCANOUT_HZ, eng_fps / SCANOUT_HZ);
     else
         printf("  engine frames  : unavailable (blitter region not mapped)\n");
+
+    /* [audio-tier2] Reader-side counters, and the arithmetic that decides which
+     * mechanism owns the deficit. Each orphaned qword is 2 stereo frames of audio
+     * the FIFO was handed twice, so it is 2 frames of playback time that carried
+     * no new content — predicted_deficit = orphaned_frames_per_s / 48000. If that
+     * lands on the measured deficit, abandonment explains it and there is nothing
+     * left to attribute to scheduling. */
+    puts("");
+    if (!stats_present) {
+        puts("  reader counters : absent (RBF predates the audio-tier2 counters)");
+    } else {
+        const double uf_hz   = (double)uf_total / elapsed;
+        const double sh_hz   = (double)sh_total / elapsed;
+        const double orph_hz = (double)orph_total / elapsed;
+        const double dup_frames_hz = orph_hz * 2.0;
+        const double predicted = dup_frames_hz / NOMINAL_HZ * 100.0;
+        const double measured  = (1.0 - drain_hz / NOMINAL_HZ) * 100.0;
+
+        printf("  underflow pops : %.1f/s   (FIFO empty at a 48 kHz tick)\n", uf_hz);
+        printf("  short bursts   : %.1f/s   (abandoned refills)\n", sh_hz);
+        printf("  orphaned beats : %.1f/s   = %.0f duplicated frames/s\n",
+               orph_hz, dup_frames_hz);
+        printf("  FIFO low-water : %u qwords of 1024\n", fifo_min_seen);
+        printf("  deficit explained by duplication: %.2f%% predicted vs %.2f%% "
+               "measured\n", predicted, measured);
+    }
 
     /* Reading, per the plan's §3 decision table. */
     puts("");

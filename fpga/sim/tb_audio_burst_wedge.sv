@@ -36,6 +36,14 @@ module tb_audio_burst_wedge;
   // audio-ring read after inject_short is armed, then requires recovery.
   reg               inject_short = 1'b0;   // armed by stimulus
   reg               short_fired  = 1'b0;   // set by DDR model when it shorts a burst
+
+  // [audio-tier2] Count every qword the reader pushes into the audio FIFO. With a
+  // 32-qword plan shorted to 31 beats, a design that discarded the partial would
+  // push 32; one that re-fetches it pushes 63. The count is the duplication.
+  // (the counting always-block lives just below the reader instance, where
+  // ddr_clk and u_reader are both in scope)
+  reg [31:0] fifo_wr_count = 32'd0;
+  reg        ok_orphan     = 1'b0;
   localparam [28:0] AUDIO_RING_LO = 29'h0741A000;  // AUDIO_RING_ADDR (qword)
   localparam [28:0] AUDIO_RING_HI = 29'h0741C000;  // + 0x2000 qwords (64KB ring)
   localparam integer AUDIO_WR_IDX = 6;             // AUDIO_WR_ADDR(0x07400006)-WBASE
@@ -172,6 +180,11 @@ module tb_audio_burst_wedge;
     .enable          (1'b1),
     .frame_ready     (frame_ready)
   );
+
+  // [audio-tier2] see the fifo_wr_count declaration above -- placed here because
+  // ddr_clk and u_reader must both already be in scope.
+  always @(posedge ddr_clk)
+    if (u_reader.audio_fifo_wr) fifo_wr_count <= fifo_wr_count + 32'd1;
 
   // ---- behavioral DDR (control word + joystick/audio only) ------------------
   reg [63:0] mem [0:MEMQW-1];
@@ -465,10 +478,37 @@ module tb_audio_burst_wedge;
     awc3 = u_reader.vsync_count;
     $display("AUDIO-RING: vsync at-inject=%0d after-wait=%0d (advanced=%0d)",
              awc2, awc3, awc3 - awc2);
-    if (awc3 > awc2 + 1)
+
+    // ---- [audio-tier2] orphaned-beat accounting ------------------------------
+    // The recovery above keeps scanout alive, which is all #39 asked of it. But
+    // the beats the shorted burst DID deliver were already pushed into the audio
+    // FIFO, and audio_rd_ptr is deliberately not advanced -- so the re-plan
+    // re-fetches the same ring qwords and the FIFO receives them TWICE. The DDR
+    // model shorts a 32-beat burst to 31, so the arithmetic is exact and checkable:
+    //   aud_short_cnt  == 1     one abandonment
+    //   aud_orphan_cnt == 31    beats committed to the FIFO then re-fetched
+    //   fifo_wr_count  == 63    31 orphaned + 32 from the completed retry, for
+    //                           what should have been 32 qwords of audio
+    // This is the duplication mechanism proven in simulation rather than inferred
+    // from the device's drain-rate deficit. It is asserted, not merely reported:
+    // a future change that silently starts discarding the partial (or that fixes
+    // the duplication) must update these numbers deliberately.
+    $display("AUDIO-ORPHAN: short_cnt=%0d orphan_cnt=%0d fifo_writes=%0d (rd_ptr=%0d)",
+             u_reader.aud_short_cnt, u_reader.aud_orphan_cnt,
+             fifo_wr_count, u_reader.audio_rd_ptr);
+
+    ok_orphan = (u_reader.aud_short_cnt  == 16'd1)  &&
+                (u_reader.aud_orphan_cnt == 16'd31) &&
+                (fifo_wr_count           == 32'd63);
+    if (!ok_orphan)
+      $display("AUDIO-ORPHAN: MISMATCH (expected short_cnt=1 orphan_cnt=31 fifo_writes=63)");
+
+    if (awc3 > awc2 + 1 && ok_orphan)
       $display("RESULT: PASS");
-    else
+    else if (awc3 <= awc2 + 1)
       $display("RESULT: FAIL (scanout WEDGE: vsync frozen after short audio burst)");
+    else
+      $display("RESULT: FAIL (orphaned-beat accounting changed)");
     $finish;
 
     // ===================== PIXEL-EXACT PHASE ================================

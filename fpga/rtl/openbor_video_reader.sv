@@ -341,6 +341,40 @@ localparam [4:0] ST_PAINT            = 5'd20;  // blitter paint-test rectangle
 localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti-tearing)
 localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
 localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven liveness beacon
+localparam [4:0] ST_AUD_STATS        = 5'd24;  // [audio-tier2] audio refill statistics publish
+
+// [audio-tier2] Audio refill statistics, published to an ABSOLUTE address in the
+// same 0x3A window the host audio writer already maps (native_audio_writer.c maps
+// 0x3A000000 + 1 MB), so reading them needs no new mapping and no FB_QW_BASE
+// arithmetic. 0x3A0E0000 is past the audio ring's 64 KiB (0x3A0D0000..0x3A0E0000)
+// and past the cart buffer's 256 KiB cap (0x3A080000..0x3A0C0000).
+//
+// Device Tier 0 (2026-07-28) measured the ring draining 2-3% below 48 kHz and
+// load-correlated: the reader sustains ~73 of the 75 refill bursts/100 ms it needs.
+// These counters separate the two mechanisms that produce that signature —
+// bursts ABANDONED after their beats were already committed to the FIFO, versus
+// bursts never SCHEDULED. Layout (one qword, one DDR write per publish):
+//   [15:0]  aud_uf_cnt        underflow pops: aud_tick with an empty FIFO. This is
+//                             the sample-hold that stretches playback.
+//   [31:16] aud_short_cnt     ST_WAIT_AUDIO_RING short-burst recoveries.
+//   [47:32] aud_orphan_cnt    beats pushed into the FIFO by a burst that was then
+//                             abandoned without advancing audio_rd_ptr -- these are
+//                             re-fetched on the next wake, i.e. duplicated audio.
+//   [63:48] aud_fifo_min      minimum audio_fifo_wrusedw seen since the last
+//                             publish (per-interval, not since reset).
+// aud_short_cnt/aud_orphan_cnt near zero while aud_uf_cnt is large ⇒ scheduling
+// starvation, and the fix is the DDR port / burst-overhead work. Non-zero
+// aud_orphan_cnt ⇒ the abandonment path is duplicating audio and is its own bug.
+localparam [28:0] AUDIO_STAT_ADDR = 29'h0741C000;  // byte 0x3A0E0000
+
+// Publish cadence: 2^22 ddr_clk (~42.6 ms at 98.44 MHz), reusing the beacon's
+// timer so no second counter is needed. One 64-bit write per period is ~24 B/s --
+// far below the measurement's own noise floor, so the probe does not perturb the
+// contention it is measuring.
+reg        aud_stat_pending;
+reg [15:0] aud_short_cnt;
+reg [15:0] aud_orphan_cnt;
+reg [9:0]  aud_fifo_min;
 
 // [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
 // {dbg_blt, beacon_cnt} to VSYNC_ADDR+2 (byte 0x3A070010) from ST_IDLE. Timer-
@@ -447,6 +481,38 @@ wire        audio_fifo_empty;
 wire [9:0]  audio_fifo_wrusedw;
 wire        audio_fifo_low = (audio_fifo_wrusedw < AUDIO_REFILL_THRESHOLD);
 
+// -- [audio-tier2] underflow counter + CDC to ddr_clk -----------------
+// aud_uf_cnt lives in clk_audio (it counts aud_tick events, and is driven in the
+// sample-output block far below) but is published by the ddr_clk FSM, so it
+// crosses domains as GRAY -- the same discipline as the vcount CDC and for the
+// same reason: a plain binary 2-FF sync can latch an incoherent multi-bit value
+// mid-increment, and here that would fabricate a huge spurious delta in exactly
+// the number this whole investigation turns on. The counter increments at most
+// 48000/s against a ~98 MHz ddr_clk, so successive gray values are always >2000
+// ddr_clk apart -- no sampling-rate hazard.
+// Declared here, ahead of the FSM, because ST_AUD_STATS consumes aud_uf_ddr.
+reg [15:0] aud_uf_cnt;
+reg [15:0] aud_uf_gray;
+always @(posedge clk_audio) aud_uf_gray <= aud_uf_cnt ^ (aud_uf_cnt >> 1);
+
+reg [15:0] aud_uf_g1, aud_uf_g2;
+always @(posedge ddr_clk) begin
+    aud_uf_g1 <= aud_uf_gray;
+    aud_uf_g2 <= aud_uf_g1;
+end
+
+function automatic [15:0] gray_to_bin16(input logic [15:0] g);
+    integer i;
+    reg [15:0] b;
+    begin
+        b[15] = g[15];
+        for (i = 14; i >= 0; i = i - 1) b[i] = b[i+1] ^ g[i];
+        gray_to_bin16 = b;
+    end
+endfunction
+
+wire [15:0] aud_uf_ddr = gray_to_bin16(aud_uf_g2);
+
 // Audio fetch eligibility (combinational)
 wire [31:0] audio_bytes_avail = (audio_wr_ptr - audio_rd_ptr) & AUDIO_RING_MASK;
 // [audio-map] The ring is back at its absolute address and inside the host's
@@ -523,11 +589,22 @@ always @(posedge ddr_clk) begin
         beacon_tick        <= 22'd1;
         beacon_pending     <= 1'b0;
         beacon_cnt         <= 32'd0;
+        aud_stat_pending   <= 1'b0;
+        aud_short_cnt      <= 16'd0;
+        aud_orphan_cnt     <= 16'd0;
+        aud_fifo_min       <= 10'h3FF;
     end
     else begin
         // [wedge probe v5] beacon timer — free-running, independent of new_frame.
         beacon_tick <= beacon_tick + 22'd1;
         if (beacon_tick == 22'd0) beacon_pending <= 1'b1;
+        // [audio-tier2] Share the beacon's timer for the stats publish.
+        if (beacon_tick == 22'd0) aud_stat_pending <= 1'b1;
+        // Per-interval FIFO low-water mark. Tracked continuously and cleared at
+        // publish, so each sample answers "how close did the refill get to dry in
+        // the last 42.6 ms" rather than a since-reset minimum that latches at the
+        // first startup transient and never moves again.
+        if (audio_fifo_wrusedw < aud_fifo_min) aud_fifo_min <= audio_fifo_wrusedw;
         lb_we         <= 1'b0;
         audio_fifo_wr <= 1'b0;
         if (audio_backoff != 20'd0) audio_backoff <= audio_backoff - 20'd1;
@@ -645,6 +722,8 @@ always @(posedge ddr_clk) begin
                     state <= ST_POLL_AUDIO_WR;
                 else if (beacon_pending)          // [wedge probe v5] lowest priority
                     state <= ST_BEACON;
+                else if (aud_stat_pending)        // [audio-tier2] lower still
+                    state <= ST_AUD_STATS;
             end
 
             // [wedge probe v5] liveness beacon + live blitter dbg publish.
@@ -657,6 +736,25 @@ always @(posedge ddr_clk) begin
                     beacon_cnt     <= beacon_cnt + 32'd1;
                     beacon_pending <= 1'b0;
                     state          <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
+                end
+            end
+
+            // [audio-tier2] Publish the audio refill statistics. Lowest priority,
+            // one 64-bit write per ~42.6 ms. aud_fifo_min is cleared here so the
+            // next interval measures its own low-water mark; the three counters
+            // free-run and wrap at 16 bits, which the host unwraps (at a 100 ms
+            // host sample the largest, aud_uf_cnt, advances <5000 -- far inside
+            // the 65536 wrap).
+            ST_AUD_STATS: begin
+                if (!ddr_busy) begin
+                    ddr_addr         <= AUDIO_STAT_ADDR;
+                    ddr_din          <= {{6'd0, aud_fifo_min}, aud_orphan_cnt,
+                                         aud_short_cnt, aud_uf_ddr};
+                    ddr_burstcnt     <= 8'd1;
+                    ddr_we           <= 1'b1;
+                    aud_stat_pending <= 1'b0;
+                    aud_fifo_min     <= 10'h3FF;
+                    state            <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
                 end
             end
 
@@ -821,6 +919,8 @@ always @(posedge ddr_clk) begin
                     state <= ST_POLL_AUDIO_WR;
                 else if (beacon_pending)
                     state <= ST_BEACON;
+                else if (aud_stat_pending)        // [audio-tier2] lowest priority
+                    state <= ST_AUD_STATS;
                 else if (!ddr_busy) begin
                     ddr_addr     <= CTRL_ADDR;
                     ddr_burstcnt <= 8'd1;
@@ -1059,8 +1159,19 @@ always @(posedge ddr_clk) begin
                 // black screen. Abandon the partial burst and re-plan next wake;
                 // do NOT advance audio_rd_ptr -- the burst didn't complete.
                 // [audio POLL-anchor] recover to ST_POLL_CTRL (ST_IDLE starves).
-                else if (timeout_cnt == TIMEOUT_MAX)
+                else if (timeout_cnt == TIMEOUT_MAX) begin
+                    // [audio-tier2] Record the abandonment AND the damage it does.
+                    // Beats already received were pushed into the FIFO above, but
+                    // audio_rd_ptr is deliberately not advanced -- so the next wake
+                    // re-fetches those same qwords and the FIFO gets a duplicate of
+                    // audio it has already been handed. Unlike ST_WAIT_LINE, where
+                    // this recovery came from, a stream FIFO has no per-line
+                    // re-anchor that discards the stale partial.
+                    aud_short_cnt  <= aud_short_cnt + 16'd1;
+                    aud_orphan_cnt <= aud_orphan_cnt
+                                    + {8'd0, (audio_burst_bytes[10:3] - audio_burst_rem)};
                     state <= ST_POLL_CTRL;
+                end
                 else
                     timeout_cnt <= timeout_cnt + 20'd1;
             end
@@ -1235,9 +1346,14 @@ always @(posedge clk_audio) begin
         audio_r       <= 16'd0;
         audio_fifo_rd <= 1'b0;
         half_sel      <= 1'b0;
+        aud_uf_cnt    <= 16'd0;
     end
     else begin
         audio_fifo_rd <= 1'b0;
+        // [audio-tier2] Count the sample-hold. This is the exact event that makes
+        // playback slow: the tick is spent but no sample is consumed, so the real
+        // drain rate falls below the nominal 48 kHz by this count per second.
+        if (aud_tick && audio_fifo_empty) aud_uf_cnt <= aud_uf_cnt + 16'd1;
         if (aud_tick) begin
             if (!audio_fifo_empty) begin
                 if (half_sel == 1'b0) begin

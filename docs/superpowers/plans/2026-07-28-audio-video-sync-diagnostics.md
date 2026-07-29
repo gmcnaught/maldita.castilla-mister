@@ -154,8 +154,46 @@ the ring is full.
 audio falls behind video by ~29 ms per second — ~1.7 s per minute of drift. That is both
 halves of the reported symptom, from one cause.
 
-**Still unknown — this is what Tier 2 must settle.** Whether the missing bursts are
-*abandoned* or *never scheduled*. Two candidates, both consistent with everything above:
+## 3b. SIM PROOF — the abandonment path duplicates audio (no RBF needed)
+
+`tb_audio_burst_wedge` already injects exactly the failure in question: its DDR model
+shorts one 32-beat audio burst to 31 beats. Extending the bench with beat accounting
+(commit on this branch) gives, deterministically:
+
+```
+AUDIO-ORPHAN: short_cnt=1 orphan_cnt=31 fifo_writes=63 (rd_ptr=256)
+```
+
+**63 FIFO writes for 32 qwords of ring data.** The 31 beats the shorted burst delivered
+were already pushed into the audio FIFO; the recovery path abandons the burst *without*
+advancing `audio_rd_ptr`; the re-plan re-fetches the same 32 qwords. The FIFO is handed
+31 qwords (62 stereo frames, ≈1.3 ms) of audio it has already been given, while
+`rd_ptr` advances by only one plan's worth.
+
+That is precisely the device signature, and the arithmetic closes:
+
+| | |
+|---|---|
+| duplicated frames per abandonment | 62 |
+| abandonments needed for a 2.6 % deficit | ~20/s = **~2 per 100 ms** |
+| bursts observed missing per 100 ms (Tier 0) | **2 of 75** |
+
+**Correction to §3a's reading.** I earlier described the symptom as "pitched down ~2.9 %".
+That was wrong, and it mattered: the FIFO is being *over*-filled by duplication, not
+starved, so the 48 kHz pop never stalls and there is no pitch shift. What is really
+happening is that the game's audio timeline advances 2.9 % slower than playback time,
+delivered as ~20 duplicated ~1.3 ms fragments per second. Audible as granular
+stutter/roughness, not detuning. The **drift figure is unaffected**: ~29 ms/s, ~1.7 s per
+minute behind video, because the pump is closed-loop on `rd_ptr` and inherits the deficit.
+
+A falsifiable prediction for the hardware run: `aud_uf_cnt` (true FIFO underflow) should
+be **≈0**. If it is large instead, duplication is not the whole story and scheduling
+starvation is back on the table.
+
+**What Tier 2 still adds.** The sim proves the mechanism *exists* and is exactly
+accounted; it cannot prove it is what is happening on device at the observed rate. The
+counters measure the device rate and let the probe check `predicted deficit from
+duplication` against `measured deficit` directly. Two candidates remain:
 1. **Abandoned partial bursts.** `ST_WAIT_AUDIO_RING` pushes each beat into the FIFO as
    it arrives (`openbor_video_reader.sv:1045-1047`), but the short-burst recovery path
    (`:1061-1063`) abandons the burst **without** advancing `audio_rd_ptr`. The beats
