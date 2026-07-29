@@ -296,12 +296,20 @@ nothing measurable. The improvement in #3 is attributable to the burst change al
 also reproduces the original 1.463 % to within 0.03 pp, a year's worth of confidence in
 the measurement itself.
 
-**Honest caveat on margin.** Predicted operating band was 640..768 qwords; measured
-low-water is **241**, so the FIFO still dips well below the refill threshold — 241 of
-1024 is ~5 ms of remaining cushion, never exhausted over 40 s but not enormous. `.62`
-ran the engine at moderate load; `.81` sustains higher engine fps and busier scenes and
-should be measured before this is called settled everywhere. If low-water approaches 0
-there, the `ddr_svc`/`ram2` migration is the next lever and is still unspent.
+**Margin — caveat now resolved on both rigs.** Predicted operating band was 640..768
+qwords; measured low-water is **241**, so the FIFO does dip well below the refill
+threshold. `.81` (the higher-load rig) was measured on 2026-07-29 after deploy:
+
+```
+.81, clean boot, 1 daemon / 1 engine:
+  FPGA drain     : 47 988.4 Hz  (-0.024%)   underflow 0.0/s   low-water 242
+.62, clean boot, repeated:
+  FPGA drain     : 48 015.6 / 48 021.9 Hz   underflow 0.0/s   low-water 241
+```
+
+Both rigs land at the same ~241-qword low-water with **zero** underflow — ~5 ms of
+cushion, consistent and never exhausted. The `ddr_svc`/`ram2` migration stays unspent;
+nothing currently justifies it.
 
 **STA after the rebase** (`40ae348`, tint-reduce carry chains): `emu` −0.169 ns (was
 −0.494) and `pll_hdmi` **+0.085** (was −0.179, now positive). Improved, but `emu` is
@@ -325,6 +333,22 @@ ring occupancy exceeds 4000 frames on three consecutive checks, then measure —
 loudly rather than emit numbers if it never settles. A clean reboot of the device (load
 average had reached 10.4) plus that gate reproduced the control exactly. **Do not take an
 audio measurement without it.**
+
+**Two further invalidity signals, and one non-signal.**
+- *Ring occupancy above ~4800 frames* is a pointer discontinuity (the pump tops up to
+  4800, so 9536 or 10752 cannot happen legitimately). It means the engine restarted
+  mid-run. On `.62` this correlated with the known intermittent glibc heap-corruption
+  crash, and the affected runs scattered between −4 % and −28.5 %.
+- *Duplicate `Master_Daemon.sh`* — `.81` was found running **3 daemons and 2 engines**
+  after a deploy, both engines in state R on a 2-core SoC. `deploy.py` does
+  `pkill -f Master_Daemon.sh` before starting one, but that races boot-time startup and
+  loses. A reboot returns it to 1 daemon / 1 engine. Worth fixing in `deploy.py`
+  separately; it is not an audio defect but it corrupts any perf measurement taken
+  after a deploy without a reboot.
+- **Not a signal:** `pidof gmloader` returning more than one PID. I briefly adopted that
+  as an invalidity rule after seeing 2–3 PIDs on a degraded `.62`; `.81` then returned 2
+  PIDs alongside perfectly clean, internally consistent numbers. Count daemons, and
+  trust the consistency check — not the raw PID count.
 
 ## 4. Tier 1 — host instrumentation (engine rebuild, no RBF)
 
