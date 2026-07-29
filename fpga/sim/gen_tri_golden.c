@@ -328,6 +328,40 @@ static int build(const char *s) {
          * FB_W x FB_H); pass 0 to prove the RTL does not consult src_x/src_y. */
         set_hdr(BLT_BLEND_COPY, 0,0,0, 0, 255);
         hdr.flags = (uint8_t)BLT_F_SRC_SURFACE;
+    } else if (!strcmp(s, "tri_surfalpha")) {
+        /* [Phase 1 2c] tri_surface's fullscreen surface-source quad, but with a
+         * DST-READING blend. This is the B_SURF_C arm of A2-DSTALE: it needs
+         * tri_src_surface && tri_need_dst together, and no other scenario has both —
+         * tri_surface is BLEND_COPY (tri_need_dst false) and every dst-reading scenario
+         * uses an SDRAM texture (tri_src_surface false).
+         *
+         * A2 CHANGED this path: B_SURF_C used to run B_SURF_C -> B_DSTW -> B_DSTC and now
+         * latches comp_rd_qword directly, so A2 modified a path with no coverage.
+         *
+         * It is production-reachable, not a synthetic corner: raster_backend_mfgpu.cpp
+         * documents that obj_fade_in/obj_fade_out draw the app surface TRANSLUCENTLY over
+         * a cleared target, so this combination reaches the fabric on every fade
+         * transition. A break here shows up as corrupted fades — intermittent,
+         * transition-only, and invisible in a steady-gameplay screenshot.
+         *
+         * Per-vertex alpha 128, NOT 255, for the same reason as tri_missdst: at 255 the
+         * blend result is the source regardless of the destination, so a stale or
+         * mis-sequenced dst read would still produce a bit-identical golden. */
+        uses_surface = 1;
+        for (int y=0;y<FB_H;y++) for (int x=0;x<FB_W;x++)
+            surface_img[y*FB_W+x] = (uint16_t)((((x*5)&0x1F)<<11) |
+                                               (((y*3)&0x3F)<<5) | ((x+y)&0x1F));
+        blt_vtx_t v[6] = {
+            VTX(0,   0,    0,        0,        255,255,255,128),
+            VTX(FB_W,0,    FB_W*16,  0,        255,255,255,128),
+            VTX(FB_W,FB_H, FB_W*16,  FB_H*16,  255,255,255,128),
+            VTX(0,   0,    0,        0,        255,255,255,128),
+            VTX(FB_W,FB_H, FB_W*16,  FB_H*16,  255,255,255,128),
+            VTX(0,   FB_H, 0,        FB_H*16,  255,255,255,128),
+        };
+        put_verts(v,6);
+        set_hdr(BLT_BLEND_CONST_ALPHA, 0,0,0, 0, 255);
+        hdr.flags = (uint8_t)BLT_F_SRC_SURFACE;
     } else if (!strcmp(s, "tri_uvfull")) {
         /* [Bug A sim gap] 128x128 stride-256 texture at a NON-ZERO src_off,
          * u and v sweeping the full 0..127 texel range across a 2-tri quad

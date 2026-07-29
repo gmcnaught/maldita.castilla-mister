@@ -35,7 +35,7 @@ RTLDEFS   := ../rtl/blitter_defs.vh
 CC        ?= cc
 CFLAGS    ?= -O2 -Wall
 
-SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface tri_uvfull tri_missdst
+SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface tri_uvfull tri_missdst tri_surfalpha
 
 .PHONY: all vectors clean contract-check
 all: gen_tri_golden gen_system_golden
