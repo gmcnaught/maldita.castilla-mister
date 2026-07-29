@@ -127,6 +127,7 @@ int main(int argc, char **argv) {
     bool stats_present = (*stat_lo != 0u) || (*stat_hi != 0u);
     uint64_t uf_total = 0, sh_total = 0, orph_total = 0;
     uint32_t fifo_min_seen = 1023;
+    bool sub_sane = (sub_reg != NULL);
 
     uint32_t wr_prev = *wr_reg & RING_MASK;
     uint32_t rd_prev = *rd_reg & RING_MASK;
@@ -170,7 +171,14 @@ int main(int argc, char **argv) {
 
         const uint32_t d_rd = ring_delta(rd_prev, rd_cur);
         const uint32_t d_wr = ring_delta(wr_prev, wr_cur);
-        const uint32_t d_sub = sub_cur - sub_prev;   /* free-running, wraps at 2^32 */
+        /* C_SUBMIT is only a frame counter if it advances monotonically by a small
+         * amount per sample. On some builds/states it does not (observed on .62:
+         * the word moves non-monotonically, so the unsigned subtraction wrapped and
+         * the probe printed 4.3e10 fps as though it were a measurement). Treat any
+         * delta beyond a sane per-sample frame count as "not a frame counter here"
+         * and drop the engine-fps figure rather than reporting nonsense. */
+        uint32_t d_sub = sub_cur - sub_prev;
+        if (d_sub > (uint32_t)(1000.0 * dt) + 1000u) { d_sub = 0; sub_sane = false; }
         const uint32_t occ = ring_delta(rd_cur, wr_cur) / BYTES_PER_FRAME;
 
         const double drain_hz  = (double)d_rd / BYTES_PER_FRAME / dt;
@@ -215,7 +223,7 @@ int main(int argc, char **argv) {
 
     const double drain_hz  = (double)rd_total / BYTES_PER_FRAME / elapsed;
     const double submit_hz = (double)wr_total / BYTES_PER_FRAME / elapsed;
-    const double eng_fps   = sub_reg ? (double)sub_total / elapsed : 0.0;
+    const double eng_fps   = sub_sane ? (double)sub_total / elapsed : 0.0;
 
     printf("\n== summary over %.2f s (%u samples) ==\n", elapsed, samples);
     printf("  FPGA drain     : %.1f Hz  (%+.3f%% vs %.0f nominal)\n",
@@ -226,9 +234,12 @@ int main(int argc, char **argv) {
            "(%.1f ms mean latency)\n",
            occ_min, (double)occ_sum / samples, occ_max,
            (double)occ_sum / samples / NOMINAL_HZ * 1000.0);
-    if (sub_reg)
+    if (sub_sane)
         printf("  engine frames  : %.2f fps vs %.3f Hz scanout (ratio %.3f)\n",
                eng_fps, SCANOUT_HZ, eng_fps / SCANOUT_HZ);
+    else if (sub_reg)
+        printf("  engine frames  : unavailable (C_SUBMIT is not a monotonic frame "
+               "counter on this build -- ignore the per-sample column)\n");
     else
         printf("  engine frames  : unavailable (blitter region not mapped)\n");
 

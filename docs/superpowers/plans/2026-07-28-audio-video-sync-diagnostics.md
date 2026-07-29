@@ -211,6 +211,69 @@ exposure: larger bursts, stop re-polling `wr_ptr` and re-writing `rd_ptr` every 
 but they are different defects and the counters distinguish them cheaply. **No fix in
 this branch** — see §6.
 
+## 3c. TIER 2 RESULTS — device .62, 2026-07-29. The sim prediction was WRONG.
+
+RBF `MalditaCastilla_8489755` (fabric `emu` slack −0.494 ns, inside the documented
+−0.02…−0.7 ns range; `pll_hdmi` −0.179, framework scaler, out of scope). Game running,
+two runs of 30 s and 40 s at 100 ms cadence, identical results:
+
+```
+FPGA drain     : 47 297.9 Hz  (-1.463% vs 48 000)
+ring occupancy : min 4032, mean 4783, max 4800 frames   <- ring healthy
+underflow pops : 699.7/s        <- predicted ~0
+short bursts   : 0.0/s          <- predicted ~20/s
+orphaned beats : 0.0/s = 0 duplicated frames/s
+FIFO low-water : 0 qwords of 1024   <- the FIFO runs completely dry
+deficit explained by duplication: 0.00% predicted vs 1.46% measured
+```
+
+**§3b's prediction was `aud_uf_cnt ≈ 0`. It came back at 699.7/s. The prediction is
+falsified and §3b's mechanism is not what is happening on device.**
+
+The short-burst abandonment path **never fires in the field** — `TIMEOUT_MAX` is not
+reached in practice, so zero bursts are abandoned and zero beats are duplicated. The sim
+proof in §3b remains valid as a proof that the *latent defect exists*, and it should
+still be fixed, but it explains none of the observed deficit.
+
+What is actually happening is the **original H1, exactly as first stated**: the refill
+chain cannot sustain 48 kHz, the FIFO runs dry (low-water **0** of 1024), and the
+sample-hold at `openbor_video_reader.sv`'s `aud_tick` stretches playback.
+
+The two independent measurements agree to within 0.005 percentage points, which is the
+strongest evidence in this whole investigation:
+
+| measurement | value |
+|---|---|
+| deficit from `rd_ptr` advance rate | 1.463 % |
+| underflow pops ÷ 48 000 (699.7 / 48 000) | 1.458 % |
+
+Underflow accounts for the entire deficit. There is nothing left to attribute.
+
+**Correction to §3b.** Two of my readings were wrong in sequence and both are superseded:
+§3a called it a pitch shift (wrong — the pop rate is what stalls, so it is a time
+stretch, not detuning), then §3b called it duplication and denied the sample-hold
+(wrong — sample-hold is the whole mechanism; duplication never fires). The correct
+description is §3a's: the FIFO starves, the tick is spent without consuming a sample,
+playback stretches ~1.5 % and drifts ~15 ms/s behind video on this board. `.81` measured
+2.1–2.9 %, so the magnitude is board- and load-dependent.
+
+**Why the FIFO starves, given `audio_wake` is permanently asserted.** With low-water at
+0 the FIFO is always below `AUDIO_REFILL_THRESHOLD`, so `audio_wake` is true essentially
+all the time and the reader is *trying* to refill continuously. It still cannot keep up.
+That rules out "the wake condition is missed" and leaves per-burst cost: three DDR
+round-trips per 256 B (poll `wr_ptr`, 32-beat read, write `rd_ptr`) plus a return through
+`ST_POLL_CTRL` between every burst, all on the same `ram1` port and the same FSM as the
+~966 K qword/s scanout fetch.
+
+**This confirms the fix direction already agreed** (steal `alsa.sv`'s two ideas without
+the Linux ALSA stack), and settles which half matters most:
+1. **Cut per-burst overhead** — larger bursts, and stop re-polling `wr_ptr` / re-writing
+   `rd_ptr` on every burst. Control traffic is 2 of every 3 round-trips today; `alsa.sv`
+   pays zero DDR for control by exchanging pointers over SPI.
+2. **Move the fetch to `ddr_svc`/`ram2`** so it stops queueing behind scanout on `ram1`.
+3. Separately, fix the latent abandonment/duplication bug proven in §3b — correctness,
+   not performance.
+
 ## 4. Tier 1 — host instrumentation (engine rebuild, no RBF)
 
 Demoted by the Tier 0 result: the host is exonerated as the *driver*. Still worth
