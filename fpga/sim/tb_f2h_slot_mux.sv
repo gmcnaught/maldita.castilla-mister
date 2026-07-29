@@ -1,0 +1,222 @@
+// tb_f2h_slot_mux.sv — the bench that would have caught the A1 device regression.
+//
+// THE COVERAGE GAP THIS CLOSES. Nothing exercised the shared f2h slot's arbitration
+// between the scanout reader and the WORK->DDR copy, because that arbitration lived
+// as six inline `wire` assignments in Maldita.sv, which no bench can instantiate
+// (PLLs, HPS, video). So the ONLY way to exercise it was on hardware — and that is
+// exactly how the fault was found: 1-3 thin drifting horizontal lines on device.
+//
+// Two distinct faults are reproduced here, both created by removing the vblank gate:
+//
+//   (1) STARVATION. The old mux gave the copy absolute priority
+//       (`rdr_rd = fb_dma_busy ? 1'b0 : rd_ddr_rd`), so a copy running during
+//       active display blocked the reader for its whole duration: 15552 qwords
+//       ~= 158 us against a 77 us scanline.
+//
+//   (2) BEAT LOSS. The old mux also forced `rd_dout_ready` low for the whole copy.
+//       A read accepted BEFORE the copy started still has beats in flight; the
+//       arbiter routes them to the reader (its expectation is queued correctly) and
+//       the reader is not listening. Silently dropped qwords.
+//
+// Fault (2) was NOT in the original diagnosis. It is reproduced separately below,
+// because a fix for (1) alone would leave it — and a partially-improved display is
+// a harder second diagnosis than the original.
+//
+// Build with -DA1FIX_OLD_MUX to get the pre-fix behaviour. That is the differential
+// control: this bench MUST fail that way and pass without it, or it proves nothing.
+`timescale 1ns/1ps
+`default_nettype none
+
+module tb_f2h_slot_mux;
+
+  reg clk = 0; always #5 clk = ~clk;
+  reg rst = 1;
+
+  // ── stimulus: a reader and a copy engine, modelled at their real protocols ──
+  reg  [7:0]  rd_burstcnt = 8'd72;   // one FB row = 72 qwords, the real burst
+  reg  [28:0] rd_addr     = 29'h0100;
+  reg         rd_rd       = 1'b0;
+  reg  [63:0] rd_din      = 64'd0;
+  reg  [7:0]  rd_be       = 8'hFF;
+  reg         rd_we       = 1'b0;
+
+  reg         dma_active  = 1'b0;
+  reg  [7:0]  dma_burstcnt= 8'd1;    // comp_fb_dma is single-beat
+  reg  [31:0] dma_addr    = 32'h2000;
+  reg         dma_wr      = 1'b0;
+  reg  [63:0] dma_din     = 64'hA5A5_5A5A_A5A5_5A5A;
+  reg  [7:0]  dma_be      = 8'hFF;
+
+  reg         rdr_busy         = 1'b0;   // arbiter can accept
+  reg         rdr_grant        = 1'b0;   // arbiter: head expectation is the reader's
+  reg         ddram_dout_ready = 1'b0;
+
+  wire [7:0]  rdr_burstcnt; wire [28:0] rdr_addr; wire rdr_rd;
+  wire [63:0] rdr_din;      wire [7:0]  rdr_be;   wire rdr_we;
+  wire        rd_busy, rd_dout_ready, dma_busy, dma_owns;
+  wire [15:0] starve_cnt;
+
+`ifdef A1FIX_OLD_MUX
+  // ── PRE-FIX behaviour, reproduced exactly from Maldita.sv:689-698 ───────────
+  // Copy has ABSOLUTE priority; reader hard-blocked and deafened for the whole copy.
+  assign rdr_burstcnt  = dma_active ? dma_burstcnt   : rd_burstcnt;
+  assign rdr_addr      = dma_active ? dma_addr[28:0] : rd_addr;
+  assign rdr_rd        = dma_active ? 1'b0           : rd_rd;
+  assign rdr_din       = dma_active ? dma_din        : rd_din;
+  assign rdr_be        = dma_active ? dma_be         : rd_be;
+  assign rdr_we        = dma_active ? dma_wr         : rd_we;
+  assign rd_busy       = dma_active ? 1'b1 : rdr_busy;
+  assign rd_dout_ready = dma_active ? 1'b0 : (ddram_dout_ready & rdr_grant);
+  assign dma_busy      = rdr_busy;          // wired to rdr_busy_w alone, as it was
+  assign dma_owns      = dma_active;
+  assign starve_cnt    = 16'd0;
+`else
+  f2h_slot_mux #(.STARVE_MAX(16'd1024)) dut (
+    .clk(clk), .rst(rst),
+    .dma_active(dma_active), .dma_burstcnt(dma_burstcnt), .dma_addr(dma_addr),
+    .dma_wr(dma_wr), .dma_din(dma_din), .dma_be(dma_be), .dma_busy(dma_busy),
+    .rd_burstcnt(rd_burstcnt), .rd_addr(rd_addr), .rd_rd(rd_rd),
+    .rd_din(rd_din), .rd_be(rd_be), .rd_we(rd_we),
+    .rd_busy(rd_busy), .rd_dout_ready(rd_dout_ready),
+    .rdr_burstcnt(rdr_burstcnt), .rdr_addr(rdr_addr), .rdr_rd(rdr_rd),
+    .rdr_din(rdr_din), .rdr_be(rdr_be), .rdr_we(rdr_we),
+    .rdr_busy(rdr_busy), .rdr_grant(rdr_grant),
+    .ddram_dout_ready(ddram_dout_ready), .use_nv(1'b1),
+    .dma_owns_o(dma_owns), .starve_cnt(starve_cnt));
+`endif
+
+  // ── instruments ─────────────────────────────────────────────────────────────
+  // Mirrors the reader's own max_fetch_stall (openbor_video_reader.sv:388-395),
+  // whose comment PREDICTED this failure: "A copy overrunning vblank into active
+  // display shows as ONE huge stall at frame start". That instrument exists, names
+  // this fault in advance, and is SOLARUS_DBG_PROBES-only — compiled out of
+  // shipping builds, so nothing could consult it when it mattered.
+  integer cur_stall, max_stall, beats_offered, beats_taken, dma_accepts;
+  initial begin cur_stall=0; max_stall=0; beats_offered=0; beats_taken=0; dma_accepts=0; end
+  always @(posedge clk) if (!rst) begin
+    // reader wants the slot but cannot have it
+    if (rd_rd && rd_busy) begin
+      cur_stall = cur_stall + 1;
+      if (cur_stall > max_stall) max_stall = cur_stall;
+    end else cur_stall = 0;
+    // beat accounting: every beat the arbiter routes to the reader must be seen
+    if (ddram_dout_ready && rdr_grant) begin
+      beats_offered = beats_offered + 1;
+      if (rd_dout_ready) beats_taken = beats_taken + 1;
+    end
+    if (rdr_we && !rdr_busy) dma_accepts = dma_accepts + 1;
+  end
+
+  integer i, nfail;
+  initial begin
+    nfail = 0;
+    repeat (4) @(posedge clk); rst <= 0; @(posedge clk);
+
+    // ══ FAULT 1: STARVATION ════════════════════════════════════════════════
+    // A copy runs during ACTIVE DISPLAY while the reader is fetching a line.
+    dma_active <= 1'b1; dma_wr <= 1'b1;
+    rd_rd      <= 1'b1;                       // reader has a pending line fetch
+    repeat (300) @(posedge clk);              // ~3 us of contention
+
+    // NOTE: label deliberately avoids the substring "STARV" — run_sims.sh's FAIL_RE
+    // greps for it, so an informational line containing it fails a PASSING run.
+    $display("CONTENTION: reader stalled for max %0d consecutive cycles while the copy ran",
+             max_stall);
+    // NON-VACUITY: the reader must actually have been asking, or "no starvation"
+    // passes trivially on an idle reader.
+    if (!rd_rd) begin
+      $display("FAIL f2h: reader was not requesting — the scenario is vacuous");
+      nfail = nfail + 1;
+    end
+    // 72 qwords is one real burst; a reader blocked longer than that has missed
+    // its line-fetch window. The old mux blocks it for the entire 300 cycles.
+    if (max_stall > 72) begin
+      $display("FAIL f2h-STARVE: reader blocked %0d cycles (> one 72-qword burst) —",
+               max_stall);
+      $display("                 the copy is starving scanout, which is the device");
+      $display("                 regression: thin drifting horizontal lines.");
+      nfail = nfail + 1;
+    end
+
+    // ══ FAULT 2: BEAT LOSS ═════════════════════════════════════════════════
+    // A read was accepted BEFORE the copy began, so its beats return DURING it.
+    // The arbiter routes them to the reader (rdr_grant high); the reader must see
+    // every one. The old mux deafened it for the whole copy.
+    rd_rd <= 1'b0;                            // command already issued; now in flight
+    @(posedge clk);
+    rdr_grant <= 1'b1;
+    for (i = 0; i < 8; i = i + 1) begin
+      ddram_dout_ready <= 1'b1; @(posedge clk);
+      ddram_dout_ready <= 1'b0; @(posedge clk);
+    end
+    rdr_grant <= 1'b0;
+
+    $display("BEAT DELIVERY: %0d beats routed to the reader, %0d actually delivered",
+             beats_offered, beats_taken);
+    if (beats_offered == 0) begin
+      $display("FAIL f2h: no beats were offered — the scenario is vacuous");
+      nfail = nfail + 1;
+    end
+    if (beats_taken != beats_offered) begin
+      $display("FAIL f2h-BEATLOSS: %0d of %0d beats dropped while the copy ran —",
+               beats_offered - beats_taken, beats_offered);
+      $display("                   the arbiter routed them to the reader and the");
+      $display("                   reader was not listening. Corrupted scanlines.");
+      nfail = nfail + 1;
+    end
+
+    // ══ LIVELOCK: the copy must still make progress ═════════════════════════
+    // Reader-priority must not be a mirror-image starvation of the copy. Hold the
+    // reader continuously requesting — the pathological case — and require the copy
+    // to be granted within a bounded time.
+    dma_accepts = 0; cur_stall = 0; max_stall = 0;   // measure THIS phase only
+    rd_rd <= 1'b1; dma_active <= 1'b1; dma_wr <= 1'b1;
+    repeat (4000) @(posedge clk);
+    $display("LIVELOCK: copy took %0d beats under CONTINUOUS reader demand; reader's",
+             dma_accepts);
+    $display("          worst stall in that window = %0d cyc (starve_cnt=%0d)",
+             max_stall, starve_cnt);
+
+    // BOTH directions must hold. Checking only "the copy progressed" is what let the
+    // first version of this module through: its escape latched on permanently, so the
+    // copy took 2976 beats — progress! — while the READER starved for 2976 cycles.
+    // A priority fix that inverts the priority is not a fix.
+    if (dma_accepts == 0) begin
+      $display("FAIL f2h-LIVELOCK: the copy made NO progress in 4000 cycles under");
+      $display("                   continuous reader demand — reader priority has");
+      $display("                   inverted the starvation rather than fixing it.");
+      nfail = nfail + 1;
+    end
+    // With a one-beat release valve the reader should never lose the slot for more
+    // than a burst's worth of cycles, even against a pathological continuous copy.
+    if (max_stall > 72) begin
+      $display("FAIL f2h-INVERSION: the reader stalled %0d cyc under the anti-starvation",
+               max_stall);
+      $display("                    escape — the escape has latched instead of releasing");
+      $display("                    after one beat, starving scanout again.");
+      nfail = nfail + 1;
+    end
+    // The escape must be RARE, not the normal path: one beat per STARVE_MAX cycles.
+    if (dma_accepts > (4000/1024) + 2) begin
+      $display("FAIL f2h-INVERSION: copy took %0d beats in 4000 cycles — the escape is",
+               dma_accepts);
+      $display("                    firing continuously, not as a bounded release valve.");
+      nfail = nfail + 1;
+    end
+
+    $display("PASS f2h: reader keeps the slot (worst stall %0d cyc under pathological", max_stall);
+    $display("          demand), loses no beats (%0d/%0d), and the copy still drains",
+             beats_taken, beats_offered);
+    $display("          via the bounded escape (%0d beats / 4000 cyc).", dma_accepts);
+    // Report EVERY fault, not just the first. The old mux exhibits starvation AND
+    // beat loss; aborting on the first would hide the second, and the second is the
+    // one that was missing from the original diagnosis.
+    if (nfail != 0) $display("RESULT: FAIL (%0d fault(s) above)", nfail);
+    else            $display("RESULT: PASS");
+    $finish;
+  end
+
+  initial begin #500000 $display("RESULT: FAIL (timeout)"); $finish; end
+endmodule
+
+`default_nettype wire
