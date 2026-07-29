@@ -274,6 +274,58 @@ the Linux ALSA stack), and settles which half matters most:
 3. Separately, fix the latent abandonment/duplication bug proven in §3b — correctness,
    not performance.
 
+## 3d. FIX VERIFIED — device .62, 2026-07-29, three-way controlled comparison
+
+Rebased onto `milestone-a` `b0b04d0`. Three RBFs, same device, same session, same
+engine binary, each settle-gated (see "measurement hygiene" below):
+
+| # | RBF | contents | drain | deficit | underflow | FIFO low-water |
+|---|---|---|---|---|---|---|
+| 1 | `8489755` | pre-rebase base + counters | 47 310.7 Hz | −1.436 % | 700.0/s | 0 |
+| 2 | `ee06f3f` | rebased milestone-a + counters, **no fix** | 47 305.9 Hz | −1.446 % | 700.2/s | 0 |
+| 3 | `5b84339` | rebased + burst 4× + partial-advance | **47 993.9 Hz** | **−0.013 %** | **0.0/s** | **241** |
+
+**The fix works.** Underflow 700/s → **0**. Drain −1.44 % → **−0.013 %**, i.e. 6 Hz off
+48 000 over 40 s — at or below the noise floor. Drift falls from ~15 ms/s to ~0.13 ms/s
+(~8 ms per minute, from ~0.9 s per minute).
+
+**#1 vs #2 is the control that matters.** They agree to 0.2 pops/s, so the rebase —
+including `f2h_slot_mux` (`a8512e5`/`ff8007b`), which I expected to move the audio
+baseline because it removed a ~158 µs reader starvation — changed the audio deficit by
+nothing measurable. The improvement in #3 is attributable to the burst change alone. #1
+also reproduces the original 1.463 % to within 0.03 pp, a year's worth of confidence in
+the measurement itself.
+
+**Honest caveat on margin.** Predicted operating band was 640..768 qwords; measured
+low-water is **241**, so the FIFO still dips well below the refill threshold — 241 of
+1024 is ~5 ms of remaining cushion, never exhausted over 40 s but not enormous. `.62`
+ran the engine at moderate load; `.81` sustains higher engine fps and busier scenes and
+should be measured before this is called settled everywhere. If low-water approaches 0
+there, the `ddr_svc`/`ram2` migration is the next lever and is still unspent.
+
+**STA after the rebase** (`40ae348`, tint-reduce carry chains): `emu` −0.169 ns (was
+−0.494) and `pll_hdmi` **+0.085** (was −0.179, now positive). Improved, but `emu` is
+still negative — the slack is reduced, not closed.
+
+### Measurement hygiene — why the intermediate numbers in this session were garbage
+
+Between §3c and this section I recorded deficits of 17 %, 24 %, 46 % and 71 % and briefly
+suspected an upstream regression. **All of those were invalid.** Two causes:
+
+1. **Measuring during engine startup.** A probe run 32 s after `load_core` samples the
+   game before the pump has filled the ring; occupancy reads 0 and every derived figure
+   is meaningless. The tell was the internal consistency check breaking — 0.57 %
+   underflow against a 71 % deficit, where a valid measurement agrees to ~0.01 pp.
+2. **An unreliable liveness check.** `ps | grep -c "[g]mloader"` counts the shell's own
+   command line, so it never returns 0 and cannot detect a dead engine. `pidof gmloader`
+   is correct.
+
+`tools/audio_measure.sh` encodes the fix: load, then poll until `pidof` succeeds **and**
+ring occupancy exceeds 4000 frames on three consecutive checks, then measure — and abort
+loudly rather than emit numbers if it never settles. A clean reboot of the device (load
+average had reached 10.4) plus that gate reproduced the control exactly. **Do not take an
+audio measurement without it.**
+
 ## 4. Tier 1 — host instrumentation (engine rebuild, no RBF)
 
 Demoted by the Tier 0 result: the host is exonerated as the *driver*. Still worth
