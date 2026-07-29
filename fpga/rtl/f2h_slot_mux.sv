@@ -39,8 +39,26 @@
 //  3. The copy cannot be starved indefinitely: after STARVE_MAX consecutive
 //     blocked cycles it takes one beat. This makes forward progress STRUCTURAL
 //     rather than dependent on the reader's duty cycle, which a future scene or
-//     resolution change could alter silently. The cost to the reader is ONE beat
-//     (~1 cycle) against the 158 us the old design cost it.
+//     resolution change could alter silently.
+//
+//     COST TO THE READER — measured, with the condition attached, because a bare
+//     number here is a bound future changes must preserve. An earlier draft said
+//     "ONE beat (~1 cycle)", which the bench then falsified: that figure holds only
+//     when a beat is ready AND the arbiter can accept it immediately. Worst case is
+//     8x larger. All three are per escape grant, under CONTINUOUS reader demand
+//     (tb_f2h_slot_mux):
+//
+//       arbiter free, beat ready      ->  1 cycle   (LIVELOCK phase)
+//       beat not ready (1 bubble in 4)->  2 cycles  (WRITE-GAP phase, see (c))
+//       arbiter busy ~70%             ->  8 cycles  (BUSY-ARBITER phase)
+//
+//     So: <= 8 cycles measured, against a 72-cycle (one burst) budget and the 158 us
+//     the old design cost. The comparison that matters is unchanged; the number is
+//     now the one the bench actually produces.
+//
+//     Stating it this way on purpose. The comment this module replaces failed in
+//     exactly this manner — "vblank is long vs the ~0.2 ms copy" was a true bound
+//     under an unstated condition, and the condition is what died.
 //
 //  ── WHY A COMBINATIONAL OWNER SIGNAL IS SAFE HERE ────────────────────────
 //  `dma_owns` changing mid-transfer would normally corrupt a burst. It does not

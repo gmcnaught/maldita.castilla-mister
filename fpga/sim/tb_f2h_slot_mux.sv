@@ -107,9 +107,9 @@ module tb_f2h_slot_mux;
     if (rdr_we && !rdr_busy) dma_accepts = dma_accepts + 1;
   end
 
-  integer i, nfail;
+  integer i, nfail, worst_overall;
   initial begin
-    nfail = 0;
+    nfail = 0; worst_overall = 0;
     repeat (4) @(posedge clk); rst <= 0; @(posedge clk);
 
     // ══ FAULT 1: STARVATION ════════════════════════════════════════════════
@@ -172,6 +172,7 @@ module tb_f2h_slot_mux;
     dma_accepts = 0; cur_stall = 0; max_stall = 0;   // measure THIS phase only
     rd_rd <= 1'b1; dma_active <= 1'b1; dma_wr <= 1'b1;
     repeat (4000) @(posedge clk);
+    if (max_stall > worst_overall) worst_overall = max_stall;
     $display("LIVELOCK: copy took %0d beats under CONTINUOUS reader demand; reader's",
              dma_accepts);
     $display("          worst stall in that window = %0d cyc (starve_cnt=%0d)",
@@ -222,6 +223,7 @@ module tb_f2h_slot_mux;
       @(posedge clk);
     end
     rdr_busy <= 1'b0;
+    if (max_stall > worst_overall) worst_overall = max_stall;
     $display("BUSY-ARBITER: copy beats=%0d, reader worst stall=%0d cyc (starve_cnt=%0d)",
              dma_accepts, max_stall, starve_cnt);
     if (max_stall > 72) begin
@@ -250,6 +252,7 @@ module tb_f2h_slot_mux;
       @(posedge clk);
     end
     dma_wr <= 1'b1;
+    if (max_stall > worst_overall) worst_overall = max_stall;
     $display("WRITE-GAP: copy beats=%0d, reader worst stall=%0d cyc (escape waiting for a beat)",
              dma_accepts, max_stall);
     if (max_stall > 72) begin
@@ -257,6 +260,24 @@ module tb_f2h_slot_mux;
                max_stall);
       $display("                        comp_fb_dma to present a write — the release valve");
       $display("                        is gated on a neighbouring module's cadence.");
+      nfail = nfail + 1;
+    end
+
+    // ── DRIFT GATE on the number the module header quotes ────────────────────
+    // The three phases above each gate at 72 cycles — the DESIGN bound (one reader
+    // burst). But f2h_slot_mux's contract item 3 quotes a MEASURED worst case of 8
+    // cycles, and a documented number that nothing enforces will drift until it is
+    // wrong — which is the exact failure this whole module replaces. 24 = 3x the
+    // measured worst, so ordinary variation passes and a real regression is caught
+    // long before it reaches the design bound. If this fires, fix the code or update
+    // the header's table; do not just raise the threshold.
+    $display("DRIFT GATE: worst reader stall across all escape phases = %0d cyc (header quotes 8)",
+             worst_overall);
+    if (worst_overall > 24) begin
+      $display("FAIL f2h-DRIFT: worst escape cost %0d cyc exceeds 3x the 8-cycle figure",
+               worst_overall);
+      $display("                stated in f2h_slot_mux's contract item 3. The header is");
+      $display("                now wrong, or the escape has regressed.");
       nfail = nfail + 1;
     end
 
