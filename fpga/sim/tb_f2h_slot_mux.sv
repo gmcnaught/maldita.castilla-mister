@@ -204,6 +204,38 @@ module tb_f2h_slot_mux;
       nfail = nfail + 1;
     end
 
+    // ══ ESCAPE UNDER A BUSY ARBITER ════════════════════════════════════════
+    // The livelock phase above ran with rdr_busy=0, so every escape grant was taken
+    // immediately. If the arbiter is BUSY when the escape fires, dma_accept cannot
+    // assert, starve_cnt keeps counting and the copy HOLDS the slot until it gets its
+    // beat — so the release valve could in principle stall the reader for as long as
+    // the arbiter is backed up. Bound it rather than assume it.
+    //
+    // It stays small for a structural reason: in the cycles where the copy holds the
+    // slot waiting on a busy arbiter, the reader could not have been served either
+    // (rd_busy is rdr_busy in that case anyway), so the marginal cost is only the
+    // free cycles inside the hold.
+    dma_accepts = 0; cur_stall = 0; max_stall = 0;
+    rd_rd <= 1'b1; dma_active <= 1'b1; dma_wr <= 1'b1;
+    for (i = 0; i < 3000; i = i + 1) begin
+      rdr_busy <= (i % 10) < 7;          // arbiter busy 70% of the time
+      @(posedge clk);
+    end
+    rdr_busy <= 1'b0;
+    $display("BUSY-ARBITER: copy beats=%0d, reader worst stall=%0d cyc (starve_cnt=%0d)",
+             dma_accepts, max_stall, starve_cnt);
+    if (max_stall > 72) begin
+      $display("FAIL f2h-ESCAPE-HOLD: reader stalled %0d cyc while the escape waited on a",
+               max_stall);
+      $display("                      busy arbiter — the release valve is holding the slot");
+      $display("                      instead of releasing it.");
+      nfail = nfail + 1;
+    end
+    if (dma_accepts == 0) begin
+      $display("FAIL f2h-ESCAPE-HOLD: copy made no progress against a busy arbiter.");
+      nfail = nfail + 1;
+    end
+
     $display("PASS f2h: reader keeps the slot (worst stall %0d cyc under pathological", max_stall);
     $display("          demand), loses no beats (%0d/%0d), and the copy still drains",
              beats_taken, beats_offered);
