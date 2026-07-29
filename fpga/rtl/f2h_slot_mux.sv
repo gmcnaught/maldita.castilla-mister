@@ -59,6 +59,22 @@
 //        addr/din/wr stable until accepted (`wr_accept = hold_valid & ~mem_busy`).
 //        So revoking the slot between beats merely re-presents the same beat.
 //
+//    (c) THE ESCAPE RELEASES ON AN ACCEPTED BEAT, NOT ON A TIMER. dma_owns stays
+//        asserted while dma_force is high, and dma_force clears only through
+//        dma_accept (= dma_owns & dma_wr & ~rdr_busy). So if the escape fires in a
+//        cycle where comp_fb_dma is NOT presenting a write, the reader stays blocked
+//        until it presents one. The worst case is therefore set by a NEIGHBOURING
+//        MODULE'S write cadence, not by anything in this file.
+//        Bounded today by comp_fb_dma's read pipeline — work_rd_en -> rd_v1 -> rd_v2
+//        -> hold_valid (comp_fb_dma.sv:136-166), a 2-cycle valid pipe plus the hold
+//        register — so mem_wr is only low for the few cycles after an accept while the
+//        next qword propagates. MEASURED at 2 cycles (tb_f2h_slot_mux WRITE-GAP phase,
+//        one write bubble in four), against the 158 us this replaces.
+//        If comp_fb_dma ever gains a longer stall — a deeper pipe, a source that can
+//        back-pressure, a burst mode — this bound grows with it and must be re-derived.
+//        A timer-based release would decouple it, at the cost of granting the slot with
+//        no beat to put in it.
+//
 //  Writes never enter the arbiter's expectation queue ("Writes return no data, so
 //  they never touch the expectation queue"), so interleaving a copy write between
 //  a reader read-issue and its return beats cannot mis-route a beat.

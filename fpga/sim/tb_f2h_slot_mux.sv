@@ -236,6 +236,30 @@ module tb_f2h_slot_mux;
       nfail = nfail + 1;
     end
 
+    // ══ ESCAPE WITH NO BEAT READY (precondition (c)) ═══════════════════════
+    // The escape releases on an ACCEPTED BEAT, not a timer, so if it fires while
+    // comp_fb_dma is not presenting a write the reader stays blocked until it does.
+    // That worst case is set by a NEIGHBOURING module's cadence, which is exactly the
+    // class of unnamed cross-module assumption that caused the original regression —
+    // so bound it here rather than reason about it.
+    // dma_wr gaps model comp_fb_dma's work_rd_en -> rd_v1 -> rd_v2 -> hold_valid pipe.
+    dma_accepts = 0; cur_stall = 0; max_stall = 0;
+    rd_rd <= 1'b1; dma_active <= 1'b1; rdr_busy <= 1'b0;
+    for (i = 0; i < 3000; i = i + 1) begin
+      dma_wr <= (i % 4) != 0;            // one bubble every 4 cycles
+      @(posedge clk);
+    end
+    dma_wr <= 1'b1;
+    $display("WRITE-GAP: copy beats=%0d, reader worst stall=%0d cyc (escape waiting for a beat)",
+             dma_accepts, max_stall);
+    if (max_stall > 72) begin
+      $display("FAIL f2h-ESCAPE-NOBEAT: reader stalled %0d cyc while the escape waited for",
+               max_stall);
+      $display("                        comp_fb_dma to present a write — the release valve");
+      $display("                        is gated on a neighbouring module's cadence.");
+      nfail = nfail + 1;
+    end
+
     $display("PASS f2h: reader keeps the slot (worst stall %0d cyc under pathological", max_stall);
     $display("          demand), loses no beats (%0d/%0d), and the copy still drains",
              beats_taken, beats_offered);
