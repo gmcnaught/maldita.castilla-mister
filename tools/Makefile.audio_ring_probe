@@ -1,0 +1,42 @@
+# Makefile.audio_ring_probe — standalone armhf cross-build of the Tier 0
+# audio/video sync probe (docs/superpowers/plans/2026-07-28-audio-video-sync-
+# diagnostics.md §3).
+#
+# Unlike tools/fabric_probe.c over in gmloader-next, this probe has NO mfgpu
+# dependency at all — it only mmaps /dev/mem read-only and reads three words —
+# so it builds with nothing but a cross gcc.
+#
+# Build (from this repo root, reusing the gmloader armhf image):
+#   docker run --rm -v "$PWD:/src" -w /src gmloader-armhf-build:bullseye \
+#       make -f tools/Makefile.audio_ring_probe
+# Host-native build (for a compile check only — it needs /dev/mem to run):
+#   make -f tools/Makefile.audio_ring_probe ARCH=native
+# Output: tools/audio_ring_probe.armhf
+
+ARCH ?= arm-linux-gnueabihf
+
+ifeq ($(ARCH),native)
+CC  := cc
+OUT := tools/audio_ring_probe.native
+else
+CC  := $(ARCH)-gcc
+OUT := tools/audio_ring_probe.armhf
+endif
+
+# gnu11, not c11: clock_gettime/CLOCK_MONOTONIC and mmap sit behind glibc's
+# __STRICT_ANSI__ gate under -std=c11 (same reason as Makefile.fabric_probe).
+CFLAGS ?= -O2 -std=gnu11 -Wall -Wextra
+ifeq ($(ARCH),arm-linux-gnueabihf)
+CFLAGS += -mtune=cortex-a9
+endif
+
+SRC := tools/audio_ring_probe.c
+
+.PHONY: all clean
+all: $(OUT)
+
+$(OUT): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $(SRC)
+
+clean:
+	rm -f tools/audio_ring_probe.armhf tools/audio_ring_probe.native
