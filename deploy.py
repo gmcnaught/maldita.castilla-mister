@@ -487,10 +487,46 @@ def main():
                       ";main=/media/fat/games/gmloader/MiSTer_Maldita  ; disabled by deploy.py|' "
                       "/media/fat/MiSTer.ini", check=True)
         # The daemon enumerates handlers at startup, so a NEW handler needs a restart.
+        #
+        # The kill walks /proc rather than using pkill: MiSTer's busybox has NO pkill and
+        # no pgrep (`pkill` exits 127, "command not found"), so the old
+        # `pkill -f Master_Daemon.sh; ... nohup Master_Daemon.sh &` killed nothing and
+        # simply ADDED a second daemon on every deploy. Each daemon then spawns its own
+        # handler on core load, so the core came up with TWO gmloader processes writing one
+        # fabric control block — which is both the documented dual-engine corruption and an
+        # automatic abort for any bench run (mister_run.sh asserts exactly one engine).
+        # Observed on .62 2026-07-29: deploys at 15:08 and 15:20 each left a stray daemon.
+        # `killall` is not a substitute either — these run as `bash <path>/Master_Daemon.sh`,
+        # so the process NAME is bash and killall would either miss it or kill every shell.
         print("   restarting Master_Daemon so it picks up the handler")
-        ssh(host, "pkill -f Master_Daemon.sh; sleep 1; "
+        kill_daemons = (
+            'for p in /proc/[0-9]*; do '
+            '  [ -r "$p/cmdline" ] || continue; '
+            '  case "$(tr "\\0" " " < "$p/cmdline")" in '
+            '    *Master_Daemon.sh*) kill -9 "$(basename "$p")" 2>/dev/null ;; '
+            '  esac; '
+            'done'
+        )
+        count_daemons = (
+            'n=0; for p in /proc/[0-9]*; do '
+            '  [ -r "$p/cmdline" ] || continue; '
+            '  case "$(tr "\\0" " " < "$p/cmdline")" in '
+            '    *Master_Daemon.sh*) n=$((n+1)) ;; '
+            '  esac; '
+            'done; echo "$n"'
+        )
+        ssh(host, f"{kill_daemons}; sleep 1; "
                   "nohup /media/fat/MiSTer_Frontier/Master_Daemon.sh >/tmp/master_daemon.log 2>&1 & "
-                  "sleep 1; true")
+                  "sleep 2; true")
+        # Verify, because the failure is silent and only surfaces later as a wedged core.
+        # The counting shell is itself matched by its own cmdline, hence the -1.
+        live = (ssh(host, count_daemons).stdout or "").strip().splitlines()
+        n_live = int(live[-1]) - 1 if live and live[-1].strip().isdigit() else -1
+        if n_live == 1:
+            print("   Master_Daemon: exactly 1 running")
+        else:
+            print(f"   WARN: {n_live} Master_Daemon instance(s) running — expected 1. "
+                  "More than one spawns duplicate engines on core load.")
     else:
         print(f"\n   WARN: {handler_src} missing — auto-launch handler NOT installed.")
 
