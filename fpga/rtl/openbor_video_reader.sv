@@ -43,8 +43,9 @@ module openbor_video_reader #(
     // gmloader's 0x3A region. CTRL @ base, BUF0 @ base+8, BUF1 @ base+0x8008 stay relative.
     parameter [28:0] FB_QW_BASE   = 29'h07400000,
     // SCANOUT_ONLY=1 gates the ioctl/cart path and (in ship builds) the vsync writeback.
-    // The audio-ring DDR path is LIVE (its addresses are absolute: 0x3A000030/38/0x3A0D0000,
-    // independent of FB_QW_BASE). Joystick writes run in both SCANOUT_ONLY and fabric builds.
+    // [audio-own-channel] Audio is NO LONGER this module's job: gm_audio owns it, on
+    // its own ddr_svc channel in clk_audio. Joystick writes run in both SCANOUT_ONLY
+    // and fabric builds.
     parameter        SCANOUT_ONLY = 1'b0
 )(
     // DDR3 Avalon-MM master
@@ -93,11 +94,6 @@ module openbor_video_reader #(
     output reg   [7:0] r_out,
     output reg   [7:0] g_out,
     output reg   [7:0] b_out,
-
-    // Audio output (clk_audio domain)
-    input  wire        clk_audio,       // 24.576 MHz
-    output reg  [15:0] audio_l,
-    output reg  [15:0] audio_r,
 
     // Control
     input  wire        enable,
@@ -156,16 +152,9 @@ localparam [28:0] CART_CTRL_ADDR = FB_QW_BASE + 29'h00002;
 localparam [28:0] JOY1_ADDR      = FB_QW_BASE + 29'h00003;
 localparam [28:0] JOY2_ADDR      = FB_QW_BASE + 29'h00004;
 localparam [28:0] JOY3_ADDR      = FB_QW_BASE + 29'h00005;
-// [audio-map] The audio triplet is ABSOLUTE, not FB_QW_BASE-relative: it is the
-// shared map Solarus and OpenBOR use (openbor_video_reader.sv:144-158 there), so
-// all three ports agree and a future framebuffer relocation cannot strand the
-// ring outside the host's mapped window again.
-localparam [28:0] AUDIO_WR_ADDR   = 29'h07400006;  // 0x3A000030
-localparam [28:0] AUDIO_RD_ADDR   = 29'h07400007;  // 0x3A000038
 localparam [28:0] BUF0_ADDR      = FB_QW_BASE + 29'h00008;  // Buffer 0 (+0x40 bytes)
 localparam [28:0] BUF1_ADDR      = FB_QW_BASE + 29'h08008;  // Buffer 1 (+0x40040 bytes)
 localparam [28:0] CART_DATA_ADDR = FB_QW_BASE + 29'h10000;  // cart path gated off (ioctl deferred)
-localparam [28:0] AUDIO_RING_ADDR = 29'h0741A000; // 0x3A0D0000, 64 KiB ring
 // VSYNC writeback (anti-tearing): the scanout writes an incrementing counter here at
 // the start of EACH displayed frame (vblank) so the ARM/engine can vsync-PACE its
 // producer — produce exactly one frame per scan into the non-displayed buffer instead
@@ -177,36 +166,6 @@ localparam [28:0] VSYNC_ADDR      = FB_QW_BASE + 29'h0E000; // debug vblank-coun
 // never be confused with framebuffer data (the cart path that nominally owns this
 // range is gated off — no writes during play).
 localparam [28:0] DIAG_ADDR       = FB_QW_BASE + 29'h16000; // = byte 0x3BFF0000
-localparam [31:0] AUDIO_RING_BYTES = 32'h00010000; // 64 KiB
-localparam [31:0] AUDIO_RING_MASK  = 32'h0000FFFF;
-
-// [audio-throughput] Refill sizing. Device-measured 2026-07-29 (.62, Tier 2
-// counters): the FIFO ran DRY -- low-water 0 of 1024 -- with 699.7 underflow pops/s,
-// which is 1.458% of 48 kHz against a 1.463% measured drain deficit. Underflow
-// accounted for the entire deficit, and audio_wake was permanently asserted, so the
-// reader was already trying to refill continuously and simply could not move enough
-// data per unit of arbitration.
-//
-// The cost is per BURST, not per byte: each refill spends three DDR round-trips
-// (poll wr_ptr, the ring read, write rd_ptr) and a return through ST_POLL_CTRL,
-// sharing one FSM and the ram1 port with the ~966K qword/s scanout fetch. At the old
-// 256 B burst, sustaining 48 kHz needed 750 bursts/s = 2250 round-trips/s and the
-// reader topped out ~1.5-2.9% short. Quadrupling the burst to 1024 B cuts that to
-// 188 bursts/s -- the same bytes for a quarter of the arbitration exposure.
-//
-// The FIFO is 1024 qwords (see the dcfifo below; the previous "512 entries" comment
-// here was wrong). Raising the threshold to 640 lifts the operating band to
-// 640..768 so a stall has ~13 ms of cushion instead of ~8 ms, at the cost of ~13 ms
-// of added output latency -- worth it against a starvation failure, and small beside
-// the host's 100 ms ring.
-//
-// INVARIANT: AUDIO_REFILL_THRESHOLD + AUDIO_BURST_MAX_QW <= 1024 (the FIFO depth).
-// Bursts are serialised, so worst-case fill is threshold-1 + one full burst = 767.
-// Violating this would silently overflow the dcfifo and drop audio.
-localparam [9:0]  AUDIO_REFILL_THRESHOLD  = 10'd640;
-localparam [31:0] AUDIO_BURST_MAX_BYTES   = 32'd1024;
-localparam [9:0]  AUDIO_BURST_MAX_QW      = 10'd128;   // = MAX_BYTES/8
-
 // `FB_W px x 2 B / 8 B per qword = 72 beats per scanline (derived — never retype)
 localparam [7:0]  LINE_BURST   = 8'(`FB_STRIDE_QW);
 // Each scanline takes `FB_STRIDE_QW qword addresses
@@ -354,51 +313,10 @@ localparam [4:0] ST_WRITE_JOY3      = 5'd11;
 localparam [4:0] ST_WRITE_CART      = 5'd12;
 localparam [4:0] ST_WRITE_CART_SIZE = 5'd13;
 // Audio-path states -- interleaved into idle windows of the video flow.
-localparam [4:0] ST_POLL_AUDIO_WR   = 5'd14;
-localparam [4:0] ST_WAIT_AUDIO_WR   = 5'd15;
-localparam [4:0] ST_PLAN_AUDIO      = 5'd16;
-localparam [4:0] ST_READ_AUDIO_RING = 5'd17;
-localparam [4:0] ST_WAIT_AUDIO_RING = 5'd18;
-localparam [4:0] ST_WRITE_AUDIO_RD  = 5'd19;
 localparam [4:0] ST_PAINT            = 5'd20;  // blitter paint-test rectangle
 localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti-tearing)
 localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
 localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven liveness beacon
-localparam [4:0] ST_AUD_STATS        = 5'd24;  // [audio-tier2] audio refill statistics publish
-
-// [audio-tier2] Audio refill statistics, published to an ABSOLUTE address in the
-// same 0x3A window the host audio writer already maps (native_audio_writer.c maps
-// 0x3A000000 + 1 MB), so reading them needs no new mapping and no FB_QW_BASE
-// arithmetic. 0x3A0E0000 is past the audio ring's 64 KiB (0x3A0D0000..0x3A0E0000)
-// and past the cart buffer's 256 KiB cap (0x3A080000..0x3A0C0000).
-//
-// Device Tier 0 (2026-07-28) measured the ring draining 2-3% below 48 kHz and
-// load-correlated: the reader sustains ~73 of the 75 refill bursts/100 ms it needs.
-// These counters separate the two mechanisms that produce that signature —
-// bursts ABANDONED after their beats were already committed to the FIFO, versus
-// bursts never SCHEDULED. Layout (one qword, one DDR write per publish):
-//   [15:0]  aud_uf_cnt        underflow pops: aud_tick with an empty FIFO. This is
-//                             the sample-hold that stretches playback.
-//   [31:16] aud_short_cnt     ST_WAIT_AUDIO_RING short-burst recoveries.
-//   [47:32] aud_recov_cnt     beats salvaged from short bursts by the partial
-//                             audio_rd_ptr advance. Before [audio-partial-advance]
-//                             these were ORPHANED -- pushed to the FIFO but not
-//                             accounted, hence re-fetched as duplicate audio.
-//   [63:48] aud_fifo_min      minimum audio_fifo_wrusedw seen since the last
-//                             publish (per-interval, not since reset).
-// Device 2026-07-29 read short_cnt=0 and uf_cnt=699.7/s, i.e. pure scheduling
-// starvation -- which is what the burst-size change above targets. aud_uf_cnt is
-// the number to watch after the fix: it should fall to ~0.
-localparam [28:0] AUDIO_STAT_ADDR = 29'h0741C000;  // byte 0x3A0E0000
-
-// Publish cadence: 2^22 ddr_clk (~42.6 ms at 98.44 MHz), reusing the beacon's
-// timer so no second counter is needed. One 64-bit write per period is ~24 B/s --
-// far below the measurement's own noise floor, so the probe does not perturb the
-// contention it is measuring.
-reg        aud_stat_pending;
-reg [15:0] aud_short_cnt;
-reg [15:0] aud_recov_cnt;
-reg [9:0]  aud_fifo_min;
 
 // [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
 // {dbg_blt, beacon_cnt} to VSYNC_ADDR+2 (byte 0x3A070010) from ST_IDLE. Timer-
@@ -460,13 +378,6 @@ reg         preloading;
 reg  [19:0] timeout_cnt;
 reg  [9:0]  paint_cnt;       // blitter paint-test: rect qword counter
 
-// Audio state
-reg  [31:0] audio_wr_ptr;
-reg  [31:0] audio_rd_ptr;
-reg  [7:0]  audio_burst_rem;
-reg  [31:0] audio_burst_bytes;
-reg  [19:0] audio_backoff;
-
 // Cart loading registers
 reg  [63:0] cart_buf;
 reg   [2:0] cart_byte_cnt;
@@ -497,66 +408,6 @@ assign disp_active = active_buffer;
 reg         lb_we;
 reg  [7:0]  lb_waddr;
 reg  [63:0] lb_wdata;
-
-// -- Audio FIFO write signals -----------------------------------------
-reg         audio_fifo_wr;
-reg  [63:0] audio_fifo_wr_data;
-wire        audio_fifo_empty;
-wire [9:0]  audio_fifo_wrusedw;
-wire        audio_fifo_low = (audio_fifo_wrusedw < AUDIO_REFILL_THRESHOLD);
-
-// -- [audio-tier2] underflow counter + CDC to ddr_clk -----------------
-// aud_uf_cnt lives in clk_audio (it counts aud_tick events, and is driven in the
-// sample-output block far below) but is published by the ddr_clk FSM, so it
-// crosses domains as GRAY -- the same discipline as the vcount CDC and for the
-// same reason: a plain binary 2-FF sync can latch an incoherent multi-bit value
-// mid-increment, and here that would fabricate a huge spurious delta in exactly
-// the number this whole investigation turns on. The counter increments at most
-// 48000/s against a ~98 MHz ddr_clk, so successive gray values are always >2000
-// ddr_clk apart -- no sampling-rate hazard.
-// Declared here, ahead of the FSM, because ST_AUD_STATS consumes aud_uf_ddr.
-reg [15:0] aud_uf_cnt;
-reg [15:0] aud_uf_gray;
-always @(posedge clk_audio) aud_uf_gray <= aud_uf_cnt ^ (aud_uf_cnt >> 1);
-
-reg [15:0] aud_uf_g1, aud_uf_g2;
-always @(posedge ddr_clk) begin
-    aud_uf_g1 <= aud_uf_gray;
-    aud_uf_g2 <= aud_uf_g1;
-end
-
-function automatic [15:0] gray_to_bin16(input logic [15:0] g);
-    integer i;
-    reg [15:0] b;
-    begin
-        b[15] = g[15];
-        for (i = 14; i >= 0; i = i - 1) b[i] = b[i+1] ^ g[i];
-        gray_to_bin16 = b;
-    end
-endfunction
-
-wire [15:0] aud_uf_ddr = gray_to_bin16(aud_uf_g2);
-
-// Audio fetch eligibility (combinational)
-wire [31:0] audio_bytes_avail = (audio_wr_ptr - audio_rd_ptr) & AUDIO_RING_MASK;
-// [audio-map] The ring is back at its absolute address and inside the host's
-// mapping, so SCANOUT_ONLY no longer gates this path. SCANOUT_ONLY still gates
-// the ioctl/cart and vsync-writeback paths -- do not remove it there.
-wire        audio_wake        = enable_ddr && audio_fifo_low && (audio_backoff == 20'd0);
-
-// Burst planning (combinational, used in ST_PLAN_AUDIO).
-wire [31:0] audio_plan_cand_a  = (audio_bytes_avail > AUDIO_BURST_MAX_BYTES)
-                                 ? AUDIO_BURST_MAX_BYTES : audio_bytes_avail;
-wire [31:0] audio_plan_wrap    = AUDIO_RING_BYTES - (audio_rd_ptr & AUDIO_RING_MASK);
-wire [31:0] audio_plan_cand_b  = (audio_plan_cand_a > audio_plan_wrap) ? audio_plan_wrap : audio_plan_cand_a;
-wire [31:0] audio_plan_bytes   = audio_plan_cand_b & 32'hFFFFFFF8;
-wire [7:0]  audio_plan_qwords  = audio_plan_bytes[10:3];
-
-// [audio-partial-advance] Beats actually delivered by the burst in flight. The plan
-// is re-derived from audio_burst_bytes (latched at ST_PLAN_AUDIO) rather than kept
-// in a second register, so it cannot drift out of step with audio_burst_rem, which
-// the ST_WAIT_AUDIO_RING beat handler decrements. Meaningful only in that state.
-wire [7:0]  aud_beats_got      = audio_burst_bytes[10:3] - audio_burst_rem;
 
 // -- FIFO async clear -------------------------------------------------
 reg [3:0] fifo_aclr_cnt;
@@ -606,13 +457,6 @@ always @(posedge ddr_clk) begin
         cart_loading       <= 1'b0;
         new_frame_pending  <= 1'b0;
         synced             <= 1'b0;
-        audio_wr_ptr       <= 32'd0;
-        audio_rd_ptr       <= 32'd0;
-        audio_burst_rem    <= 8'd0;
-        audio_burst_bytes  <= 32'd0;
-        audio_backoff      <= 20'd0;
-        audio_fifo_wr      <= 1'b0;
-        audio_fifo_wr_data <= 64'd0;
         // beacon_tick resets to 1, NOT 0: the pending trigger is tick==0, so a
         // 0-init would fire the beacon on the first post-reset cycle — inside the
         // core-load port-bring-up danger window (and, in sim, before the bench
@@ -620,25 +464,12 @@ always @(posedge ddr_clk) begin
         beacon_tick        <= 22'd1;
         beacon_pending     <= 1'b0;
         beacon_cnt         <= 32'd0;
-        aud_stat_pending   <= 1'b0;
-        aud_short_cnt      <= 16'd0;
-        aud_recov_cnt      <= 16'd0;
-        aud_fifo_min       <= 10'h3FF;
     end
     else begin
         // [wedge probe v5] beacon timer — free-running, independent of new_frame.
         beacon_tick <= beacon_tick + 22'd1;
         if (beacon_tick == 22'd0) beacon_pending <= 1'b1;
-        // [audio-tier2] Share the beacon's timer for the stats publish.
-        if (beacon_tick == 22'd0) aud_stat_pending <= 1'b1;
-        // Per-interval FIFO low-water mark. Tracked continuously and cleared at
-        // publish, so each sample answers "how close did the refill get to dry in
-        // the last 42.6 ms" rather than a since-reset minimum that latches at the
-        // first startup transient and never moves again.
-        if (audio_fifo_wrusedw < aud_fifo_min) aud_fifo_min <= audio_fifo_wrusedw;
-        lb_we         <= 1'b0;
-        audio_fifo_wr <= 1'b0;
-        if (audio_backoff != 20'd0) audio_backoff <= audio_backoff - 20'd1;
+        lb_we <= 1'b0;
         if (fifo_aclr_cnt != 4'd0) fifo_aclr_cnt <= fifo_aclr_cnt - 4'd1;
         if (!ddr_busy) ddr_rd <= 1'b0;
         if (!ddr_busy) ddr_we <= 1'b0;
@@ -749,12 +580,8 @@ always @(posedge ddr_clk) begin
                     state <= ST_WRITE_CART;
                 else if (cart_size_pending)
                     state <= ST_WRITE_CART_SIZE;
-                else if (audio_wake)
-                    state <= ST_POLL_AUDIO_WR;
                 else if (beacon_pending)          // [wedge probe v5] lowest priority
                     state <= ST_BEACON;
-                else if (aud_stat_pending)        // [audio-tier2] lower still
-                    state <= ST_AUD_STATS;
             end
 
             // [wedge probe v5] liveness beacon + live blitter dbg publish.
@@ -767,25 +594,6 @@ always @(posedge ddr_clk) begin
                     beacon_cnt     <= beacon_cnt + 32'd1;
                     beacon_pending <= 1'b0;
                     state          <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
-                end
-            end
-
-            // [audio-tier2] Publish the audio refill statistics. Lowest priority,
-            // one 64-bit write per ~42.6 ms. aud_fifo_min is cleared here so the
-            // next interval measures its own low-water mark; the three counters
-            // free-run and wrap at 16 bits, which the host unwraps (at a 100 ms
-            // host sample the largest, aud_uf_cnt, advances <5000 -- far inside
-            // the 65536 wrap).
-            ST_AUD_STATS: begin
-                if (!ddr_busy) begin
-                    ddr_addr         <= AUDIO_STAT_ADDR;
-                    ddr_din          <= {{6'd0, aud_fifo_min}, aud_recov_cnt,
-                                         aud_short_cnt, aud_uf_ddr};
-                    ddr_burstcnt     <= 8'd1;
-                    ddr_we           <= 1'b1;
-                    aud_stat_pending <= 1'b0;
-                    aud_fifo_min     <= 10'h3FF;
-                    state            <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
                 end
             end
 
@@ -942,16 +750,8 @@ always @(posedge ddr_clk) begin
                     new_frame_pending <= 1'b0;
                     state <= ST_WRITE_JOY0;
                 end
-                else if (audio_wake)
-                    // [audio POLL-anchor] audio_wake was only evaluated in ST_IDLE,
-                    // which starves once frames stream (same defect as the JOY
-                    // writeback) — in-game the ring would never drain. Service it
-                    // here; the audio chain's exits return here too.
-                    state <= ST_POLL_AUDIO_WR;
                 else if (beacon_pending)
                     state <= ST_BEACON;
-                else if (aud_stat_pending)        // [audio-tier2] lowest priority
-                    state <= ST_AUD_STATS;
                 else if (!ddr_busy) begin
                     ddr_addr     <= CTRL_ADDR;
                     ddr_burstcnt <= 8'd1;
@@ -1112,121 +912,6 @@ always @(posedge ddr_clk) begin
                 end
             end
 
-            // -- Audio path: poll wr_ptr, read ring, write rd_ptr ---
-            ST_POLL_AUDIO_WR: begin
-                if (!ddr_busy) begin
-                    ddr_addr     <= AUDIO_WR_ADDR;
-                    ddr_burstcnt <= 8'd1;
-                    ddr_rd       <= 1'b1;
-                    timeout_cnt  <= 20'd0;          // [#39] arm watchdog
-                    state        <= ST_WAIT_AUDIO_WR;
-                end
-            end
-
-            ST_WAIT_AUDIO_WR: begin
-                if (ddr_dout_ready) begin
-                    audio_wr_ptr <= ddr_dout[31:0];
-                    timeout_cnt  <= 20'd0;
-                    state        <= ST_PLAN_AUDIO;
-                end
-                // [#39] a lost f2h read-response must not wedge the shared scanout
-                // FSM: recover (mirrors ST_WAIT_CTRL / ST_WAIT_LINE). [audio
-                // POLL-anchor] exits return to ST_POLL_CTRL, the live hub — ST_IDLE
-                // starves once frames stream.
-                else if (timeout_cnt == TIMEOUT_MAX)
-                    state <= ST_POLL_CTRL;
-                else
-                    timeout_cnt <= timeout_cnt + 20'd1;
-            end
-
-            ST_PLAN_AUDIO: begin
-                // Now audio_bytes_avail is valid (audio_wr_ptr just latched).
-                if (audio_bytes_avail == 32'd0) begin
-                    // Ring empty -- back off briefly to avoid DDR3 spam.
-                    audio_backoff <= 20'h01000;  // ~42 us at 98.44 MHz clk_sys
-                    state         <= ST_POLL_CTRL;
-                end
-                else if (!audio_fifo_low) begin
-                    // FIFO filled up while we were polling; don't fetch.
-                    state <= ST_POLL_CTRL;
-                end
-                else if (audio_plan_bytes == 32'd0) begin
-                    state <= ST_POLL_CTRL;
-                end
-                else begin
-                    // Plan a burst: min(bytes_avail, 256, ring_wrap_room),
-                    // floored to a multiple of 8 bytes (one qword).
-                    audio_burst_bytes <= audio_plan_bytes;
-                    audio_burst_rem   <= audio_plan_qwords;
-                    state             <= ST_READ_AUDIO_RING;
-                end
-            end
-
-            ST_READ_AUDIO_RING: begin
-                if (!ddr_busy) begin
-                    ddr_addr     <= AUDIO_RING_ADDR + audio_rd_ptr[15:3];
-                    ddr_burstcnt <= audio_burst_rem;
-                    ddr_rd       <= 1'b1;
-                    timeout_cnt  <= 20'd0;          // [#39] arm watchdog
-                    state        <= ST_WAIT_AUDIO_RING;
-                end
-            end
-
-            ST_WAIT_AUDIO_RING: begin
-                if (ddr_dout_ready) begin
-                    audio_fifo_wr_data <= ddr_dout;
-                    audio_fifo_wr      <= 1'b1;
-                    audio_burst_rem    <= audio_burst_rem - 8'd1;
-                    timeout_cnt        <= 20'd0;       // progress: re-arm watchdog
-                    if (audio_burst_rem == 8'd1) begin
-                        audio_rd_ptr <= (audio_rd_ptr + audio_burst_bytes) & AUDIO_RING_MASK;
-                        state        <= ST_WRITE_AUDIO_RD;
-                    end
-                end
-                // [#39] short-burst recovery (mirror ST_WAIT_LINE): the shared f2h
-                // bus occasionally returns fewer beats than ddr_burstcnt (the
-                // arbiter self-corrects via QUIET_MAX; the reader did not), which
-                // wedged the single shared scanout FSM forever -> vsync freeze ->
-                // black screen. Abandon the partial burst and re-plan next wake;
-                // do NOT advance audio_rd_ptr -- the burst didn't complete.
-                // [audio POLL-anchor] recover to ST_POLL_CTRL (ST_IDLE starves).
-                else if (timeout_cnt == TIMEOUT_MAX) begin
-                    // [audio-partial-advance] A short burst used to abandon WITHOUT
-                    // advancing audio_rd_ptr. The beats it did deliver were already
-                    // pushed into the FIFO by the branch above, so the re-plan
-                    // re-fetched the same qwords and the FIFO was handed the same
-                    // audio twice (tb_audio_burst_wedge measured 63 FIFO writes for
-                    // 32 qwords of ring data). That "abandon the partial" recovery
-                    // was copied from ST_WAIT_LINE, where it is harmless because the
-                    // line buffer is position-addressed and re-anchors every line --
-                    // a stream FIFO has no such re-anchor, so the copy was never
-                    // correct here.
-                    //
-                    // Advance by what was ACTUALLY consumed. The next wake then
-                    // resumes at the right offset: no duplicate, no gap. Beats are
-                    // qwords, hence the <<3.
-                    aud_short_cnt <= aud_short_cnt + 16'd1;
-                    aud_recov_cnt <= aud_recov_cnt + {8'd0, aud_beats_got};
-                    audio_rd_ptr  <= (audio_rd_ptr + {21'd0, aud_beats_got, 3'b000})
-                                     & AUDIO_RING_MASK;
-                    // Publish the corrected pointer rather than dropping straight to
-                    // ST_POLL_CTRL: the host sizes its submits from rd_ptr, so
-                    // leaving a stale value would understate the free space.
-                    state <= ST_WRITE_AUDIO_RD;
-                end
-                else
-                    timeout_cnt <= timeout_cnt + 20'd1;
-            end
-
-            ST_WRITE_AUDIO_RD: begin
-                if (!ddr_busy) begin
-                    ddr_addr     <= AUDIO_RD_ADDR;
-                    ddr_din      <= {32'd0, audio_rd_ptr};
-                    ddr_burstcnt <= 8'd1;
-                    ddr_we       <= 1'b1;
-                    state        <= ST_POLL_CTRL;   // [audio POLL-anchor]
-                end
-            end
 
             // Blitter paint-test: write a 64x32 solid rectangle into the active
             // framebuffer (16 qwords/line x 32 lines = 512 single-beat writes),
@@ -1319,100 +1004,5 @@ end
 always @(posedge ddr_clk)
     if (lb_we) linebuf[lb_waddr] <= lb_wdata;
 
-// -- Audio dual-clock FIFO (ddr_clk write, clk_audio read) -----------
-// 64-bit wide (= 2 stereo frames per entry), 1024 deep. Read side
-// alternates halves, popping every other sample.
-wire [63:0] audio_fifo_rd_data;
-reg         audio_fifo_rd;
-
-dcfifo #(
-    .intended_device_family ("Cyclone V"),
-    .lpm_numwords           (1024),
-    .lpm_showahead          ("ON"),
-    .lpm_type               ("dcfifo"),
-    .lpm_width              (64),
-    .lpm_widthu             (10),
-    .overflow_checking      ("ON"),
-    .rdsync_delaypipe       (4),
-    .underflow_checking     ("ON"),
-    .use_eab                ("ON"),
-    .wrsync_delaypipe       (4)
-) audio_fifo_inst (
-    .aclr     (reset),
-    .data     (audio_fifo_wr_data),
-    .rdclk    (clk_audio),
-    .rdreq    (audio_fifo_rd),
-    .wrclk    (ddr_clk),
-    .wrreq    (audio_fifo_wr),
-    .q        (audio_fifo_rd_data),
-    .rdempty  (audio_fifo_empty),
-    .wrfull   (),
-    .wrusedw  (audio_fifo_wrusedw),
-    .eccstatus(),
-    .rdfull   (),
-    .rdusedw  (),
-    .wrempty  ()
-);
-
-// -- 48 kHz sample clock (clk_audio / 512 = 48 kHz exactly) ----------
-reg [8:0] aud_div;
-reg       aud_tick;
-reg [1:0] reset_aud_sync;
-always @(posedge clk_audio or posedge reset)
-    if (reset) reset_aud_sync <= 2'b11;
-    else       reset_aud_sync <= {reset_aud_sync[0], 1'b0};
-wire reset_aud = reset_aud_sync[1];
-
-always @(posedge clk_audio) begin
-    if (reset_aud) begin
-        aud_div  <= 9'd0;
-        aud_tick <= 1'b0;
-    end
-    else begin
-        aud_div  <= aud_div + 9'd1;
-        aud_tick <= (aud_div == 9'd0);
-    end
-end
-
-// -- Audio sample output (clk_audio domain) --------------------------
-// Each FIFO entry carries two stereo frames:
-//   [15:0]   L0
-//   [31:16]  R0
-//   [47:32]  L1
-//   [63:48]  R1
-// Alternate halves, pop every other tick.
-reg half_sel;
-always @(posedge clk_audio) begin
-    if (reset_aud) begin
-        audio_l       <= 16'd0;
-        audio_r       <= 16'd0;
-        audio_fifo_rd <= 1'b0;
-        half_sel      <= 1'b0;
-        aud_uf_cnt    <= 16'd0;
-    end
-    else begin
-        audio_fifo_rd <= 1'b0;
-        // [audio-tier2] Count the sample-hold. This is the exact event that makes
-        // playback slow: the tick is spent but no sample is consumed, so the real
-        // drain rate falls below the nominal 48 kHz by this count per second.
-        if (aud_tick && audio_fifo_empty) aud_uf_cnt <= aud_uf_cnt + 16'd1;
-        if (aud_tick) begin
-            if (!audio_fifo_empty) begin
-                if (half_sel == 1'b0) begin
-                    audio_l  <= audio_fifo_rd_data[15:0];
-                    audio_r  <= audio_fifo_rd_data[31:16];
-                    half_sel <= 1'b1;
-                end
-                else begin
-                    audio_l       <= audio_fifo_rd_data[47:32];
-                    audio_r       <= audio_fifo_rd_data[63:48];
-                    audio_fifo_rd <= 1'b1;       // advance to next qword
-                    half_sel      <= 1'b0;
-                end
-            end
-            // else: underflow, hold previous sample
-        end
-    end
-end
 
 endmodule

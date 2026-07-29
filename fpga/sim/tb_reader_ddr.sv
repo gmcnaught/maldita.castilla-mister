@@ -75,7 +75,6 @@ module tb_reader_ddr;
         .joystick_0(JOY0_VAL), .joystick_1(JOY1_VAL), .joystick_2(32'd0), .joystick_3(32'd0),
         .joystick_l_analog_0(16'd0),
         .r_out(reader_r), .g_out(reader_g), .b_out(reader_b),
-        .clk_audio(clk), .audio_l(), .audio_r(),
         .enable(1'b1), .frame_ready(),
         .dbg_blt(32'd0), .dbg_addr(32'd0), .dbg_diag(32'd0)
     );

@@ -682,6 +682,14 @@ ddr_svc ddr_svc
 	.ch0_data(alsa_readdata),
 	.ch0_req(alsa_req),
 	.ch0_ready(alsa_ready),
+`elsif MALDITA_CORE
+	// [audio-own-channel] gm_audio takes the channel ALSA vacated. Same shape
+	// as alsa.sv's: single-qword bursts, clk_audio, req is a toggle.
+	.ch0_addr(gma_address),
+	.ch0_burst(1),
+	.ch0_data(gma_readdata),
+	.ch0_req(gma_req),
+	.ch0_ready(gma_ready),
 `endif
 
 	.ch1_addr(pal_addr),
@@ -1639,9 +1647,9 @@ audio_out audio_out
 	.cy1(acy1),
 	.cy2(acy2),
 
-	.is_signed(audio_s),
-	.core_l(audio_l),
-	.core_r(audio_r),
+	.is_signed(snd_s),
+	.core_l(snd_l),
+	.core_r(snd_r),
 
 `ifndef MISTER_DISABLE_ALSA
 	.alsa_l(alsa_l),
@@ -1697,6 +1705,50 @@ audio_out audio_out
 		.pcm_l(alsa_l),
 		.pcm_r(alsa_r)
 	);
+`endif
+
+//////////////////  Native audio (gmloader DDR ring) ///////////////////
+//
+// [audio-own-channel] gm_audio replaces the audio FSM that used to live inside
+// openbor_video_reader. That FSM shared the VIDEO scanout DDR master and popped
+// at a fixed 48 kHz, so refill was open-loop and every lost race showed up as a
+// rate deficit. This runs on its own ddr_svc channel in clk_audio and slews its
+// consumption to the producer, the way sys/alsa.sv does.
+//
+// pcm_l/pcm_r feed audio_out's core_l/core_r, NOT alsa_l/alsa_r: aud_mix_top
+// sums the alsa port unfiltered, and the ring carries 22.05 kHz, so the output
+// needs the IIR + DC blocker on the core path.
+//
+`ifdef MALDITA_CORE
+	wire [28:0] gma_address;
+	wire [63:0] gma_readdata;
+	wire        gma_ready;
+	wire        gma_req;
+	wire [15:0] gma_pcm_l, gma_pcm_r;
+
+	gm_audio gm_audio
+	(
+		.reset(reset),
+		.clk(clk_audio),
+
+		.ram_address(gma_address),
+		.ram_data(gma_readdata),
+		.ram_req(gma_req),
+		.ram_ready(gma_ready),
+
+		.pcm_l(gma_pcm_l),
+		.pcm_r(gma_pcm_r)
+	);
+
+	// emu's AUDIO_L/R are unused in this core -- the FPGA reads PCM straight
+	// from the ring gmloader writes, so nothing routes audio through emu.
+	wire [15:0] snd_l = gma_pcm_l;
+	wire [15:0] snd_r = gma_pcm_r;
+	wire        snd_s = 1'b1;          // gm_audio emits signed S16
+`else
+	wire [15:0] snd_l = audio_l;
+	wire [15:0] snd_r = audio_r;
+	wire        snd_s = audio_s;
 `endif
 
 ////////////////  User I/O (USB 3.0 connector) /////////////////////////
