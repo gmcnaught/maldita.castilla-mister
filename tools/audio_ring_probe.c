@@ -117,8 +117,14 @@ int main(int argc, char **argv) {
 
     printf("# audio ring probe: ring=%u B, nominal drain=%.0f Hz, scanout=%.3f Hz\n",
            RING_BYTES, NOMINAL_HZ, SCANOUT_HZ);
-    printf("# %8s %10s %10s %8s %8s\n",
-           "t_s", "drain_hz", "submit_hz", "occ_fr", "eng_fps");
+    /* d_rd_B is the raw, un-rate-converted byte advance of rd_ptr in this
+     * sample. It is the column that identifies WHICH failure is in play: the
+     * reader refills in bursts of at most 256 B, so if the deficit is whole
+     * missing bursts (d_rd_B quantised to 256 B steps) the FSM is abandoning
+     * planned bursts, whereas FIFO underflow starves the pop at sample
+     * granularity and leaves no such quantisation. */
+    printf("# %8s %10s %10s %8s %8s %8s\n",
+           "t_s", "drain_hz", "submit_hz", "occ_fr", "eng_fps", "d_rd_B");
 
     while (now_s() - t0 < duration_s) {
         struct timespec req = {
@@ -146,8 +152,8 @@ int main(int argc, char **argv) {
         const double submit_hz = (double)d_wr / BYTES_PER_FRAME / dt;
         const double eng_fps   = sub_reg ? (double)d_sub / dt : 0.0;
 
-        printf("  %8.3f %10.1f %10.1f %8u %8.2f\n",
-               t_now - t0, drain_hz, submit_hz, occ, eng_fps);
+        printf("  %8.3f %10.1f %10.1f %8u %8.2f %8u\n",
+               t_now - t0, drain_hz, submit_hz, occ, eng_fps, d_rd);
         fflush(stdout);
 
         wr_total += d_wr;

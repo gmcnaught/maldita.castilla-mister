@@ -99,7 +99,86 @@ Decision table:
 Run it three ways so DDR contention is a controlled variable: idle at the title screen,
 during gameplay, and with `GMLOADER_RASTER=sw` (software rasterizer, fabric mostly idle).
 
+## 3a. Tier 0 RESULTS — device .81, 2026-07-28, game running
+
+`tools/audio_ring_probe.armhf`, four runs of 2–40 s at 100 ms cadence, engine on the
+fabric path, attract/gameplay load.
+
+```
+FPGA drain     : 46622 – 46985 Hz   (-2.11% to -2.87% vs 48 000 nominal)
+host submit    : tracks drain exactly (the pump is closed-loop, as designed)
+ring occupancy : min 3968, mean ~4760, max 4800 frames  (never near dry, never full)
+engine frames  : 39.8 – 50.8 fps vs the 59.923 Hz scanout
+```
+
+**Finding 1 — the FPGA drains the audio ring 2–3 % below 48 kHz. This is real, not a
+measurement artifact.** The device clock was validated against an NTP-synced host over
+60 s: -0.37 % including SSH handshake asymmetry, an order of magnitude too small to
+explain the deficit. Ring-wrap aliasing is excluded by construction (19 200 B advance
+per 100 ms sample against a 65 536 B ring).
+
+**Finding 2 — the deficit scales with fabric load.** Over 400 samples,
+Pearson r(drain_hz, engine_fps) = **-0.33**; by tercile, engine at 40.5 fps → 46 982 Hz
+drain, engine at 57.3 fps → 46 400 Hz. A constant clock error cannot produce a
+load-dependent deficit, so DDR contention is in the causal path.
+
+**Finding 3 — the deficit is whole missing refill bursts.** `rd_ptr` advances in exact
+256 B steps (`audio_plan_bytes` saturates at 256 because the ring always has ≥256 B
+available), so the useful figure is completed bursts per 100 ms against the 75 needed:
+
+| completed bursts / 100 ms | samples (of 300) |
+|---|---|
+| 75 (19 200 B — no deficit) | 6 |
+| 74 (18 944 B) | 72 |
+| 73 (18 688 B) | 129 |
+| 72 (18 432 B) | 87 |
+
+The reader sustains ~73 of the 75 bursts/100 ms it needs, and **essentially never
+reaches 75**. Note this histogram quantifies the deficit; it does not by itself
+discriminate the mechanism, since 256 B steps are guaranteed by the planner whenever
+the ring is full.
+
+**What this rules in and out:**
+- **H1 confirmed as the observable outcome.** The refill chain cannot sustain 48 kHz, so
+  the FIFO runs down and the sample-hold path stretches playback. The system settles at
+  an equilibrium where the pop rate equals the refill rate — which is exactly the
+  measured 46.6–47.0 kHz.
+- **H2/H5 (producer starvation) excluded as the driver.** Ring occupancy never
+  approaches empty (min 3968 of a 4800 target) and host submit exactly tracks drain, so
+  the host always has audio ready; the FPGA simply is not taking it.
+- **H3/H4 are now downstream consequences, not independent causes.** The pump is
+  closed-loop on `rd_ptr`, so a slow drain back-pressures the producer through
+  `AudioTrack::write`'s blocking spin.
+
+**User-visible translation:** playback is pitched down ~2.9 % (≈ half a semitone) and
+audio falls behind video by ~29 ms per second — ~1.7 s per minute of drift. That is both
+halves of the reported symptom, from one cause.
+
+**Still unknown — this is what Tier 2 must settle.** Whether the missing bursts are
+*abandoned* or *never scheduled*. Two candidates, both consistent with everything above:
+1. **Abandoned partial bursts.** `ST_WAIT_AUDIO_RING` pushes each beat into the FIFO as
+   it arrives (`openbor_video_reader.sv:1045-1047`), but the short-burst recovery path
+   (`:1061-1063`) abandons the burst **without** advancing `audio_rd_ptr`. The beats
+   already pushed stay in the FIFO, so the next wake re-fetches the same qwords and
+   pushes duplicates. That recovery was copied from `ST_WAIT_LINE`, where abandoning is
+   harmless because the line buffer is position-addressed and re-anchors each line — a
+   stream FIFO has no equivalent re-anchor, so the copy is not obviously safe here.
+2. **Scheduling starvation.** The chain costs three DDR round-trips per 256 B (poll
+   `wr_ptr`, 32-beat read, write `rd_ptr`) and must return through `ST_POLL_CTRL` between
+   bursts, where `new_frame_pending` outranks it. ~730 bursts/s sustained against 750
+   needed is a *marginal* shortfall, which is what a scheduling ceiling looks like.
+
+Both point at the same fix direction (cut the audio chain's per-burst arbitration
+exposure: larger bursts, stop re-polling `wr_ptr` and re-writing `rd_ptr` every burst),
+but they are different defects and the counters distinguish them cheaply. **No fix in
+this branch** — see §6.
+
 ## 4. Tier 1 — host instrumentation (engine rebuild, no RBF)
+
+Demoted by the Tier 0 result: the host is exonerated as the *driver*. Still worth
+collecting when convenient, to size the consequences (`MisterAudio_DroppedFrames()`,
+time spent in the `WRITE_BLOCKING` spin, and whether the back-pressure is throttling the
+game loop as well as the audio).
 
 Counters + a once-per-second line to `maldita.log`. Gate behind
 `GMLOADER_AUDIO_STATS=1` so ship builds are unaffected.
@@ -128,7 +207,7 @@ Derived numbers to read off: silence fraction, producer real-time ratio
 (`bytes/sec ÷ (freq × frame_bytes)`), audio latency (`staging + ring` in ms), and
 audio-fps vs video-fps.
 
-## 5. Tier 2 — RTL counters (only if Tier 0 shows `drain_hz` < 48000)
+## 5. Tier 2 — RTL counters (ENTERED: Tier 0 measured `drain_hz` ≈ 46 700)
 
 Costs an RBF rebuild (~12 min, Quartus 17.0 Lite, Windows runner). In
 `openbor_video_reader.sv`, CDC to `ddr_clk` and publish into a debug qword (the existing
@@ -139,6 +218,12 @@ beacon at 0x3A070010 is the precedent):
 - `aud_fifo_min_occupancy` — headroom margin over the run
 - `aud_burst_cnt`, `aud_backoff_cnt` (`avail == 0` path, `:1013-1016`),
   `aud_plan_zero_cnt` (`:1022`), and time-stuck in `ST_WAIT_AUDIO_RING`
+- **`aud_short_burst_cnt`** — entries into the `timeout_cnt == TIMEOUT_MAX` recovery at
+  `:1061-1063`, plus `aud_beats_orphaned` (beats pushed to the FIFO on a burst that was
+  then abandoned). This is the pair that separates the two Tier 0 candidates: non-zero
+  ⇒ abandoned partial bursts (duplicate refetch); zero while `aud_underflow_cnt` is
+  large ⇒ pure scheduling starvation. Expected scale if abandonment is the driver:
+  ~2 events per 100 ms, i.e. ~20/s.
 
 Sim gate to add alongside: extend `fpga/sim/tb_audio_burst_wedge.sv` (currently PASS —
 the "pre-existing failure" note in CLAUDE.md is stale, verified 2026-07-28) with a rate
