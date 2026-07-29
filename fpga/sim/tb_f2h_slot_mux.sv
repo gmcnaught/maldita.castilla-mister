@@ -48,6 +48,19 @@
 // alternative — asserting the measured constant — makes the test and the claim the
 // same number, so it can never disagree with itself and never tells you anything.
 //
+// ── FAULT 3: POLL-GATED ISSUE (the fault the first A1-FIX missed) ───────────
+// Faults 1 and 2 drive rd_rd DIRECTLY, which quietly assumes the reader asserts
+// its request regardless of rd_busy. The real reader does NOT: every issue site
+// in openbor_video_reader polls `!ddr_busy` BEFORE asserting ddr_rd
+// (ST_READ_LINE: `if (!fifo_aclr_ddr_active && !ddr_busy)`), and only the
+// already-asserted request is held-until-accepted (the line-535 default). So if
+// this mux reports busy whenever the copy owns the slot, the reader never asks,
+// rd_req never rises, ownership never yields — a circular wait that blocks the
+// fetch for the WHOLE copy. Device evidence (2026-07-28, a1fix RBF): 4-line
+// bands whose rows are byte-exact copies of rows L-2/L-1 — the linebuf ping-pong
+// serving stale same-parity lines while the fetch sat out a 158 us copy.
+// The POLL-GATED phase models the reader's real protocol and closes this gap.
+//
 // Build with -DA1FIX_OLD_MUX to get the pre-fix behaviour. That is the differential
 // control: this bench MUST fail that way and pass without it, or it proves nothing.
 `timescale 1ns/1ps
@@ -131,6 +144,32 @@ module tb_f2h_slot_mux;
       if (rd_dout_ready) beats_taken = beats_taken + 1;
     end
     if (rdr_we && !rdr_busy) dma_accepts = dma_accepts + 1;
+  end
+
+  // ── reader model for the POLL-GATED phase: the REAL issue protocol ──────────
+  // Mirrors openbor_video_reader exactly: a registered request that is only
+  // ASSERTED after observing !ddr_busy (every issue site gates this way), and
+  // CLEARED on !ddr_busy once asserted (the hold-until-accepted default at :535).
+  // Nothing here retries, escalates, or bypasses — the FSM has no other path.
+  reg     poll_mode = 1'b0;
+  integer poll_issues;            // completed poll->assert->accept cycles
+  integer poll_wait, poll_wait_max;   // cycles spent polling before each issue
+  initial begin poll_issues = 0; poll_wait = 0; poll_wait_max = 0; end
+  always @(posedge clk) if (poll_mode) begin
+    if (!rd_rd) begin
+      if (!rd_busy) begin
+        rd_rd     <= 1'b1;                     // ST_READ_LINE: gate, then assert
+        poll_wait <= 0;
+      end else begin
+        poll_wait <= poll_wait + 1;
+        if (poll_wait + 1 > poll_wait_max) poll_wait_max <= poll_wait + 1;
+      end
+    end else begin
+      if (!rd_busy) begin                      // :535 `if (!ddr_busy) ddr_rd <= 1'b0;`
+        rd_rd       <= 1'b0;
+        poll_issues <= poll_issues + 1;
+      end
+    end
   end
 
   integer i, nfail, worst_overall;
@@ -297,6 +336,70 @@ module tb_f2h_slot_mux;
       $display("FAIL f2h-ESCAPE-NOBEAT: copy made no progress across the write gaps —");
       $display("                        the escape never fired, so this phase tested");
       $display("                        nothing.");
+      nfail = nfail + 1;
+    end
+
+    // ══ FAULT 3: POLL-GATED ISSUE ══════════════════════════════════════════
+    // The reader model (above) now follows the REAL issue protocol: it asserts
+    // rd_rd only after observing !rd_busy, exactly like every issue site in
+    // openbor_video_reader. If rd_busy is held high for the whole copy, the
+    // reader never asks — and rd_req-conditioned ownership never yields. This is
+    // the circular wait that survived the first A1-FIX and kept the 4-line stale
+    // bands on device while faults 1 and 2 passed green.
+    rd_rd <= 1'b0; dma_active <= 1'b1; dma_wr <= 1'b1; rdr_busy <= 1'b0;
+    @(posedge clk);
+    poll_mode <= 1'b1;
+    repeat (3000) @(posedge clk);
+    poll_mode <= 1'b0; rd_rd <= 1'b0;
+    $display("POLL-GATED (arb free): %0d issues completed, worst poll wait=%0d cyc, copy beats=%0d",
+             poll_issues, poll_wait_max, dma_accepts);
+    if (poll_issues == 0) begin
+      $display("FAIL f2h-POLLGATE: a poll-before-issue reader completed NO fetches while");
+      $display("                   the copy ran — rd_busy never opened, so the reader");
+      $display("                   never asked and ownership never yielded. This is the");
+      $display("                   whole-copy fetch blackout: 4-line stale bands on device.");
+      nfail = nfail + 1;
+    end
+    if (poll_wait_max > 72) begin
+      $display("FAIL f2h-POLLGATE: reader polled %0d cycles (> one 72-qword burst) before",
+               poll_wait_max);
+      $display("                   it could even ISSUE — the line-fetch window is missed");
+      $display("                   before the request exists.");
+      nfail = nfail + 1;
+    end
+    // Non-vacuity BOTH ways: the copy must actually have been streaming beats
+    // (else nothing contested the slot), and the check above must have had a
+    // real reader (poll_mode drives rd_rd, so rd_rd direct-drive bugs show here).
+    if (dma_accepts == 0) begin
+      $display("FAIL f2h-POLLGATE: copy made no progress — the phase contested nothing.");
+      nfail = nfail + 1;
+    end
+
+    // Same protocol against a 70%-busy arbiter: on hardware the only !busy
+    // windows during a copy are write-acceptance cycles, so the poll gate must
+    // open on those and the issue must still land promptly.
+    poll_issues = 0; poll_wait = 0; poll_wait_max = 0; dma_accepts = 0;
+    rd_rd <= 1'b0;
+    @(posedge clk);
+    poll_mode <= 1'b1;
+    for (i = 0; i < 3000; i = i + 1) begin
+      rdr_busy <= (i % 10) < 7;
+      @(posedge clk);
+    end
+    poll_mode <= 1'b0; rd_rd <= 1'b0; rdr_busy <= 1'b0;
+    $display("POLL-GATED (arb 70%% busy): %0d issues, worst poll wait=%0d cyc, copy beats=%0d",
+             poll_issues, poll_wait_max, dma_accepts);
+    if (poll_issues == 0) begin
+      $display("FAIL f2h-POLLGATE: no fetches issued against a busy arbiter.");
+      nfail = nfail + 1;
+    end
+    if (poll_wait_max > 72) begin
+      $display("FAIL f2h-POLLGATE: poll wait %0d cyc exceeds one burst under arbiter load.",
+               poll_wait_max);
+      nfail = nfail + 1;
+    end
+    if (dma_accepts == 0) begin
+      $display("FAIL f2h-POLLGATE: copy made no progress — the phase contested nothing.");
       nfail = nfail + 1;
     end
 

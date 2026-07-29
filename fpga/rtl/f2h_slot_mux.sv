@@ -147,9 +147,14 @@ module f2h_slot_mux #(
     output reg  [15:0] starve_cnt         // consecutive cycles the copy was blocked
 );
 
-    // The reader is REQUESTING whenever it has a read or a writeback pending. Both
-    // are registered in the reader and held until accepted (`if (!ddr_busy) ddr_rd
+    // The reader is REQUESTING whenever it has a read or a writeback ASSERTED. Once
+    // asserted, both are registered and held until accepted (`if (!ddr_busy) ddr_rd
     // <= 1'b0;`), so this is stable across a stall rather than a one-cycle pulse.
+    // But ASSERTION itself is poll-gated: the reader only raises ddr_rd/ddr_we
+    // after observing !ddr_busy. rd_req therefore CANNOT be used as "the reader
+    // wants the slot" — while rd_busy is high the reader wants it and stays
+    // silent. That asymmetry is why rd_busy (below) must not report bare copy
+    // ownership; the first version did, and the reader never spoke during a copy.
     wire rd_req = rd_rd | rd_we;
 
     // Anti-starvation: count cycles where the copy wants the slot and the reader is
@@ -202,10 +207,30 @@ module f2h_slot_mux #(
     assign rdr_be       = dma_owns ? dma_be            : rd_be;
     assign rdr_we       = dma_owns ? dma_wr            : rd_we;
 
-    // Reader stalls only in the cycles the copy actually owns the slot — which, by
-    // the priority rule, is only when the reader was not asking (or the escape
-    // fired). Contrast the old design, which stalled it for the WHOLE copy.
-    assign rd_busy      = dma_owns ? 1'b1 : rdr_busy;
+    // THE READER'S VIEW OF BUSY MUST OPEN ITS POLL GATE. Every issue site in
+    // openbor_video_reader polls `!ddr_busy` BEFORE asserting ddr_rd/ddr_we
+    // (e.g. ST_READ_LINE `if (!fifo_aclr_ddr_active && !ddr_busy)`); only an
+    // already-asserted request is held-until-accepted. The first version of this
+    // line was `dma_owns ? 1'b1 : rdr_busy`, which is a CIRCULAR WAIT with that
+    // protocol: ownership yields only on rd_req, rd_req rises only on !rd_busy,
+    // and rd_busy was high whenever the copy owned the slot — so the reader
+    // never asked, and the fetch blacked out for the whole 158 us copy exactly
+    // as in the pre-module design. Device signature (2026-07-28, a1fix RBF):
+    // 4-line bands that are byte-exact copies of lines L-2/L-1 (stale linebuf
+    // parity), drifting with the copy phase. tb_f2h_slot_mux's POLL-GATED phase
+    // reproduces it; faults 1/2 drove rd_rd directly and could not.
+    //
+    // So: report busy to the reader ONLY when its request genuinely cannot be
+    // accepted this cycle — the escape is holding the slot (dma_owns & rd_req),
+    // or the arbiter itself is backpressuring. When the copy owns the slot with
+    // no reader request pending, report the ARBITER's state: a !rdr_busy cycle
+    // lets the reader's poll gate open, its registered request asserts next
+    // cycle, rd_req drops dma_owns combinationally, and the request is presented
+    // — the priority rule finally engages. Acceptance semantics stay exact: in
+    // every cycle the reader has a request presented (rd_req=1, ~dma_force),
+    // rd_busy == rdr_busy, so `if (!ddr_busy) ddr_rd <= 1'b0` still fires
+    // precisely on arbiter acceptance, never on a lie.
+    assign rd_busy      = (dma_owns & rd_req) | rdr_busy;
 
     // The copy sees busy unless it owns the slot AND the arbiter can accept.
     // No combinational loop: comp_fb_dma's mem_wr does not depend on mem_busy, and
