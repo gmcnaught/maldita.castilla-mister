@@ -22,3 +22,7 @@ fpga/sim/gen_system_golden
 # Rebuild with scripts/provision_ast_grep_sv.sh; CI does this in the ast-grep workflow.
 .ast-grep/*.so
 .ast-grep/*.dylib
+
+# Tier 0 audio/video sync probe build outputs (tools/Makefile.audio_ring_probe)
+tools/*.armhf
+tools/*.native
