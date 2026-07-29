@@ -258,11 +258,19 @@ int main(int argc, char **argv) {
                "measured\n", predicted, measured);
     }
 
-    /* Reading, per the plan's §3 decision table. */
+    /* Reading, per the plan's §3 decision table. The dead-quiet case is checked
+     * FIRST: with the core at the menu and no engine running, every number is
+     * zero, and "drain below 48 kHz" would then read as a confirmed defect when
+     * in fact nothing was measured at all. */
     puts("");
-    if (drain_hz < NOMINAL_HZ * 0.995)
-        puts("  => drain is BELOW 48 kHz: FPGA audio FIFO starvation (H1). "
-             "Go to Tier 2 (RTL underflow counters).");
+    if (rd_total == 0 && wr_total == 0 && occ_max == 0)
+        puts("  => NO AUDIO ACTIVITY: ring untouched by either side. Nothing was "
+             "measured — is the core loaded and the game running?");
+    else if (drain_hz < NOMINAL_HZ * 0.995)
+        puts("  => drain is BELOW 48 kHz: the reader is not consuming the ring at "
+             "the sink rate. Read the counters above: orphaned beats explaining "
+             "the deficit ⇒ abandoned bursts; underflow pops with few orphans ⇒ "
+             "scheduling starvation.");
     else if (occ_max == 0)
         puts("  => ring never held audio: producer starvation or the pump is "
              "not running (H2/H5). Go to Tier 1.");
