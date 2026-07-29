@@ -661,6 +661,49 @@ wire        ram2_read;
 wire        ram2_write;
 wire  [7:0] ram2_bcnt;
 
+// [audio-own-channel] Maldita gives gm_audio the ram2 f2h port OUTRIGHT rather
+// than sharing it through ddr_svc.
+//
+// ddr_svc is a 2-channel arbiter whose only clients were ALSA (ch0, retired here
+// by MISTER_DISABLE_ALSA) and the HDMI framebuffer palette fetch (ch1). ch1 is
+// gated on FB_EN, and this core deliberately does not set MISTER_FB (see the
+// note in Maldita.qsf), so pal_req can never toggle -- ch1 is dead code here.
+// With both clients gone the arbiter is pure overhead, and it is read-only
+// besides (ram_writedata tied to 0), which cannot carry gm_audio's rd_ptr
+// writeback. Owning the port means the audio path cannot be contended by
+// construction, and the vendored ddr_svc.sv stays unmodified.
+//
+// sysmem exposes exactly three f2h ports -- ram1 (emu DDRAM), ram2, vbuf
+// (ascal) -- so this IS the dedicated channel; a fourth would mean regenerating
+// the Platform Designer system.
+`ifdef MALDITA_CORE
+	wire [15:0] gma_pcm_l, gma_pcm_r;
+
+	gm_audio gm_audio
+	(
+		.reset            (reset),
+		.clk              (clk_audio),
+
+		.ram_address      (ram2_address),
+		.ram_burstcount   (ram2_burstcount),
+		.ram_waitrequest  (ram2_waitrequest),
+		.ram_readdata     (ram2_readdata),
+		.ram_readdatavalid(ram2_readdatavalid),
+		.ram_read         (ram2_read),
+		.ram_writedata    (ram2_writedata),
+		.ram_byteenable   (ram2_byteenable),
+		.ram_write        (ram2_write),
+
+		.pcm_l            (gma_pcm_l),
+		.pcm_r            (gma_pcm_r)
+	);
+
+	// ascal's pal1_* ports stay connected even with PALETTE("false"), so the
+	// palette signals must still resolve. Nothing drives them now.
+	assign ram2_bcnt = 8'd0;
+	assign pal_data  = 64'd0;
+	assign pal_wr    = 1'b0;
+`else
 ddr_svc ddr_svc
 (
 	.clk(clk_audio),
@@ -698,6 +741,7 @@ ddr_svc ddr_svc
 	.ch1_req(pal_req),
 	.ch1_ready(pal_wr)
 );
+`endif
 
 wire clk_pal = clk_audio;
 
@@ -1712,34 +1756,15 @@ audio_out audio_out
 // [audio-own-channel] gm_audio replaces the audio FSM that used to live inside
 // openbor_video_reader. That FSM shared the VIDEO scanout DDR master and popped
 // at a fixed 48 kHz, so refill was open-loop and every lost race showed up as a
-// rate deficit. This runs on its own ddr_svc channel in clk_audio and slews its
-// consumption to the producer, the way sys/alsa.sv does.
+// rate deficit. gm_audio instead owns the ram2 f2h port (instantiated up with
+// the other f2h masters) and slews its consumption to the producer, the way
+// sys/alsa.sv does.
 //
 // pcm_l/pcm_r feed audio_out's core_l/core_r, NOT alsa_l/alsa_r: aud_mix_top
 // sums the alsa port unfiltered, and the ring carries 22.05 kHz, so the output
 // needs the IIR + DC blocker on the core path.
 //
 `ifdef MALDITA_CORE
-	wire [28:0] gma_address;
-	wire [63:0] gma_readdata;
-	wire        gma_ready;
-	wire        gma_req;
-	wire [15:0] gma_pcm_l, gma_pcm_r;
-
-	gm_audio gm_audio
-	(
-		.reset(reset),
-		.clk(clk_audio),
-
-		.ram_address(gma_address),
-		.ram_data(gma_readdata),
-		.ram_req(gma_req),
-		.ram_ready(gma_ready),
-
-		.pcm_l(gma_pcm_l),
-		.pcm_r(gma_pcm_r)
-	);
-
 	// emu's AUDIO_L/R are unused in this core -- the FPGA reads PCM straight
 	// from the ring gmloader writes, so nothing routes audio through emu.
 	wire [15:0] snd_l = gma_pcm_l;

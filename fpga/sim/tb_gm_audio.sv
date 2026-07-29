@@ -15,6 +15,14 @@
 //    C  producer fast / slow       -> slew takes the right sign and the ring
 //                                     occupancy stays bounded
 //    D  producer stops             -> output holds, no glitch, clean recovery
+//    E  rd_ptr writeback           -> the DUT publishes its read pointer and it
+//                                     tracks consumption
+//
+//  Gate E exists because its absence shipped a bug to the device: gm_audio read
+//  wr_ptr but never published rd_ptr, so gmloader's FreeFrames() saw a ring that
+//  never drained and clamped every submit to zero -- audio died after one
+//  target-fill. Sim missed it because the TB's pump peeked at dut.rptr instead
+//  of the published pointer. The pump now uses rd_ptr_seen, like the real host.
 //
 //  Gate B is the one that would catch a regression to ZOH: a held sample would
 //  give deltas of {0, RAMP_SLOPE}, not {0,1} with a 0.4594 mean.
@@ -34,6 +42,7 @@ localparam int    SRC_RATE    = 22050;
 localparam int    RING_QWORDS = 8192;
 localparam [31:3] RING_QW     = 29'h0741A000;
 localparam [31:3] WPTR_QW     = 29'h07400006;
+localparam [31:3] RDPTR_QW    = 29'h07400007;
 localparam int    TARGET_QW   = 64;
 localparam int    POLL_TICKS  = 16;
 localparam int    WIN_TICKS   = 128;
@@ -65,10 +74,15 @@ reg reset = 1;
 // ---------------------------------------------------------------------------
 // DUT
 // ---------------------------------------------------------------------------
-wire [31:3] ram_address;
-reg  [63:0] ram_data;
-wire        ram_req;
-reg         ram_ready;
+wire [28:0] ram_address;
+wire  [7:0] ram_burstcount;
+reg         ram_waitrequest;
+reg  [63:0] ram_readdata;
+reg         ram_readdatavalid;
+wire        ram_read;
+wire [63:0] ram_writedata;
+wire  [7:0] ram_byteenable;
+wire        ram_write;
 wire [15:0] pcm_l, pcm_r;
 
 gm_audio #(
@@ -77,6 +91,7 @@ gm_audio #(
     .SRC_RATE   (SRC_RATE),
     .RING_QW    (RING_QW),
     .WPTR_QW    (WPTR_QW),
+    .RDPTR_QW   (RDPTR_QW),
     .RING_QWORDS(RING_QWORDS),
     .TARGET_QW  (TARGET_QW),
     .POLL_TICKS (POLL_TICKS),
@@ -86,12 +101,17 @@ gm_audio #(
 ) dut (
     .reset      (reset),
     .clk        (clk),
-    .ram_address(ram_address),
-    .ram_data   (ram_data),
-    .ram_req    (ram_req),
-    .ram_ready  (ram_ready),
-    .pcm_l      (pcm_l),
-    .pcm_r      (pcm_r)
+    .ram_address      (ram_address),
+    .ram_burstcount   (ram_burstcount),
+    .ram_waitrequest  (ram_waitrequest),
+    .ram_readdata     (ram_readdata),
+    .ram_readdatavalid(ram_readdatavalid),
+    .ram_read         (ram_read),
+    .ram_writedata    (ram_writedata),
+    .ram_byteenable   (ram_byteenable),
+    .ram_write        (ram_write),
+    .pcm_l            (pcm_l),
+    .pcm_r            (pcm_r)
 );
 
 // ---------------------------------------------------------------------------
@@ -102,33 +122,61 @@ gm_audio #(
 reg [63:0] ring [0:RING_QWORDS-1];
 reg [31:0] wr_ptr_bytes = 0;
 
-reg        req_ack = 0;
-reg        pending = 0;
-reg [7:0]  lat     = 0;
-reg [31:3] addr_lat;
+// The DUT is the SOLE master here, so this models sysmem's ram2 slave directly:
+// waitrequest for a few cycles, then readdatavalid some cycles later for reads.
+// Writes complete at acceptance -- and rd_ptr_seen captures them, which is what
+// gate E gates on.
+reg [3:0]  wr_hold  = 0;
+reg        rd_busy  = 0;
+reg [7:0]  rd_lat   = 0;
+reg [28:0] addr_lat;
 integer    lfsr = 32'h1234_5678;
 
+// Init to 0, matching NativeAudioWriter_Init(), which zeroes the ring and
+// BOTH pointers before the FPGA has published anything.
+reg [31:0] rd_ptr_seen   = 32'd0;           // last rd_ptr the DUT published
+integer    rd_ptr_writes = 0;
+
 always @(posedge clk) begin
-    ram_ready <= 1'b0;
+    ram_readdatavalid <= 1'b0;
+
     if (reset) begin
-        req_ack <= ram_req;
-        pending <= 0;
+        ram_waitrequest <= 1'b1;
+        wr_hold         <= 4'd2;
+        rd_busy         <= 1'b0;
     end
-    else if (!pending && (ram_req != req_ack)) begin
-        req_ack  <= ram_req;
-        addr_lat <= ram_address;
-        // 3..18 cycles, deterministic but uncorrelated with the DUT's cadence.
-        lfsr     <= {lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0]};
-        lat      <= 8'd3 + (lfsr[3:0]);
-        pending  <= 1;
-    end
-    else if (pending) begin
-        if (lat != 0) lat <= lat - 8'd1;
-        else begin
-            ram_data  <= (addr_lat == WPTR_QW) ? {32'd0, wr_ptr_bytes}
-                                               : ring[addr_lat - RING_QW];
-            ram_ready <= 1'b1;
-            pending   <= 0;
+    else begin
+        // Backpressure for a couple of cycles on each new command.
+        if (ram_waitrequest) begin
+            if (wr_hold != 0) wr_hold <= wr_hold - 4'd1;
+            else              ram_waitrequest <= 1'b0;
+        end
+        else if (ram_read || ram_write) begin
+            lfsr <= {lfsr[30:0], lfsr[31]^lfsr[21]^lfsr[1]^lfsr[0]};
+            if (ram_write) begin
+                // Accepted. Capture the rd_ptr publish.
+                if (ram_address == RDPTR_QW) begin
+                    rd_ptr_seen   <= ram_writedata[31:0];
+                    rd_ptr_writes  = rd_ptr_writes + 1;
+                end
+            end
+            else begin
+                rd_busy  <= 1'b1;
+                addr_lat <= ram_address;
+                rd_lat   <= 8'd3 + lfsr[3:0];
+            end
+            ram_waitrequest <= 1'b1;
+            wr_hold         <= lfsr[1:0];
+        end
+
+        if (rd_busy) begin
+            if (rd_lat != 0) rd_lat <= rd_lat - 8'd1;
+            else begin
+                ram_readdata      <= (addr_lat == WPTR_QW) ? {32'd0, wr_ptr_bytes}
+                                                           : ring[addr_lat - RING_QW];
+                ram_readdatavalid <= 1'b1;
+                rd_busy           <= 1'b0;
+            end
         end
     end
 end
@@ -200,7 +248,11 @@ always @(posedge clk) begin
         half_pend = 0;
     end
     else begin
-        fill_qw = ((wr_ptr_bytes >> 3) - dut.rptr) & (RING_QWORDS - 1);
+        // CRITICAL: derive occupancy from the PUBLISHED rd_ptr, exactly as
+        // NativeAudioWriter_FreeFrames() does -- not from dut.rptr. Peeking at
+        // the DUT's private pointer is what let the missing rd_ptr writeback
+        // pass sim and only fail on device.
+        fill_qw = (((wr_ptr_bytes - rd_ptr_seen) & 32'h0000FFFF) >> 3);
 
         case (prod_mode)
             P_PUMP: begin
@@ -289,6 +341,7 @@ endtask
 // ---------------------------------------------------------------------------
 integer i;
 integer fill_lo, fill_hi;
+integer rd_lag;
 real    mean_d, want_d;
 
 task do_reset;
@@ -420,6 +473,30 @@ initial begin
     repeat (100000) @(posedge clk);
     $display("D-recover: pcm_l=%0d want=%0d", $signed(pcm_l), src_const);
     chk($signed(pcm_l) == src_const, "D: did not recover after the producer returned");
+
+    // -- E: the rd_ptr writeback the host's flow control depends on ----------
+    src_mode  = M_CONST;
+    src_const = 77;
+    do_reset;
+    rd_ptr_writes = 0;
+    prod_mode = P_PUMP;
+    repeat (200000) @(posedge clk);
+    $display("E: rd_ptr writes=%0d, last published=0x%08x, dut.rptr=0x%04x",
+             rd_ptr_writes, rd_ptr_seen, dut.rptr);
+    chk(rd_ptr_writes > 10,
+        "E: rd_ptr was never published -- the host's FreeFrames() would see a ring that never drains");
+    // The published value is a SNAPSHOT, so it legitimately lags the live
+    // pointer by whatever was consumed since the last publish. What matters is
+    // that the lag stays small (the host's free-space figure is accurate) and
+    // that it never runs AHEAD -- publishing ahead of the real read pointer
+    // would tell the host it may overwrite samples not yet consumed. A wrapped
+    // (huge) lag is exactly what "ahead" or "stopped publishing" looks like.
+    rd_lag = ((({{(32-13-3){1'b0}}, dut.rptr, 3'b000}) - rd_ptr_seen) & 32'h0000FFFF);
+    $display("E: publish lag = %0d bytes (%0d qwords)", rd_lag, rd_lag >> 3);
+    chk(rd_lag < 256,
+        "E: published rd_ptr is stale or ahead of the real one -- host free-space would be wrong");
+    // Non-vacuity: consumption must actually have moved the pointer off zero.
+    chk(rd_ptr_seen != 32'd0, "E: rd_ptr never advanced -- nothing was consumed");
 
     if (errors == 0) $display("RESULT: PASS");
     else             $display("RESULT: FAIL (%0d errors)", errors);
