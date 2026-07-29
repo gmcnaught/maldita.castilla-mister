@@ -58,6 +58,18 @@
 // bucket partition summing to total, and -- on the synthetic anchor only -- the
 // hand-computed bucket expectations (see tb_blitter_trilist_synthquad.sv).
 //
+// EXACTLY ONE VERDICT LINE. Every cross-check above reports as a
+// `GATE-MISMATCH: ...` diagnostic and raises `gate_fail`; the single
+// mutually-exclusive verdict chain at the end of the run is the only thing that
+// prints `RESULT:`. Previously those checks printed their own bare
+// `RESULT: FAIL` and then fell through to the final `RESULT: PASS`, so a manual
+// run's TAIL said PASS while the suite (which greps FAIL_RE over the whole log,
+// before the pass marker) said FAIL -- the same log defensibly read two ways
+// depending on where you looked. The suite verdict is unchanged: `gate_fail`
+// makes the one remaining verdict line say FAIL. The diagnostics deliberately
+// avoid the token run_sims.sh greps for, so they cannot re-introduce a second
+// (implicit) verdict.
+//
 // ── OUTPUT CONTRACT (consumed by Tasks 6/7/8) ───────────────────────────────
 //   CYC total=<n> tri=<n> pix_visits=<n> pix_covered=<n> texwait=<n> wr=<n> \
 //       setup=<n> vfetch=<n> pix=<n> other=<n>
@@ -317,6 +329,9 @@ module `STREAM_TB_NAME;
 
   integer to;
   real    ms_total, ms_tri, ms_texw;
+  // Any cross-check failing sets this; it feeds the ONE verdict chain at the end
+  // (see "EXACTLY ONE VERDICT LINE" in the header).
+  reg     gate_fail = 1'b0;
   initial begin
     $display("=== stream replay: %0s ===", `STREAM_VEC);
     repeat(8) @(posedge clk); rst<=0;
@@ -358,14 +373,22 @@ module `STREAM_TB_NAME;
     // EXACTLY -- they did on every replayed frame. Gated, not noted: a drift here
     // means `total` has stopped being the device's `frame` counter, which is the
     // one quantity the whole calibration rests on.
-    if (cyc_total !== blt.perf_frame_cyc)
-      $display("RESULT: FAIL (cyc_total=%0d != perf_frame_cyc=%0d)", cyc_total, blt.perf_frame_cyc);
-    if (cyc_tri !== blt.perf_tri_cyc)
-      $display("RESULT: FAIL (cyc_tri=%0d != perf_tri_cyc=%0d)", cyc_tri, blt.perf_tri_cyc);
-    if (cyc_texw !== blt.perf_texwait_cyc)
-      $display("RESULT: FAIL (cyc_texw=%0d != perf_texwait_cyc=%0d)", cyc_texw, blt.perf_texwait_cyc);
-    if (tb_covered !== blt.perf_covered_px)
-      $display("RESULT: FAIL (tb_covered=%0d != perf_covered_px=%0d)", tb_covered, blt.perf_covered_px);
+    if (cyc_total !== blt.perf_frame_cyc) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: cyc_total=%0d != perf_frame_cyc=%0d", cyc_total, blt.perf_frame_cyc);
+    end
+    if (cyc_tri !== blt.perf_tri_cyc) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: cyc_tri=%0d != perf_tri_cyc=%0d", cyc_tri, blt.perf_tri_cyc);
+    end
+    if (cyc_texw !== blt.perf_texwait_cyc) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: cyc_texw=%0d != perf_texwait_cyc=%0d", cyc_texw, blt.perf_texwait_cyc);
+    end
+    if (tb_covered !== blt.perf_covered_px) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: tb_covered=%0d != perf_covered_px=%0d", tb_covered, blt.perf_covered_px);
+    end
 
     $display("CYC total=%0d tri=%0d pix_visits=%0d pix_covered=%0d texwait=%0d wr=%0d setup=%0d vfetch=%0d pix=%0d other=%0d",
              cyc_total, cyc_tri, pix_visits, blt.perf_covered_px, cyc_texw, cyc_wr,
@@ -381,17 +404,25 @@ module `STREAM_TB_NAME;
     // Only a vector set whose expected counts are derivable from the geometry
     // defines these; see tb_blitter_trilist_synthquad.sv for the arithmetic. This
     // is what makes the bucket SEMANTICS gated rather than merely plausible.
-    if (pix_visits !== `STREAM_EXP_VISITS)
-      $display("RESULT: FAIL (pix_visits=%0d, hand-computed %0d)", pix_visits, `STREAM_EXP_VISITS);
-    if (blt.perf_covered_px !== `STREAM_EXP_COVERED)
-      $display("RESULT: FAIL (pix_covered=%0d, hand-computed %0d)", blt.perf_covered_px, `STREAM_EXP_COVERED);
-    if (cyc_wr !== `STREAM_EXP_WR)
-      $display("RESULT: FAIL (wr=%0d, hand-computed %0d)", cyc_wr, `STREAM_EXP_WR);
+    if (pix_visits !== `STREAM_EXP_VISITS) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: pix_visits=%0d, hand-computed %0d", pix_visits, `STREAM_EXP_VISITS);
+    end
+    if (blt.perf_covered_px !== `STREAM_EXP_COVERED) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: pix_covered=%0d, hand-computed %0d", blt.perf_covered_px, `STREAM_EXP_COVERED);
+    end
+    if (cyc_wr !== `STREAM_EXP_WR) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: wr=%0d, hand-computed %0d", cyc_wr, `STREAM_EXP_WR);
+    end
 `endif
     // partition self-check: the six buckets must reconstruct total exactly.
-    if ((cyc_vfetch + cyc_setup + cyc_texw + cyc_wr + cyc_pix + cyc_other) !== cyc_total)
-      $display("RESULT: FAIL (bucket partition %0d != total %0d)",
+    if ((cyc_vfetch + cyc_setup + cyc_texw + cyc_wr + cyc_pix + cyc_other) !== cyc_total) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: bucket partition %0d != total %0d",
                cyc_vfetch + cyc_setup + cyc_texw + cyc_wr + cyc_pix + cyc_other, cyc_total);
+    end
     // 98.4375 MHz fabric clock (the clk_sys these cycles are counted in).
     ms_total = cyc_total / 98437.5;
     ms_tri   = cyc_tri   / 98437.5;
@@ -406,10 +437,15 @@ module `STREAM_TB_NAME;
     // reordered interpolation surfaces as exactly a 1-LSB diff -- the class of error
     // a +-1 gate is blind to. `bad` (+-1 LSB) stays reported so a divergence's
     // MAGNITUDE is visible, but a single non-identical pixel fails the run.
+    //
+    // THE one verdict chain: mutually exclusive, and every GATE-MISMATCH above is
+    // folded in via gate_fail so no failing check can be followed by a PASS line.
     if (mem[32'h200005][31:0]!==mem[32'h200000][31:0])
       $display("RESULT: FAIL (never completed: done_seq != submit_seq)");
     else if (exact_bad != 0)
       $display("RESULT: FAIL (exact_bad=%0d of %0d; +-1 LSB bad=%0d)", exact_bad, `FB_PIXELS, bad);
+    else if (gate_fail)
+      $display("RESULT: FAIL (cross-check gate: see the GATE-MISMATCH line(s) above)");
     else $display("RESULT: PASS");
     $finish;
   end
