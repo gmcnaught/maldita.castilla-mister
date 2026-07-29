@@ -154,3 +154,43 @@ the 60 fps budget, not just a cleanup.
 - Sustained-silence DC: `gm_audio` holds the last sample when starved, like `alsa.sv`.
   The host pump already submits silence continuously so the ring never empties, which
   keeps this unreachable in practice. Not gold-plating it in this pass; noted.
+
+---
+
+## Status 2026-07-29 — PAUSED (user decision)
+
+Code-complete and deployed to `.62` (RBF `MalditaCastilla_f348626.rbf`). T1-T5
+done; T6 partially done.
+
+**Closed on hardware.** The game's track really is `22050 Hz, 2 ch, push`, so
+`SRC_RATE`/`INC_NOM` are correct. `rd_ptr` advances and wraps; ring occupancy is
+stable at ~6940 B (~1735 frames) and neither drains nor pins. STA `-0.159` /
+TNS `-0.317` (baseline `5fe0115` was `-0.167` / `-0.329`), ALMs 15,655 vs 16,107,
+M10K clean apart from the pre-existing `xq_mem`. Sim 51/51.
+
+**Two defects found by device testing, not by sim.** Both are recorded because
+each was a gap in method, not just in code:
+
+1. **Missing `rd_ptr` writeback** (fixed, `f348626`). The port of `alsa.sv`
+   covered the inbound `wr_ptr` poll and missed the outbound half, so
+   gmloader's `FreeFrames()` saw a ring that never drained. Sim could not catch
+   it because the TB's pump read `dut.rptr` — the DUT's private pointer —
+   instead of the published one. Gate E and the pump rewrite close that.
+
+2. **Audible starvation artifact** (OPEN). Drain measures **21,872.9 f/s =
+   99.20%** of 22,050. −0.80% exceeds the slew loop's total authority of
+   ±0.21% (±4 × `SLEW_STEP`16 / 30106), so most of it is `st_empty` holds
+   repeating samples. Occupancy of 1735 frames rules out the ring; prime
+   suspect is the 4-qword staging buffer (8 frames ≈ 0.36 ms) against DDR3
+   latency that ram1/vbuf/refresh still perturb even though `gm_audio` owns
+   ram2.
+
+**Next step is instrumentation, not a fix.** The tier-2 counters
+(`aud_uf_cnt`, `aud_fifo_min`, `AUDIO_STAT_ADDR`) were deleted with the old FSM
+and `gm_audio` has no equivalent, so neither starvation count nor `slew` is
+readable from the device. Add a stats publish job to the existing FSM first —
+otherwise choosing between "deepen `ST_DEPTH` 4→16" and "widen `SLEW_STEP`" is
+guesswork. This repo has been burned twice before by fixing a statically-inferred
+cause without a counter.
+
+**Do not merge, and do not deploy to `.81`** (production) in this state.
