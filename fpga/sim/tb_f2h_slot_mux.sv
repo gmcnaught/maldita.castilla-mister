@@ -22,6 +22,32 @@
 // because a fix for (1) alone would leave it — and a partially-improved display is
 // a harder second diagnosis than the original.
 //
+// ── THE ESCAPE PHASES TEST TWO MECHANISMS, NOT THREE ────────────────────────
+// Stated precisely so nobody deletes one as redundant for the wrong reason:
+//
+//   DOES THE ESCAPE FIRE?     LIVELOCK. Genuinely independent.
+//   DOES THE ESCAPE RELEASE?  BUSY-ARBITER and WRITE-GAP are the SAME mechanism
+//                             reached two ways. Ownership is held whenever
+//                             dma_accept = dma_owns & dma_wr & ~rdr_busy is false;
+//                             BUSY-ARBITER falsifies ~rdr_busy, WRITE-GAP falsifies
+//                             dma_wr. A single change to the release condition — a
+//                             timed release, say — moves both together.
+//
+// BOTH ARE KEPT, for two reasons that "three failure modes" would have hidden:
+//   * they pin dependencies on two DIFFERENT external modules (ddr_blitter_arb and
+//     comp_fb_dma), and a future fix could plausibly handle one and not the other;
+//   * their magnitudes differ (8 cyc vs 2 cyc), and the bound published in
+//     f2h_slot_mux's contract comes from the worse one — dropping BUSY-ARBITER
+//     would understate the cost by 4x.
+//
+// ── ASSERT THE BOUND THAT MATTERS, REPORT THE VALUE OBSERVED ────────────────
+// The thresholds here (72 = one reader burst; 24 = the drift gate) are derived
+// independently of the measurements. NOTHING asserts the 2-cycle or 8-cycle figures
+// the module header quotes — those are printed. So if a future change makes WRITE-GAP
+// 5 cycles the tests still pass and the header gets updated; at 80 they fail. The
+// alternative — asserting the measured constant — makes the test and the claim the
+// same number, so it can never disagree with itself and never tells you anything.
+//
 // Build with -DA1FIX_OLD_MUX to get the pre-fix behaviour. That is the differential
 // control: this bench MUST fail that way and pass without it, or it proves nothing.
 `timescale 1ns/1ps
@@ -260,6 +286,17 @@ module tb_f2h_slot_mux;
                max_stall);
       $display("                        comp_fb_dma to present a write — the release valve");
       $display("                        is gated on a neighbouring module's cadence.");
+      nfail = nfail + 1;
+    end
+    // VACUITY GUARD, the sibling of BUSY-ARBITER's. Without it, an escape that never
+    // fires in this phase (a mutation raising STARVE_MAX, say) leaves dma_owns
+    // de-asserted, the reader never stalls, max_stall is 0 — and the phase PASSES
+    // while testing nothing. LIVELOCK would still catch that fault, but a phase must
+    // not be able to pass vacuously on its own terms.
+    if (dma_accepts == 0) begin
+      $display("FAIL f2h-ESCAPE-NOBEAT: copy made no progress across the write gaps —");
+      $display("                        the escape never fired, so this phase tested");
+      $display("                        nothing.");
       nfail = nfail + 1;
     end
 
