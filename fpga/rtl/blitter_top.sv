@@ -880,11 +880,48 @@ module blitter_top #(
     // comp_mixer (S_TRI_WR -> S_TRI_WR2 -> S_TRI_WR3). blt_blend.sv is kept UNCHANGED
     // (still used by the tb_tri_mixer_equiv combinational spike); the same arithmetic
     // is reproduced here, staged, with these identical divide-free reductions:
-    function automatic [5:0] red255(input [16:0] t); reg [17:0] m; begin m={1'b0,t}+18'd128; red255=(m+(m>>8))>>8; end endfunction
+    // [STA] red255 was literally `(m + (m>>8)) >> 8` on the full 18-bit m, which
+    // Quartus built as TWO cascaded 18-bit carry chains. Only bits [13:8] of the sum
+    // survive the >>8, so the low byte matters solely through its carry. Splitting m
+    // into mh=m>>8 / ml=m[7:0] gives the identity
+    //     (m + (m>>8)) >> 8  ==  mh + ((ml + mh) >> 8)
+    // — same result, but the adds are 10-bit instead of 18-bit. Verified BIT-EXACT by
+    // exhaustive sweep over the whole 17-bit input domain (131072/131072 match).
+    function automatic [5:0] red255(input [16:0] t);
+        reg [17:0] m; reg [9:0] mh; reg [9:0] ml;
+        begin
+            m   = {1'b0,t} + 18'd128;
+            mh  = m[17:8];
+            ml  = {2'b0, m[7:0]};
+            red255 = (mh + ((ml + mh) >> 8));
+        end
+    endfunction
     function automatic [4:0] red31 (input [11:0] t); reg [12:0] m; begin m={1'b0,t}+13'd16;  red31 =(m+(m>>5))>>5; end endfunction
     function automatic [5:0] red63 (input [12:0] t); reg [13:0] m; begin m={1'b0,t}+14'd32;  red63 =(m+(m>>6))>>6; end endfunction
     // per-channel colour-mod: div255_round(ch*mod)
-    function automatic [5:0] modch(input [5:0] ch, input [7:0] mod); modch = red255(ch*mod); endfunction
+    //
+    // [STA] This is THE fabric-clock critical path: all 12 violated setup paths of the
+    // 2026-07-28 build (worst -0.276 ns) ran b_c{r,g,b} -> DSP multiply -> Add72 (m+128,
+    // 18 bit) -> Add73 (m+(m>>8), 18 bit) -> b1_ts{r,g,b}. Calling the generic 17-bit
+    // red255() here threw away the operand bound: ch<=63 and mod<=255, so the product is
+    // at most 16065 and m=t+128 at most 16193 — mh fits in 7 bits and ml+mh<=318, i.e.
+    // the ">>8" is a single CARRY, not an adder. Written out that way the two 18-bit
+    // chains collapse to one 9-bit add plus two conditional increments.
+    //
+    // Both simplifications are exact, not approximations:
+    //   m  = t+128            -> ml = {~t[7], t[6:0]}   (t[7:0]+128 mod 256)
+    //                            mh = t[13:8] + t[7]    (the carry out of that)
+    // Verified BIT-EXACT against the previous red255(ch*mod) over ALL 64x256 = 16384
+    // (ch,mod) pairs, and against round(ch*mod/255) over the same domain: 0 mismatches.
+    function automatic [5:0] modch(input [5:0] ch, input [7:0] mod);
+        reg [13:0] t; reg [6:0] mh; reg [8:0] ml_mh;
+        begin
+            t      = ch * mod;                       // <= 16065, 14 bits
+            mh     = {1'b0, t[13:8]} + {6'd0, t[7]}; // (t+128) >> 8
+            ml_mh  = {1'b0, ~t[7], t[6:0]} + {2'd0, mh}; // (t+128)[7:0] + mh
+            modch  = mh[5:0] + {5'd0, ml_mh[8]};     // mh + carry
+        end
+    endfunction
 
     // bbox-max (from raw verts, matching blt_tri.c: (hx+ONE-1)>>SUB clamp FB-1)
     wire signed [15:0] tri_hx = (tri_vx0>tri_vx1)?((tri_vx0>tri_vx2)?tri_vx0:tri_vx2)
