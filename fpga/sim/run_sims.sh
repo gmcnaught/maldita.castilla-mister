@@ -136,13 +136,23 @@ SKIP="tb_profile"
 # hand-written scenario, so it catches coverage/blend/addressing breakage that only shows
 # up at production scale (48 distinct strides, 78 COLORKEY + 28 COPY draws in one ring, a
 # BLT_F_SRC_SURFACE composite, and triangles clipped off all four screen edges).
-# bad=0/62208 AND bit-exact (0 strict mismatches). ~32 s standalone -> 300 s budget below.
+# bad=0/62208 AND bit-exact. ~32 s standalone -> 300 s budget below. The gate is STRICT
+# bit-exactness (exact_bad==0), not the siblings' +-1 LSB tolerance: this bench is the
+# Stage-B oracle for a pixel-walk rewrite and rounding drift lands as a 1-LSB diff.
 # It also prints the CYC/CYCX/MS cycle decomposition Tasks 6-8 predict against; those
-# lines are informational, the PASS gate is the pixel diff plus four internal cross-checks
-# (TB buckets vs the RTL's own perf_tri_cyc / perf_texwait_cyc / perf_covered_px, and the
+# lines are informational, but five internal cross-checks are gated (TB buckets vs the
+# RTL's own perf_frame_cyc / perf_tri_cyc / perf_texwait_cyc / perf_covered_px, plus the
 # bucket partition summing to the total) — any of which prints RESULT: FAIL.
 # Other frames are runnable by name after regenerating their vectors; see the tb header
 # and gen_tri_golden.mk's stream-vectors target.
+#
+# tb_blitter_trilist_synthquad is the same harness (a 3-line wrapper that `include's it)
+# on the SYNTHETIC single-quad vector set, and it is GATING too. It exists because the
+# captured frames' expected cycle counts are only knowable by running them — the buckets
+# could drift and still look plausible. The synthetic quad's counts are hand-computable
+# from the geometry (pix_covered=120*120=14400, pix_visits=2*121*121=29282, wr=3*14400)
+# and are ASSERTED via STREAM_EXP_*, so this is the calibration anchor for the bucket
+# semantics themselves. ~5 s.
 NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 
 # ── tiers ───────────────────────────────────────────────────────────────────

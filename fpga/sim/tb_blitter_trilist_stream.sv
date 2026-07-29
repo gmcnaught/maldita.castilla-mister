@@ -47,6 +47,17 @@
 // blt.A_PIX, blt.B_WAIT) so a renumbering breaks the build instead of silently
 // miscounting -- the rule a2_cycle_gate.vh already established.
 //
+// ── THE GATE ────────────────────────────────────────────────────────────────
+// RESULT: PASS requires STRICT BIT-EXACTNESS (exact_bad==0) against the refmodel
+// golden -- NOT the siblings' +-1 LSB tolerance. This bench is the Stage-B oracle
+// for a pixel-walk rewrite, and rounding drift in a reordered interpolation shows
+// up as exactly a 1-LSB diff, the one class of error a +-1 gate cannot see. The
+// +-1 count (`bad`) is still reported so a divergence's magnitude is visible.
+// Also gated: the frame completed, the four TB-vs-RTL counter cross-checks
+// (perf_frame_cyc / perf_tri_cyc / perf_texwait_cyc / perf_covered_px), the
+// bucket partition summing to total, and -- on the synthetic anchor only -- the
+// hand-computed bucket expectations (see tb_blitter_trilist_synthquad.sv).
+//
 // ── OUTPUT CONTRACT (consumed by Tasks 6/7/8) ───────────────────────────────
 //   CYC total=<n> tri=<n> pix_visits=<n> pix_covered=<n> texwait=<n> wr=<n> \
 //       setup=<n> vfetch=<n> pix=<n> other=<n>
@@ -67,7 +78,7 @@
 // pix_covered : dispatched covered pixels == blt.perf_covered_px (the A_PIX
 //         branch that latches the multiply operands). Equals the analyzer's
 //         covered_px. Independently re-counted TB-side and cross-asserted.
-// The five PARTITION buckets -- texwait, wr, setup, vfetch, pix, other -- are
+// The SIX PARTITION buckets -- vfetch, setup, texwait, wr, pix, other -- are
 // assigned by strict priority, one bucket per busy cycle, and sum to total:
 //   1 vfetch : state in {VFETCH,VCOLLECT,DECV} or (S_RD_WAIT for a tri return)
 //   2 setup  : state in {SETUP,SWAIT}
@@ -110,8 +121,15 @@
 `ifndef STREAM_VEC
 `define STREAM_VEC "stream_quiet_f0"
 `endif
+// Top-module name. Overridden by the thin wrapper tops that replay a DIFFERENT
+// committed vector set as their own run_sims.sh entry (tb_blitter_trilist_synthquad.sv
+// is the one that exists today); each wrapper `define's both macros and then
+// `include's this file, so there is exactly ONE copy of the harness.
+`ifndef STREAM_TB_NAME
+`define STREAM_TB_NAME tb_blitter_trilist_stream
+`endif
 
-module tb_blitter_trilist_stream;
+module `STREAM_TB_NAME;
   localparam [28:0] WBASE = 29'h07400000;
   // A captured frame's heap is far larger than the synthetic scenarios' (the quiet
   // frame interns 48 texture pages == ~219 KiB after the congruence padding), so the
@@ -336,9 +354,12 @@ module tb_blitter_trilist_stream;
     // Cross-check the TB buckets against the RTL's own per-frame counters. These
     // are independent derivations of the same quantities, so a divergence means a
     // bucket condition drifted from the RTL and every number below is suspect.
+    // Both count busy (!idle) cycles from the same frame, so they must agree
+    // EXACTLY -- they did on every replayed frame. Gated, not noted: a drift here
+    // means `total` has stopped being the device's `frame` counter, which is the
+    // one quantity the whole calibration rests on.
     if (cyc_total !== blt.perf_frame_cyc)
-      $display("  NOTE: cyc_total=%0d vs blt.perf_frame_cyc=%0d (publish tail: the DONE/STATUS/PERF writes land after the counter is sampled)",
-               cyc_total, blt.perf_frame_cyc);
+      $display("RESULT: FAIL (cyc_total=%0d != perf_frame_cyc=%0d)", cyc_total, blt.perf_frame_cyc);
     if (cyc_tri !== blt.perf_tri_cyc)
       $display("RESULT: FAIL (cyc_tri=%0d != perf_tri_cyc=%0d)", cyc_tri, blt.perf_tri_cyc);
     if (cyc_texw !== blt.perf_texwait_cyc)
@@ -355,6 +376,18 @@ module tb_blitter_trilist_stream;
     $display("CYCX pb_idle=%0d pb_look=%0d pb_fill=%0d pb_wait=%0d pb_wr=%0d pb_wr2=%0d pb_wr3=%0d pb_surfw=%0d pb_surfc=%0d",
              occ_pb[0], occ_pb[1], occ_pb[2], occ_pb[3], occ_pb[6], occ_pb[7],
              occ_pb[8], occ_pb[9], occ_pb[10]);
+`ifdef STREAM_EXP_VISITS
+    // ── hand-computed bucket calibration (synthetic anchor only) ──────────────
+    // Only a vector set whose expected counts are derivable from the geometry
+    // defines these; see tb_blitter_trilist_synthquad.sv for the arithmetic. This
+    // is what makes the bucket SEMANTICS gated rather than merely plausible.
+    if (pix_visits !== `STREAM_EXP_VISITS)
+      $display("RESULT: FAIL (pix_visits=%0d, hand-computed %0d)", pix_visits, `STREAM_EXP_VISITS);
+    if (blt.perf_covered_px !== `STREAM_EXP_COVERED)
+      $display("RESULT: FAIL (pix_covered=%0d, hand-computed %0d)", blt.perf_covered_px, `STREAM_EXP_COVERED);
+    if (cyc_wr !== `STREAM_EXP_WR)
+      $display("RESULT: FAIL (wr=%0d, hand-computed %0d)", cyc_wr, `STREAM_EXP_WR);
+`endif
     // partition self-check: the six buckets must reconstruct total exactly.
     if ((cyc_vfetch + cyc_setup + cyc_texw + cyc_wr + cyc_pix + cyc_other) !== cyc_total)
       $display("RESULT: FAIL (bucket partition %0d != total %0d)",
@@ -368,8 +401,16 @@ module tb_blitter_trilist_stream;
       $display("CPP cyc_per_covered_px total=%0.3f tri=%0.3f",
                cyc_total*1.0/blt.perf_covered_px, cyc_tri*1.0/blt.perf_covered_px);
 
-    if (mem[32'h200005][31:0]==mem[32'h200000][31:0] && bad==0) $display("RESULT: PASS");
-    else $display("RESULT: FAIL (bad=%0d)", bad);
+    // STRICT BIT-EXACTNESS is the gate, not the siblings' +-1 LSB tolerance. This
+    // bench is the Stage-B oracle for a pixel-walk rewrite, and rounding drift in a
+    // reordered interpolation surfaces as exactly a 1-LSB diff -- the class of error
+    // a +-1 gate is blind to. `bad` (+-1 LSB) stays reported so a divergence's
+    // MAGNITUDE is visible, but a single non-identical pixel fails the run.
+    if (mem[32'h200005][31:0]!==mem[32'h200000][31:0])
+      $display("RESULT: FAIL (never completed: done_seq != submit_seq)");
+    else if (exact_bad != 0)
+      $display("RESULT: FAIL (exact_bad=%0d of %0d; +-1 LSB bad=%0d)", exact_bad, `FB_PIXELS, bad);
+    else $display("RESULT: PASS");
     $finish;
   end
   // hard watchdog backstop (40 M cycles at 10 ns = 400 ms sim time; allow 2x)

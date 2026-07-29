@@ -223,9 +223,25 @@ static int parse_frame(const char *path, int want_frame) {
         if (strncmp(line, "MFTRACE G ", 10)) continue;
         long fid = (long)fld(line, "f");
         if (fid != cur_id) {
-            int known = 0;
-            for (int i=0;i<nseen;i++) if (seen_ids[i]==fid) { known = 1; break; }
-            if (!known) { seen_ids[nseen++] = fid; cur++; }
+            /* A frame id must never REAPPEAR after a different id intervened. The
+             * capture is one contiguous block of G/V lines per frame, and the frame
+             * INDEX (--frame N) is defined as the N'th distinct id in file order. If
+             * a capture ever interleaved frames, the old "already seen -> keep the
+             * current index" branch would have silently attributed the second block
+             * to whatever frame the cursor happened to be on -- a wrong scene that
+             * still passes bit-exactness (the golden is built from the same wrong
+             * groups). Hard-fail instead. */
+            for (int i=0;i<nseen;i++) if (seen_ids[i]==fid) {
+                fprintf(stderr, "ERROR: frame id %ld recurs after frame id %ld — the capture "
+                                "interleaves frames, so --frame N is not well defined.\n", fid, cur_id);
+                fclose(f); return -1;
+            }
+            if (nseen >= (int)(sizeof seen_ids / sizeof seen_ids[0])) {
+                fprintf(stderr, "ERROR: more than %zu frames in the capture\n",
+                        sizeof seen_ids / sizeof seen_ids[0]);
+                fclose(f); return -1;
+            }
+            seen_ids[nseen++] = fid; cur++;
             cur_id = fid;
         }
         in_wanted = (cur == want_frame);
