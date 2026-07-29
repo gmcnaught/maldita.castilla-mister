@@ -139,6 +139,27 @@ module tb_blitter_trilist_pipe;
     if ((bt_addr[28:0] >= `RING_B_QW) && (bt_addr[28:0] < `SRC_QW))    a3_saw_ring_b <= 1'b1;
   end
 
+  // ── [Phase 1 A4] the published count must be EXACT, not merely present ────────
+  // An order test passes on a counter that counts the wrong thing, so check the value:
+  // perf_covered_px counts pixels DISPATCHED from A_PIX; a2_pixels counts pixels RETIRED
+  // at B_WR3. Those are the two ends of the same pipe, so on a drained frame they must be
+  // equal — and that equality is exactly the property cyc/px depends on (dpath cycles are
+  // measured over the same interval that produced the denominator).
+  //
+  // It also cross-checks the counter against an INDEPENDENT instrument: a2_pixels comes
+  // from the pb FSM, perf_covered_px from the pa FSM. A single miscount in either shows up
+  // as a mismatch rather than as a plausible-looking number.
+  task a4_check_covered_exact;
+    begin
+      if (blt.perf_covered_px != a2_pixels) begin
+        $display("FAIL A4-exact: perf_covered_px=%0d but %0d pixels retired",
+                 blt.perf_covered_px, a2_pixels);
+        $finish;
+      end
+      $display("PASS A4-exact: perf_covered_px=%0d matches retired pixels", a2_pixels);
+    end
+  endtask
+
   task a3_check_ring_select;
     begin
       if (!a3_saw_ring_b) begin
@@ -244,6 +265,8 @@ module tb_blitter_trilist_pipe;
     // guard and would report a cycle-gate failure for what is really a ring fault.
     // Diagnosing the more fundamental fault first keeps the message honest.
     a3_check_ring_select;
+    // [Phase 1 A4] exactness of the published covered-pixel count.
+    a4_check_covered_exact;
     // [Phase 1 A2] cycle gate, before the framebuffer diff below. A cycle win with a
     // broken diff is not a win, so both must hold.
     a2_report_cycles;

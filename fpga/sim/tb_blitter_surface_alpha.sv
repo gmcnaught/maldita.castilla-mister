@@ -28,11 +28,15 @@
 //
 // WHAT THE MUTATIONS SHOWED — two of them, because the obvious one proves nothing:
 //
-//   (A) Restore the pre-A2 B_SURF_C -> B_DSTW -> B_DSTC sequencing:  bench PASSES.
-//       That is CORRECT, not a coverage hole. With A2's B_IDLE hoist still in place, the
-//       old tail simply issues a SECOND read to the SAME address and latches that — two
-//       cycles slower, identical pixels. Reverting A2 on this path is a performance
-//       regression, not a correctness one, so there is nothing here for a test to catch.
+//   (A) Restore the pre-A2 B_SURF_C -> B_DSTW -> B_DSTC sequencing: the PIXEL DIFF passes,
+//       and that is correct — with A2's B_IDLE hoist still in place the old tail simply
+//       issues a SECOND read to the SAME address and latches that: two cycles slower,
+//       identical pixels. It is a PERFORMANCE regression, not a correctness one, so a
+//       golden diff has nothing to catch.
+//       It is caught by the CYCLE GATE below, which is the instrument that should catch
+//       it: pb 8.00 vs 6.00 -> "FAIL A2: pb 8.00 cyc/px exceeds the 7.0-cycle budget".
+//       Before that gate was added here, this regression passed in EVERY bench — the gate
+//       lived only in trilist_pipe/add/calpha, all of which take the SDRAM texel path.
 //
 //   (B) Keep A2's B_SURF_C latch but suppress the B_IDLE dst-read issue for the surface
 //       path (`tri_need_dst && !tri_src_surface`) — hoist the latch and forget the read,
@@ -95,6 +99,16 @@ module tb_blitter_surface_alpha;
     .surf_wr_en(sf_wr_en), .surf_wr_qw(sf_wr_qw), .surf_wr_lane(sf_wr_lane), .surf_wr_pix(sf_wr_pix),
     .surf_rd_en(sf_rd_en), .surf_rd_qw(sf_rd_qw), .surf_rd_qword(sf_rd_qword),
     .idle(bt_idle));
+
+  // [Phase 1 2c-minor] A2's cycle win on the SURFACE path was pinned by nothing: the gate
+  // lives only in trilist_pipe / add / calpha, all of which take the SDRAM texel path. So
+  // reverting A2's B_SURF_C tail (mutation A in the header above) was a real 2-cycle
+  // regression that no bench would have caught. It is caught here now.
+  //   post-A2 surface+dst: B_IDLE B_SURF_W B_SURF_C B_WR B_WR2 B_WR3            = 6
+  //   pre-A2  surface+dst: ... B_SURF_C B_DSTW B_DSTC B_WR B_WR2 B_WR3          = 8
+  // The existing 7.0 budget sits between them, exactly as it does on add/calpha.
+  `define A2_PB_MAX 7.0
+  `include "a2_cycle_gate.vh"
 
   // ── [Phase 1 2c] NON-VACUITY: prove the B_SURF_C + dst arm was actually reached ──
   // Without this the bench could silently stop covering its one purpose (a blend-mode
@@ -189,6 +203,8 @@ module tb_blitter_surface_alpha;
 
     // [Phase 1 2c] Prove the arm was reached BEFORE trusting the diff.
     sa_check_coverage;
+    // [Phase 1 2c-minor] pin the surface path's cycle cost too.
+    a2_report_cycles;
 
     bad=0;
     for (y=0;y<`FB_H;y=y+1) for (x=0;x<`FB_W;x=x+1) begin

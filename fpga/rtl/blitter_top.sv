@@ -157,6 +157,7 @@ module blitter_top #(
         S_RD_WAIT=6'd23,    S_WR_WAIT=6'd24,
         S_WR_PERF=6'd25,    // [profiling] publish perf_tri_cyc to C_SRCSEL.hi (spare qw7 high)
         S_GOT_SRCSEL=6'd30, // control-fetch: latch C_SRCSEL after C_FLAGS
+        S_WR_COVPX=6'd31,   // [Phase 1 A4] publish perf_covered_px to C_FLAGS.hi
         // ---- BLT_OP_STAGE DDR3->SDRAM copy FSM (issue #19) ----
         S_STAGE_RD=6'd32,     // issue the DDR3 read of beat i (SRC_QW + off + i*8)
         S_STAGE_GOT=6'd33,    // capture the beat; begin writing its 4 words to SDRAM
@@ -311,6 +312,14 @@ module blitter_top #(
     //                      whose value is already known ~2.45ms). frame - tri = ring/
     //                      clear/setup overhead; tri - texwait = rasterizer datapath.
     reg  [31:0] perf_tri_cyc, perf_texwait_cyc;
+    // [Phase 1 A4] EXACT covered-pixel count, replacing the host's cov_px_est (a
+    // Sutherland-Hodgman clip estimate, blind to per-pixel rejection). It is the
+    // DENOMINATOR of cyc/px — the metric the datapath lever is judged on — so it must not
+    // itself be an estimate: Phase 0's ~1.2x measured-vs-sim residual could not be settled
+    // while the denominator was approximate.
+    // Incremented once per pixel DISPATCHED from A_PIX, which is where coverage is
+    // actually decided (the edge-function test), not at retire.
+    reg  [31:0] perf_covered_px;
     reg  [1:0]  target_buf;   // 0/1 = framebuffer; 2 = off-screen bg-cache (no flip)
     // [app-surface v1] Active COMPOSITE render target, bound by BLT_OP_SET_TARGET mid-ring.
     // DECOUPLED from target_buf on purpose: target_buf is the DISPLAY double-buffer / flip
@@ -937,7 +946,7 @@ module blitter_top #(
             cmd_idx<=0; fetch_k<=0; submit_reg<=0; done_reg<=0; rd_issued<=0;
             rw_wd<=22'd0; rd_reissue_cnt<=8'd0;
             perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;
-            perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;
+            perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0; perf_covered_px<=32'd0;
             throttle_cnt<=8'd0; throttle_cfg<=8'd0;
             ring_sel<=1'b0;                   // [Phase 1 A3] default to ring A
             pipe_start<=1'b0;
@@ -1014,6 +1023,7 @@ module blitter_top #(
                     comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] each frame begins targeting WORK
                     perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;   // frame start: reset perf
                     perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;   // [profiling] reset per-frame
+                    perf_covered_px<=32'd0;                        // [Phase 1 A4] per-frame too
                 end
             end
             S_GOT_CMDCNT: begin
@@ -1368,6 +1378,12 @@ module blitter_top #(
                         wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
                         recip_q <= $signed(ts_area_recip);
                         advance_cursor;
+                        // [Phase 1 A4] Count at DISPATCH. This branch is taken exactly once
+                        // per COVERED pixel (all three edge functions non-negative), before
+                        // any downstream work — the denominator cyc/px needs. Deliberately
+                        // NOT counted in the non-covered path: that skips the pixel in one
+                        // cycle and is not covered work.
+                        perf_covered_px <= perf_covered_px + 32'd1;
                         pa<=A_MUL0;
                     end else begin
                         advance_cursor;       // non-covered: skip in 1 cyc, stay in A_PIX
@@ -1733,6 +1749,19 @@ module blitter_top #(
                 // S_WR_STATUS; S_WR_DONE is now the tail. See S_WR_DONE below.
                 state<=S_WR_STATUS;
             end
+            // [Phase 1 A4] Publish the exact covered-pixel count to the spare HIGH 32 of
+            // C_FLAGS. be=0xF0 preserves the host-written LOW word carrying the frame's
+            // flags: the host writes it 32-bit at qw*8 (raster_backend_mfgpu.cpp
+            // mf_ctrl_wr), so producer and consumer never collide on the same bytes.
+            // Sequenced BEFORE S_WR_DONE because C_DONE is the host's release barrier —
+            // anything published after it is sampled one frame stale. Guarded by
+            // tb_perf_publish_order.
+            S_WR_COVPX: begin
+                bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_FLAGS;
+                bm_din<={perf_covered_px, 32'd0};
+                wr_ret<=S_WR_DONE;
+                state<=S_WR_WAIT;
+            end
             S_WR_DONE: begin
                 // low32 = done_seq (handshake); high32 = fabric-busy cyc this frame.
                 // [publish order] TAIL of the writeback chain (was the head). The host
@@ -1786,7 +1815,7 @@ module blitter_top #(
                 // of the snapshot, so the engine's handshake still completes and its
                 // next-frame prep overlaps the snapshot; we hold off polling the next
                 // submit until it ends.
-                wr_ret<=S_WR_DONE;
+                wr_ret<=S_WR_COVPX;   // [Phase 1 A4] covered_px, then the C_DONE doorbell
                 state<=S_WR_WAIT;
             end
 
