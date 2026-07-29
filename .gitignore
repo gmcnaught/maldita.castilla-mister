@@ -12,6 +12,10 @@ incremental_db/
 
 # Icarus sim build artifacts (fpga/sim/run_sims.sh)
 fpga/sim/.simbuild/
+# host-built golden generators (Mach-O/ELF binaries; `make -f gen_tri_golden.mk`
+# rebuilds them on demand, and a committed one is wrong on any other architecture)
+fpga/sim/gen_tri_golden
+fpga/sim/gen_system_golden
 .serena/
 
 # Compiled tree-sitter SystemVerilog grammar for ast-grep (~21 MB build artifact).

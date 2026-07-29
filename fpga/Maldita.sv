@@ -522,6 +522,7 @@ comp_fbram u_fbram (
 // On blitter_top's vblank pulse it streams the completed WORK buffer (comp_fbram rd_*) out
 // to FB_BYTE_BASE via a DDR write master on the freed arbiter reader slot (rdr_*, below).
 wire        dma_mem_wr;   wire [31:0] dma_mem_addr; wire [7:0] dma_mem_burstcnt;
+wire        dma_mem_busy;  // [A1-FIX] driven by f2h_slot_mux (declared before use)
 wire [63:0] dma_mem_din;  wire [7:0]  dma_mem_be;
 comp_fb_dma #(.AW(15), .MAW(32)) u_fb_dma (
 	.clk          (clk_sys),
@@ -540,7 +541,10 @@ comp_fb_dma #(.AW(15), .MAW(32)) u_fb_dma (
 	.mem_burstcnt (dma_mem_burstcnt),
 	.mem_din      (dma_mem_din),
 	.mem_be       (dma_mem_be),
-	.mem_busy     (rdr_busy_w)          // arbiter reader-slot busy = write not-yet-accepted
+	// [A1-FIX] was rdr_busy_w (arbiter backpressure ONLY), which could not express
+	// "the reader owns this cycle". f2h_slot_mux drives busy for BOTH reasons, so the
+	// copy stalls and re-presents the same beat instead of being silently dropped.
+	.mem_busy     (dma_mem_busy)
 );
 
 // --- DDR3 port sharing: old ddram (SDRAM clear) + native video reader ---
@@ -686,15 +690,61 @@ blitter_top blitter
 // (vblank is long vs the ~0.2 ms copy). rd_ddr_* are the reader's ddr_* master (below).
 wire  [7:0] rd_ddr_burstcnt; wire [28:0] rd_ddr_addr; wire rd_ddr_rd;
 wire [63:0] rd_ddr_din;      wire  [7:0] rd_ddr_be;   wire rd_ddr_we;
-wire  [7:0] rdr_burstcnt = fb_dma_busy ? dma_mem_burstcnt   : rd_ddr_burstcnt;
-wire [28:0] rdr_addr     = fb_dma_busy ? dma_mem_addr[28:0] : rd_ddr_addr;
-wire        rdr_rd       = fb_dma_busy ? 1'b0               : rd_ddr_rd;
-wire [63:0] rdr_din      = fb_dma_busy ? dma_mem_din        : rd_ddr_din;
-wire  [7:0] rdr_be       = fb_dma_busy ? dma_mem_be         : rd_ddr_be;
-wire        rdr_we       = fb_dma_busy ? dma_mem_wr         : rd_ddr_we;
-// reader-side handshake: busy=1 (stall) + dout_ready=0 while comp_fb_dma owns the slot.
-wire        rd_ddr_busy       = fb_dma_busy ? 1'b1 : rdr_busy_w;
-wire        rd_ddr_dout_ready = fb_dma_busy ? 1'b0 : (DDRAM_DOUT_READY & use_nv & rdr_grant_w);
+// [A1-FIX] The arbitration is now f2h_slot_mux (fpga/rtl/f2h_slot_mux.sv), extracted
+// from the six inline wires that used to live here. Two reasons, both load-bearing:
+//
+//  1. CORRECTNESS. The old logic gave the copy ABSOLUTE priority and additionally
+//     forced the reader's dout_ready low for the copy's whole duration. Both were
+//     safe only while the copy was gated to vblank. Once it could run during active
+//     display it starved the reader for ~158 us (2+ scanlines) AND dropped any beat
+//     already in flight. Device symptom: 1-3 thin drifting horizontal lines.
+//  2. TESTABILITY. Inline in Maldita.sv, this logic could not be simulated at all —
+//     no bench can instantiate this file. That is why the fault reached hardware.
+//     As a module it is covered by tb_f2h_slot_mux, which reproduces BOTH faults
+//     against the old behaviour (-DA1FIX_OLD_MUX) and passes against the new.
+//
+// See the module header for why a combinational owner signal is safe here, and for
+// the anti-starvation release valve that stops reader-priority inverting into copy
+// starvation.
+wire [7:0]  rdr_burstcnt; wire [28:0] rdr_addr; wire rdr_rd;
+wire [63:0] rdr_din;      wire [7:0]  rdr_be;   wire rdr_we;
+wire        rd_ddr_busy, rd_ddr_dout_ready;
+wire        f2h_dma_owns; wire [15:0] f2h_starve_cnt;
+
+f2h_slot_mux u_f2h_slot (
+	.clk              (clk_sys),
+	.rst              (RESET),
+	// copy engine
+	.dma_active       (fb_dma_busy),
+	.dma_burstcnt     (dma_mem_burstcnt),
+	.dma_addr         (dma_mem_addr),
+	.dma_wr           (dma_mem_wr),
+	.dma_din          (dma_mem_din),
+	.dma_be           (dma_mem_be),
+	.dma_busy         (dma_mem_busy),
+	// scanout reader
+	.rd_burstcnt      (rd_ddr_burstcnt),
+	.rd_addr          (rd_ddr_addr),
+	.rd_rd            (rd_ddr_rd),
+	.rd_din           (rd_ddr_din),
+	.rd_be            (rd_ddr_be),
+	.rd_we            (rd_ddr_we),
+	.rd_busy          (rd_ddr_busy),
+	.rd_dout_ready    (rd_ddr_dout_ready),
+	// arbiter reader slot
+	.rdr_burstcnt     (rdr_burstcnt),
+	.rdr_addr         (rdr_addr),
+	.rdr_rd           (rdr_rd),
+	.rdr_din          (rdr_din),
+	.rdr_be           (rdr_be),
+	.rdr_we           (rdr_we),
+	.rdr_busy         (rdr_busy_w),
+	.rdr_grant        (rdr_grant_w),
+	.ddram_dout_ready (DDRAM_DOUT_READY),
+	.use_nv           (use_nv),
+	.dma_owns_o       (f2h_dma_owns),
+	.starve_cnt       (f2h_starve_cnt)
+);
 
 ddr_blitter_arb #(.ENABLE(1'b1)) blitter_arb
 (

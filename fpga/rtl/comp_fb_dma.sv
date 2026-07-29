@@ -107,10 +107,26 @@ module comp_fb_dma #(
     // closed; after SKIP_MAX we force a control-word-only RE-PUBLISH of `published` (no recopy —
     // the buffer is already valid), which bumps frame_counter and thus guarantees the reader sees
     // a change and swaps onto `published`, restoring disp_active==published. Self-healing, and
-    // safe vs legitimate fast-producer frame-drop: on hardware `start` is gated by the scanout
-    // vblank (vs_rise), so the reader adopts within ~1 frame and consecutive skips stay tiny; a
-    // TRUE deadlock skips UNBOUNDEDLY. SKIP_MAX is set FAR above any legit skip-run (incl. the
-    // decoupled faster-producer the sim models) so the watchdog only fires on a real wedge —
+    // safe vs legitimate fast-producer frame-drop, because a TRUE deadlock skips UNBOUNDEDLY
+    // while a merely-fast producer cannot skip more than a bounded run.
+    //
+    // [Phase 1 A1 — REVISED RATIONALE] This paragraph used to read "on hardware `start` is gated
+    // by the scanout vblank (vs_rise), so the reader adopts within ~1 frame and consecutive skips
+    // stay tiny". That premise is now FALSE: blitter_top's S_SNAP_WAIT no longer waits for
+    // vs_rise, so `start` fires once per COMPOSITED frame and is free to outpace the 60 Hz
+    // scanout. Re-derived bound, so the margin is a number rather than a reassurance:
+    //   - the reader adopts once per scanout period (16.67 ms);
+    //   - post-A1 `start` fires every T ms (one composited frame);
+    //   - consecutive skips between adoptions ~= (16.67 / T) - 1;
+    //   - so skip_cnt reaches SKIP_MAX=32 only at 33 starts inside ONE scanout period,
+    //     i.e. T ~= 0.5 ms ~= 2000 fps.
+    // Phase 1 targets ~90 fps (T ~= 11 ms), where the worst case is ONE skip — about 22x of
+    // headroom. The conclusion therefore survives A1 unchanged; only its stated reason moved.
+    // If a future change pushes the composite rate toward ~2000 fps, RE-DERIVE THIS: the
+    // watchdog would begin force-republishing during normal operation instead of only on a wedge.
+    //
+    // SKIP_MAX is set FAR above any legit skip-run (incl. the decoupled faster-producer the sim
+    // models) so the watchdog only fires on a real wedge —
     // ~32 blocked frames (~0.5s @ 60Hz) of heal latency, negligible for a one-time boot recovery.
     localparam [7:0] SKIP_MAX = 8'd32;
     reg [7:0]    skip_cnt;

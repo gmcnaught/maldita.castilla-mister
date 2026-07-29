@@ -21,14 +21,63 @@ module tb_blitter_system_pipe;
 
   reg clk=0, reset=1; always #5 clk=~clk;
 
-  // [FB-in-BRAM #96] free-running vblank: blitter_top's S_SNAP_WAIT holds the frame
-  // until vs_rise (WORK->SCAN snapshot). Undriven, the pipe wedges in snap-wait after
-  // the first frame and never processes later submits -> PHASE2+ read stale WORK.
+  // [FB-in-BRAM #96] free-running vblank. HISTORICAL: blitter_top's S_SNAP_WAIT used to
+  // hold the frame until vs_rise (WORK->SCAN snapshot), so an undriven vs wedged the pipe
+  // in snap-wait after frame 1 and PHASE2+ read stale WORK. [Phase 1 A1] that gate is now
+  // DELETED, so this generator is no longer load-bearing — it is retained only so the
+  // bench still presents a realistic vs, and so the A1 check below has something to
+  // suppress (it forces vs low) and restore.
   reg vs=0; integer vsc=0;
   always @(posedge clk) begin
     vsc <= vsc + 1;
     if (vsc >= 256) begin vs <= ~vs; vsc <= 0; end
   end
+
+  // [Phase 1 A1] The snapshot must no longer depend on vblank. `vs` is FORCED low from
+  // t=0 (overriding the free-running generator above), so not a single vs_rise can occur
+  // for the whole of frame 1 — then we assert the WORK->DDR copy still started.
+  //   pre-A1 : S_SNAP_WAIT gates on vs_rise -> fb_dma_start never pulses -> FAIL.
+  //   post-A1: S_SNAP_WAIT is a pass-through -> it pulses right after C_DONE -> PASS.
+  //
+  // NOTE on why the latch is armed at t=0 rather than cleared when the check runs:
+  // C_DONE is published in S_WR_DONE, which is the state IMMEDIATELY BEFORE S_SNAP_WAIT.
+  // So by the time the TB observes the done handshake, a post-A1 fb_dma_start pulse has
+  // ALREADY been and gone. Clearing the flag at check time would throw away the very
+  // event under test and fail a correct implementation. Latch it from the start instead.
+  //
+  // The pulse is observed through the DUT's real fb_dma_start PORT (wired to a1_fb_dma_start
+  // in the instantiation below), not by reaching into the instance — this asserts on
+  // blitter_top's published interface, so it stays valid under internal refactoring.
+  // fb_dma_busy remains unconnected: no comp_fb_dma here, and S_SNAP_BUSY's SNAP_GUARD
+  // no-DMA fallback is the behaviour this bench has always depended on.
+  wire    a1_fb_dma_start;
+  reg     a1_saw_start;
+  integer a1_wait;
+  initial begin
+    a1_saw_start = 1'b0;
+    a1_wait      = 0;
+    force vs     = 1'b0;
+  end
+  always @(posedge clk) if (a1_fb_dma_start) a1_saw_start <= 1'b1;
+
+  task a1_check_no_vblank_snapshot;
+    begin
+      while (!a1_saw_start && a1_wait < 200000) begin
+        @(posedge clk);
+        a1_wait = a1_wait + 1;
+      end
+      release vs;                     // restore the free-running generator for PHASE2+
+      if (!a1_saw_start) begin
+        // state is dumped so the failure is diagnosable at a glance: parked in
+        // S_SNAP_WAIT (6'd42) means the vblank gate is still present, which is the
+        // pre-A1 behaviour. Any OTHER state means something unrelated broke.
+        $display("FAIL A1: fb_dma_start never fired with vblank held low (blt.state=%0d, expect 42=S_SNAP_WAIT)",
+                 blt.state);
+        $finish;
+      end
+      $display("PASS A1: snapshot started without vblank after %0d cyc", a1_wait);
+    end
+  endtask
 
   // ---- reader (m0) fake master ----
   reg [7:0] r_burst; reg[28:0] r_addr; reg r_rd; reg[63:0] r_din; reg[7:0] r_be; reg r_we;
@@ -156,6 +205,11 @@ module tb_blitter_system_pipe;
     .surf_rd_en(sf_rd_en), .surf_rd_qw(sf_rd_qw), .surf_rd_qword(sf_rd_qword),
     // [Task 1.2] CLUT read port is no longer top-level (internal to blitter_top,
     // wired between comp_pipeline and clut_bram) — no ports to connect here.
+    // [Phase 1 A1] Observe the WORK->DDR snapshot trigger through the DUT's actual PORT
+    // rather than reaching into the instance. fb_dma_busy stays UNCONNECTED on purpose:
+    // there is no comp_fb_dma here, and S_SNAP_BUSY's SNAP_GUARD no-DMA fallback is what
+    // this bench has always relied on. Connecting an output is purely observational.
+    .fb_dma_start(a1_fb_dma_start),
     .idle(bt_idle));
 
   // ---- [FB-in-BRAM #96] on-chip composite framebuffer (the real dest) ----------
@@ -558,6 +612,9 @@ module tb_blitter_system_pipe;
       end
     join
     repeat(20) @(posedge clk);
+    // [Phase 1 A1] Frame 1 has completed its done handshake with `vs` forced low for its
+    // entire duration. Assert the WORK->DDR snapshot still started, then release vs.
+    a1_check_no_vblank_snapshot;
     $display("=== blitter done_seq=%0d submit=%0d ; reader bursts=%0d errs=%0d ===",
              mem[32'h200005][31:0], mem[32'h200000][31:0], nbursts, errs);
     // [DDR-scanout custom-reader] blitter_top's VCTRL (control-word) write is RETIRED —
