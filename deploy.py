@@ -499,8 +499,14 @@ def main():
         # `killall` is not a substitute either — these run as `bash <path>/Master_Daemon.sh`,
         # so the process NAME is bash and killall would either miss it or kill every shell.
         print("   restarting Master_Daemon so it picks up the handler")
+        # The ssh shell's own cmdline contains "Master_Daemon.sh" (this very
+        # command text), so the loop MUST skip $$ — otherwise it kill -9s itself
+        # mid-loop and the nohup restart below never runs, leaving the device
+        # with NO daemon and therefore no auto-launch on core load (observed
+        # .62 2026-07-29 16:49: daemon killed, restart never executed).
         kill_daemons = (
             'for p in /proc/[0-9]*; do '
+            '  [ "$(basename "$p")" = "$$" ] && continue; '
             '  [ -r "$p/cmdline" ] || continue; '
             '  case "$(tr "\\0" " " < "$p/cmdline")" in '
             '    *Master_Daemon.sh*) kill -9 "$(basename "$p")" 2>/dev/null ;; '
