@@ -74,10 +74,6 @@ module openbor_video_top (
     input  wire  [7:0] ioctl_dout,
     output wire        ioctl_wait,
 
-    // Audio output (clk_audio domain)
-    input  wire        clk_audio,
-    output wire [15:0] audio_l,
-    output wire [15:0] audio_r,
 
     // DEBUG (issue #34): live blitter state, published into VSYNC_ADDR high word
     input  wire [31:0] dbg_blt,
@@ -176,9 +172,6 @@ openbor_video_reader reader (
     .ioctl_dout     (ioctl_dout),
     .ioctl_wait     (ioctl_wait),
 
-    .clk_audio      (clk_audio),
-    .audio_l        (audio_l),
-    .audio_r        (audio_r),
     .dbg_blt        (dbg_blt),
     .dbg_addr       (dbg_addr),
     .dbg_diag       (dbg_diag)

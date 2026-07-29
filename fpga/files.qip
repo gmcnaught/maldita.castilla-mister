@@ -6,6 +6,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE Maldita.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/openbor_video_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/openbor_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/openbor_video_reader.sv
+# [audio-own-channel] Instantiated in sys/sys_top.v, not in emu -- it needs the
+# ddr_svc ch0 port that MISTER_DISABLE_ALSA frees.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/gm_audio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddr_blitter_arb.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/blitter_top.sv
 # [TRILIST v1] fabric triangle rasterizer (Task 5): blt_tri_setup (reciprocal-area

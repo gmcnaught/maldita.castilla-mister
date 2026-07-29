@@ -18,6 +18,16 @@ set_global_assignment -name VERILOG_MACRO "MALDITA_CORE=1"
 # ~-1.0ns across a 10-seed sweep). Drop it.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_PALETTE1=1"
 
+# [audio-own-channel] Frees ddr_svc ch0 (and drops alsa.sv + its HPS SPI master)
+# so gm_audio can own a DDR read channel of its own on the clk_audio ram2 port,
+# instead of the audio drain stealing bandwidth from the video scanout master
+# through ddr_blitter_arb. See docs/superpowers/plans/2026-07-29-audio-own-clock-native-rate.md.
+#
+# CONSEQUENCE, stated plainly: Linux/Main_MiSTer ALSA playback (menu beeps) is
+# silent in this core. Nothing in the gmloader path used it -- native audio
+# bypasses the sound kernel entirely and writes the DDR ring from userspace.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
 # NOTE (2026-07-24): do NOT re-enable SOLARUS_DBG_PROBES without reading the probe-v3
 # result recorded here. A build with it defined (698dc8a) wedged the fabric PERMANENTLY at frame 1 on device
 # — done=0 forever, 2/2 reconfigures — while the byte-identical-RTL build without it renders.

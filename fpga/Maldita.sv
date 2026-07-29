@@ -856,12 +856,13 @@ end
 reg [15:0] mt32_i2s_r, mt32_i2s_l;
 wire midi_rx;
 
-// [native-audio] The FPGA owns the audio path again: openbor_video_reader drains
-// the DDR3 ring the HPS loader fills (0x3A0D0000) into a dual-clock FIFO on
-// CLK_AUDIO. MT32pi I2S capture stays retired.
-wire [15:0] nv_audio_l, nv_audio_r;
-assign AUDIO_L = nv_audio_l;
-assign AUDIO_R = nv_audio_r;
+// [audio-own-channel] emu no longer carries audio at all. gm_audio drains the
+// DDR3 ring the HPS loader fills (0x3A0D0000) on its OWN ddr_svc channel in
+// clk_audio and feeds audio_out's core_l/core_r directly from sys_top, so these
+// ports are dead here -- driven, not floating, because sys_top still declares
+// the wires for non-Maldita builds. MT32pi I2S capture remains retired.
+assign AUDIO_L = 16'd0;
+assign AUDIO_R = 16'd0;
 assign AUDIO_S = 1;
 
 assign USER_OUT[0]   = 1;
@@ -1138,10 +1139,6 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.r_out          (reader_r),
 	.g_out          (reader_g),
 	.b_out          (reader_b),
-	// native audio: DDR3 ring -> dual-clock FIFO -> AUDIO_L/R
-	.clk_audio      (CLK_AUDIO),
-	.audio_l        (nv_audio_l),
-	.audio_r        (nv_audio_r),
 	.enable         (NATIVE_VID),
 	.frame_ready    (),
 	.disp_active    (reader_disp_active),   // [device-fix] displayed buffer -> comp_fb_dma back-buffer select

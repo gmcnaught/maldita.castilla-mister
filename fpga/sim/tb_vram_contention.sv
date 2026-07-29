@@ -125,9 +125,7 @@ module tb_vram_contention;
     .joystick_0     (32'd0), .joystick_1(32'd0), .joystick_2(32'd0), .joystick_3(32'd0),
     .joystick_l_analog_0 (16'd0),
     .ioctl_download (1'b0), .ioctl_wr(1'b0), .ioctl_addr(27'd0), .ioctl_dout(8'd0),
-    .ioctl_wait     (),
-    .clk_audio      (clk_vid),
-    .audio_l        (), .audio_r()
+    .ioctl_wait     ()
   );
 
   // ================= BLITTER -> VRAM DEMUX (mirror Solarus.sv) ===============

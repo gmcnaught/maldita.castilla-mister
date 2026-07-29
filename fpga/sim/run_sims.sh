@@ -288,7 +288,9 @@ run_one_tb() {
     # FULL-geometry reduced TBs (~75-95s standalone) need margin over the 120s
     # default under --jobs=nproc contention on a slower CI core (else spurious
     # nightly gating timeout). scanout ~95s is the tightest.
-    tb_audio_burst_wedge)    to=200 ;;
+    # tb_gm_audio drives four multi-second scenarios (constant, triangle across
+    # two ring wraps, and two rate-lock soaks) through a scaled DUT.
+    tb_gm_audio)             to=300 ;;
   esac; fi
   if [ -n "$TIMEOUT" ]; then "$TIMEOUT" "$to" vvp "$BUILD/$top.vvp" >"$rlog" 2>&1; rc=$?
   else vvp "$BUILD/$top.vvp" >"$rlog" 2>&1; rc=$?; fi
