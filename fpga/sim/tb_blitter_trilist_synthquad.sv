@@ -39,8 +39,18 @@
 //                 tri_maxx. Every span here stops short (tri A ends at x=179, tri B
 //                 at x=y<=179, both < maxx=180), so it is one per NON-EMPTY row:
 //                 14400 + (119 + 120) == 14639.
-//                 (A span that ran to tri_maxx would cost none: A_ISSUE hands
-//                 straight to A_ROWY via row_pend.)
+//                 (A span that ran to tri_maxx would cost none: A_PIX branches
+//                 straight to A_ROWY on the dispatch cycle.)
+//
+// [pipeline stage 3b] ALL FOUR expectations below are UNCHANGED by the A-chain
+// pipelining, and that is deliberate evidence rather than luck: 3b removed the six
+// mul/addr/issue STATES from pa but did not touch a single walk decision, so the
+// covered set, the visit order, the span-end tests and the row setup are all
+// bit-identical. If a future change to the dispatcher moves any of these four, the
+// walk itself changed and the derivation above has to be redone. Note that raw
+// `pa == A_PIX` occupancy is now MUCH larger than pix_visits (pa parks in A_PIX while
+// credit-starved); the harness qualifies pix_visits with blt.ax_room for exactly that
+// reason, which is what keeps 14639 the right answer here.
 //
 //   rowsetup   == A_SEEK + A_ROWY cycles.
 //                 A_ROWY: once per bbox row, both triangles: 121 + 121 == 242.

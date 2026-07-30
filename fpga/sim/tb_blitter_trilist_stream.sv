@@ -114,9 +114,14 @@
 //              cost is in; had A_SEEK/A_ROWY fallen through to `other`, a change
 //              that traded pixel tests for row setup would have looked like a pure
 //              win in `pix` with the cost hidden in the catch-all.
-//   6 other  : everything else -- pa's mul/addr/issue cycles, pb's LOOK/FILL/
-//              SURF cycles, S_TRI_NEXT, the CLEAR fill, ring/control fetch and
-//              the perf publish tail.
+//   6 other  : everything else -- pb's LOOK/FILL/SURF cycles, S_TRI_NEXT, the
+//              CLEAR fill, ring/control fetch and the perf publish tail.
+//              [pipeline stage 3b] this bucket USED to be dominated by pa's six
+//              mul/addr/issue states; those are no longer states at all (the chain
+//              is an ax_v-clocked pipeline running under whatever bucket pb is in),
+//              and A_PIX cycles lost to credit starvation land here too when pb is
+//              not simultaneously in a higher-priority bucket. CYCX pa_hold and
+//              ax_live are what make that visible -- read them, not `other`.
 // A second line, CYCX, breaks `other` down by pa and pb sub-state (raw
 // occupancy, overlapping) plus the non-TRILIST frame cost -- that is the
 // pipeline-occupancy data Task 7 needs and it is deliberately NOT squeezed into
@@ -268,15 +273,37 @@ module `STREAM_TB_NAME;
   // cov_disp below must not see A_SEEK's own covered cycle (the one that FINDS the
   // span start and hands off to A_PIX) -- that would double-count the first pixel of
   // every row against perf_covered_px.
-  wire pix_emit  = umbrella && (blt.pa == blt.A_PIX) && blt.tri_cv;
+  //
+  // [pipeline stage 3b] A_PIX now RE-ENTERS itself and is CREDIT-GATED, so raw
+  // "pa == A_PIX" occupancy is no longer the same thing as walk progress: while the
+  // payload FIFO is saturated (the steady state, since the A pipeline dispatches
+  // 1 px/cyc and pb retires 1 px / ~6 cyc) pa parks in A_PIX doing nothing. Every
+  // walk-progress count below is therefore qualified with blt.ax_room:
+  //   pa_at      raw A_PIX occupancy (reported as CYCX pa_pix, no longer == pix_visits)
+  //   pix_emit   PRODUCTIVE A_PIX cycles = a dispatch, or a span-end test (which needs
+  //              no credit because it issues nothing). This keeps pix_visits meaning
+  //              exactly what it meant pre-3b -- covered pixels + one span-end test per
+  //              row ending short of tri_maxx -- so the synthquad / spanedge
+  //              STREAM_EXP_VISITS anchors stay valid UNCHANGED, which is itself the
+  //              evidence that 3b did not perturb the walk.
+  //   ax_hold    credit-starved A_PIX cycles (CYCX pa_hold): the cost of pa waiting on
+  //              pb, i.e. the direct measure of pb having become the binding constraint.
+  wire pix_cov   = ($signed(blt.w0) >= 0) && ($signed(blt.w1) >= 0) && ($signed(blt.w2) >= 0);
+  wire pa_at     = umbrella && (blt.pa == blt.A_PIX) && blt.tri_cv;
+  wire pix_emit  = pa_at && (!pix_cov || blt.ax_room);
+  wire ax_hold   = pa_at && pix_cov && !blt.ax_room;
   wire row_setup = umbrella && ((blt.pa == blt.A_SEEK) || (blt.pa == blt.A_ROWY))
                             && blt.tri_cv;
   wire pix_test  = pix_emit || row_setup;
-  // the covered-DISPATCH branch: coverage test passes on all three edge functions.
-  // Same condition perf_covered_px increments on (blitter_top.sv ~line 1423);
-  // re-derived here so the bench does not just echo the register it is checking.
-  wire cov_disp  = pix_emit && ($signed(blt.w0) >= 0) && ($signed(blt.w1) >= 0)
-                            && ($signed(blt.w2) >= 0);
+  // the covered-DISPATCH branch: coverage test passes on all three edge functions AND a
+  // credit is available. Same condition perf_covered_px increments on (blitter_top.sv
+  // A_PIX); re-derived here so the bench does not just echo the register it is checking.
+  wire cov_disp  = pa_at && pix_cov && blt.ax_room;
+  // A-pipeline occupancy: cycles with at least one of the six stages live, and the
+  // FIFO pushes it produces (must equal pix_covered -- every dispatched pixel is
+  // pushed exactly once, which is what the drain-condition mutation breaks).
+  wire ax_live   = umbrella && blt.ax_busy;
+  wire ax_push   = umbrella && blt.ax_v[5];
 
   integer cyc_total, cyc_tri, cyc_vfetch, cyc_setup, cyc_texw, cyc_wr, cyc_pix, cyc_other;
   integer pix_visits, cyc_rowsetup, tb_covered;
@@ -287,6 +314,12 @@ module `STREAM_TB_NAME;
   integer occ_pa [0:15];
   integer occ_pb [0:15];
   integer cyc_nontri, cyc_vwait;
+  // [pipeline stage 3b] pa_pix/pa_seek/pa_rowy/pa_done are still raw occ_pa slots, but
+  // pa no longer visits 1..6 at all (the mul/addr/issue chain is a pipeline, not states),
+  // so those CYCX fields are replaced by the three that describe the pipeline:
+  integer cyc_pa_hold;   // A_PIX cycles lost to credit starvation (pa waiting on pb)
+  integer cyc_ax_live;   // cycles with >=1 A-pipeline stage live (overlap depth proxy)
+  integer cyc_ax_push;   // FIFO pushes from the pipeline tail; gated == pix_covered
   integer bi;
   reg     counting;
 
@@ -294,6 +327,7 @@ module `STREAM_TB_NAME;
     cyc_total=0; cyc_tri=0; cyc_vfetch=0; cyc_setup=0; cyc_texw=0; cyc_wr=0;
     cyc_pix=0; cyc_other=0; pix_visits=0; cyc_rowsetup=0; tb_covered=0;
     cyc_nontri=0; cyc_vwait=0;
+    cyc_pa_hold=0; cyc_ax_live=0; cyc_ax_push=0;
     counting=0;
     for (bi=0;bi<16;bi=bi+1) occ_pa[bi]=0;
     for (bi=0;bi<16;bi=bi+1) occ_pb[bi]=0;
@@ -316,6 +350,9 @@ module `STREAM_TB_NAME;
     if (pix_emit)  pix_visits    <= pix_visits + 1;
     if (row_setup) cyc_rowsetup <= cyc_rowsetup + 1;
     if (cov_disp) tb_covered <= tb_covered + 1;
+    if (ax_hold)  cyc_pa_hold <= cyc_pa_hold + 1;
+    if (ax_live)  cyc_ax_live <= cyc_ax_live + 1;
+    if (ax_push)  cyc_ax_push <= cyc_ax_push + 1;
     if (umbrella) begin
       occ_pa[blt.pa] <= occ_pa[blt.pa] + 1;
       occ_pb[blt.pb] <= occ_pb[blt.pb] + 1;
@@ -419,13 +456,29 @@ module `STREAM_TB_NAME;
       gate_fail = 1'b1;
       $display("GATE-MISMATCH: tb_covered=%0d != perf_covered_px=%0d", tb_covered, blt.perf_covered_px);
     end
+    // [pipeline stage 3b] every DISPATCHED pixel must reach the FIFO exactly once. This
+    // is the conservation law the deepened overlap can break in a way the framebuffer
+    // diff will not always show: a triangle that exits the umbrella with pixels still in
+    // the A pipeline loses them, and if the lost pixel was colour-keyed out, or was
+    // overpainted by a later draw, the golden compare passes anyway. Gated separately.
+    if (cyc_ax_push !== blt.perf_covered_px) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: ax_push=%0d != pix_covered=%0d (pixels dispatched but never pushed)",
+               cyc_ax_push, blt.perf_covered_px);
+    end
 
     $display("CYC total=%0d tri=%0d pix_visits=%0d pix_covered=%0d rowsetup=%0d texwait=%0d wr=%0d setup=%0d vfetch=%0d pix=%0d other=%0d",
              cyc_total, cyc_tri, pix_visits, blt.perf_covered_px, cyc_rowsetup,
              cyc_texw, cyc_wr, cyc_setup, cyc_vfetch, cyc_pix, cyc_other);
-    $display("CYCX nontri=%0d vwait=%0d pa_pix=%0d pa_mul0=%0d pa_mul1=%0d pa_mul=%0d pa_addr=%0d pa_addr2=%0d pa_issue=%0d pa_done=%0d pa_seek=%0d pa_rowy=%0d",
-             cyc_nontri, cyc_vwait, occ_pa[0], occ_pa[1], occ_pa[2], occ_pa[3],
-             occ_pa[4], occ_pa[5], occ_pa[6], occ_pa[7], occ_pa[8], occ_pa[9]);
+    // [pipeline stage 3b] pa_mul0/mul1/mul/addr/addr2/issue are GONE from this line: pa
+    // does not visit encodings 1..6 any more, so printing them would report a constant 0
+    // that reads like "the mul chain became free" rather than "the field is retired".
+    // ax_live/ax_push/pa_hold replace them. pa_pix is now RAW A_PIX occupancy
+    // (pix_visits on the CYC line is the productive subset) -- pa_pix - pa_hold ==
+    // pix_visits is the identity to check when reading these by hand.
+    $display("CYCX nontri=%0d vwait=%0d pa_pix=%0d pa_hold=%0d pa_done=%0d pa_seek=%0d pa_rowy=%0d ax_live=%0d ax_push=%0d",
+             cyc_nontri, cyc_vwait, occ_pa[0], cyc_pa_hold, occ_pa[7], occ_pa[8], occ_pa[9],
+             cyc_ax_live, cyc_ax_push);
     $display("CYCX pb_idle=%0d pb_look=%0d pb_fill=%0d pb_wait=%0d pb_wr=%0d pb_wr2=%0d pb_wr3=%0d pb_surfw=%0d pb_surfc=%0d",
              occ_pb[0], occ_pb[1], occ_pb[2], occ_pb[3], occ_pb[6], occ_pb[7],
              occ_pb[8], occ_pb[9], occ_pb[10]);
