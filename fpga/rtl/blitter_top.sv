@@ -2464,6 +2464,24 @@ module blitter_top #(
     assign p0_addr = tri_busy ? tri_p0_addr : p_src_sdram_addr;
     assign p0_rd   = tri_busy ? tri_p0_rd   : p_src_sdram_rd;
 
+`ifdef FABRIC_ASSERT
+    // [#110 SVA companion] comp_pipeline's tightened #110 assertion (comp_pipeline.sv
+    // "sva_own_rd") tracks only its OWN p0_rd -> p0_ok window; it has no visibility into
+    // whether that p0_rd actually reached the shared P_SRC bus, because the owner mux
+    // just above steers p0_addr/p0_rd to tri_p0_* whenever tri_busy=1, silently dropping
+    // comp_pipeline's request from the wire. sva_own_rd still latches in that case (it
+    // samples comp_pipeline's LOCAL p0_rd, pre-mux), so that assertion is sound only as
+    // long as tri_busy and pipe_busy never overlap -- comp_pipeline cannot have a fetch
+    // in flight (pipe_busy) while the mux steers the port away from it to TRILIST
+    // (tri_busy). This SVA checks that mutual-exclusion invariant directly, at the one
+    // place both signals are visible together, instead of leaving #110 to depend on it
+    // silently. iverilog immediate assertion (concurrent `assert property` is
+    // unsupported); "FAIL" in the message trips run_sims.sh.
+    always @(posedge clk) if (!rst)
+      assert (!(tri_busy && pipe_busy))
+      else $display("FABRIC-ASSERT FAIL [blitter_top]: tri_busy && pipe_busy both asserted @%0t -> P_SRC owner mux and comp_pipeline's sva_own_rd both assume mutual exclusion", $time);
+`endif
+
     // pipe_busy bookkeeping: raised when pipe_start pulses (S_SETUP hands a blit
     // to the pipeline), lowered on blit_done. pipe_busy_q is a LOCKSTEP DUPLICATE
     // (same set/clear, same cycle) used ONLY for the owner-mux select — see the mux
