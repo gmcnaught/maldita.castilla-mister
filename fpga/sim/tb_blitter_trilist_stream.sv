@@ -147,9 +147,47 @@
 // What is NOT reproduced is device memory LATENCY: P_SRC here is the fixed
 // 3-cycle stub, not sdram_fb_cache + mt48, so `texwait` is a FLOOR. See
 // gen_tri_stream.c's header and the Task 5 calibration table.
+//
+// ── `STREAM_REALCACHE` — the real texel path [Stage B Task 1] ────────────────
+// Defining STREAM_REALCACHE replaces the fixed-3-cycle P_SRC stub with the REAL
+// sdram_fb_cache ch5 + mt48lc16m16a2 chip model (the pair
+// tb_blitter_trilist_sdram already co-simulates), so `texwait` stops being a
+// floor and becomes a measurement of the texel path's own latency. Everything
+// else is untouched -- same DDR image, same behavioral DDR3 model and its
+// poll-before-issue `d_busy` gate on mem_*, same buckets, same gates. That is
+// deliberate: the ONLY variable between the stub run and the real-cache run is
+// P_SRC latency, so the texwait delta is attributable.
+//
+// Because the DDR image is the same and no cycle depends on a texel VALUE, the
+// strict `exact_bad == 0` gate MUST still hold: slower texels may not change a
+// pixel. That is the correctness precondition for trusting the cycle numbers --
+// if the SDRAM image or its address mapping were wrong, texels would differ and
+// the bit-exact gate fails loudly rather than reporting a plausible texwait.
+//
+// SDRAM IMAGE: loaded by BACKDOOR (`preload_sdram_atlas`) rather than by running
+// a real BLT_OP_STAGE the way tb_blitter_trilist_sdram does. Reasons, in order:
+//   1. The captured frame's heap is ~219 KiB across 48 congruence-padded pages
+//      (vs that bench's single 32 KiB texture), so a real STAGE would prepend
+//      ~10^5 SDRAM co-sim cycles to a bench that is already ~10x the stub's
+//      runtime -- and it would measure the STAGE path, which is not under test.
+//   2. The atlas on the device is staged ONCE and persists across frames
+//      (sdram_fb_cache INVAL_MASK0 deliberately does NOT invalidate ch5), so a
+//      per-frame STAGE is not what the device does either.
+//   3. The mapping is the one tb_sdram_fb_cache_xl documents and uses: a client
+//      byte address A (qword-aligned) lands at SDRAM 16-bit words
+//      (A>>3)*4 .. +3, little-endian, and ch5 is non-FULL with BA5=0 at
+//      SDRAM_AW=23, so every word of a 512 KiB source window is in Bank0.
+//      A wrong mapping cannot pass silently -- see the bit-exact note above.
+// CAVEAT (direction: conservative): ch5 starts COLD here, where a device frame
+// inherits whatever the previous frame left in it. ch5 is 2 x 256 B = 512 B, so
+// the inherited state is at most two lines; the effect is a small over-estimate
+// of texwait, never an under-estimate.
 `timescale 1ns/1ps
 `default_nettype none
 `include "blitter_defs.vh"
+`ifdef STREAM_REALCACHE
+`include "vram_defs.vh"
+`endif
 
 // Vector tag (see "SELECTING A FRAME").
 `ifndef STREAM_VEC
@@ -188,10 +226,74 @@ module `STREAM_TB_NAME;
   wire d_busy = (bp != 2'd2) | (rbeats != 8'd0) | (rlat != 3'd0);
   integer i;
 
-  // ── P_SRC cache-ok source model (verbatim from tb_blitter_trilist_quad.sv) ──
-  localparam P_SRC_LAT = 3;
   localparam [28:0] SRC_WIN = `SRC_QW - WBASE;
   wire [26:0] s_src_addr; wire s_src_rd;
+
+`ifdef STREAM_REALCACHE
+  // ── REAL P_SRC path: sdram_fb_cache ch5 + mt48 chip model ──────────────────
+  // Instantiation copied from tb_blitter_trilist_sdram.sv (the bench that already
+  // co-simulates this pair), with every channel this bench does not use tied off:
+  // ch0/P_DST and ch4/P_SCAN are unused because the framebuffer lives in
+  // comp_fbram here, and ch1/STAGE is unused because the atlas is backdoored in
+  // (see the header). vs=0 and stage_barrier=0 follow from that: with no dst
+  // writes there is nothing to flush, and with no STAGE there is nothing to
+  // invalidate ch5 for -- it comes out of reset cold, which is the state a
+  // post-stage_barrier device frame starts in.
+  //
+  // clk_sdram: the chip model is clocked 180 deg from clk_sys, exactly as
+  // tb_blitter_trilist_sdram and tb_stage_psrc do it (the cache's own clk_sdram
+  // input takes clk, since the DDIO forwarder is a synthesis-only concern here).
+  reg  clk_sdram = 1; always #5 clk_sdram = ~clk_sdram;
+  // Cache/SDRAM reset is SEPARATE from the blitter's: the SDRAM controller needs
+  // its power-up init to run (tens of thousands of cycles) BEFORE the blitter is
+  // allowed to start, and the captured frame's submit_seq is already live in the
+  // DDR image at time 0, so blt would otherwise begin the frame against an
+  // un-initialised chip. crst releases first; rst releases once init is done.
+  reg  crst = 1'b1;
+  wire [63:0] s_src_dout; wire s_src_ok;
+  wire        sdram_init;
+  wire [15:0] SDQ; wire [12:0] SA; wire SDQML, SDQMH; wire [1:0] SBA;
+  wire        SnCS, SnWE, SnRAS, SnCAS, SCKE, cache_sdram_clk;
+
+  sdram_fb_cache fbcache (
+    .clk(clk), .clk_sdram(clk), .rst(crst), .init(sdram_init),
+    .dst_addr(27'd0), .dst_rd(1'b0), .dst_wr(1'b0),
+    .dst_din(64'd0), .dst_wdsn(8'hFF), .dst_dout(), .dst_ok(),
+    .scan_addr(27'd0), .scan_rd(1'b0), .scan_dout(), .scan_ok(),
+    .p0_addr(s_src_addr), .p0_rd(s_src_rd), .p0_dout(s_src_dout), .p0_ok(s_src_ok),
+    .stage_addr(27'd0), .stage_wr(1'b0), .stage_din(64'd0), .stage_wdsn(8'hFF),
+    .stage_ok(),
+    .vs(1'b0), .coh_busy(),
+    .stage_barrier(1'b0), .stage_busy(),
+    .dst_barrier(1'b0), .dst_busy(),
+    .sdram_dq(SDQ), .sdram_a(SA), .sdram_dqml(SDQML), .sdram_dqmh(SDQMH),
+    .sdram_ba(SBA), .sdram_nwe(SnWE), .sdram_ncas(SnCAS), .sdram_nras(SnRAS),
+    .sdram_ncs(SnCS), .sdram_cke(SCKE), .sdram_clk(cache_sdram_clk));
+
+  mt48lc16m16a2 #(.addr_bits(13), .col_bits(10)) schip (
+    .Dq(SDQ), .Addr(SA), .Ba(SBA), .Clk(clk_sdram), .Cke(SCKE),
+    .Cs_n(SnCS), .Ras_n(SnRAS), .Cas_n(SnCAS), .We_n(SnWE), .Dqm({SDQMH, SDQML}),
+    .downloading(1'b0), .VS(1'b0), .frame_cnt(32'd0));
+
+  // Backdoor the whole SRC window into the chip store, so SDRAM byte address X
+  // holds exactly what the stub served from mem[SRC_WIN + (X>>3)] -- i.e. the two
+  // variants read the SAME texels and only their timing differs. Mapping per
+  // tb_sdram_fb_cache_xl: qword index -> four little-endian 16-bit words at *4.
+  task preload_sdram_atlas;
+    integer j; reg [63:0] q;
+    begin
+      for (j = 0; j < SRC_HEADROOM_QW; j = j + 1) begin
+        q = mem[SRC_WIN + j];
+        schip.Bank0[j*4+0] = q[15: 0];
+        schip.Bank0[j*4+1] = q[31:16];
+        schip.Bank0[j*4+2] = q[47:32];
+        schip.Bank0[j*4+3] = q[63:48];
+      end
+    end
+  endtask
+`else
+  // ── P_SRC cache-ok source model (verbatim from tb_blitter_trilist_quad.sv) ──
+  localparam P_SRC_LAT = 3;
   reg  [63:0] s_src_dout; reg s_src_ok=1'b0;
   reg         s_rd_d;
   reg [26:0]  s_lat_addr [0:P_SRC_LAT-1];
@@ -211,6 +313,7 @@ module `STREAM_TB_NAME;
       s_src_ok   <= 1'b1;
     end
   end
+`endif
 
   wire [7:0] bt_burst;
   wire fb_wr_en; wire [14:0] fb_wr_qw; wire [1:0] fb_wr_lane; wire [15:0] fb_wr_pix;
@@ -405,13 +508,31 @@ module `STREAM_TB_NAME;
   end
 
   integer to;
+  integer nonsurf_px, miss_retry;
   real    ms_total, ms_tri, ms_texw;
   // Any cross-check failing sets this; it feeds the ONE verdict chain at the end
   // (see "EXACTLY ONE VERDICT LINE" in the header).
   reg     gate_fail = 1'b0;
   initial begin
     $display("=== stream replay: %0s ===", `STREAM_VEC);
+`ifdef STREAM_REALCACHE
+    // #1 before the backdoor load: the SDRAM image is DERIVED from mem[], so the
+    // zero-fill + $readmemh initial block above must have run. iverilog does run
+    // initial blocks in source order, but a load-bearing preload does not rely on
+    // that. Then release the cache, wait out SDRAM power-up init, and only THEN
+    // release the blitter (see the crst declaration for why).
+    #1 preload_sdram_atlas;
+    repeat(8) @(posedge clk); crst <= 1'b0;
+    to = 0;
+    while (sdram_init && to < 2000000) begin @(posedge clk); to = to + 1; end
+    if (sdram_init) begin
+      $display("RESULT: FAIL (SDRAM power-up init never completed)"); $finish;
+    end
+    $display("=== SDRAM init done after %0d cyc ===", to);
     repeat(8) @(posedge clk); rst<=0;
+`else
+    repeat(8) @(posedge clk); rst<=0;
+`endif
     counting <= 1'b1;
     // A captured frame is ~1-3 M cycles (vs ~150 k for the synthetic scenarios), so
     // the completion budget is 40 M, not the siblings' 4 M.
@@ -492,6 +613,26 @@ module `STREAM_TB_NAME;
     $display("CYCX pb_idle=%0d pb_look=%0d pb_fill=%0d pb_wait=%0d pb_wr=%0d pb_wr2=%0d pb_wr3=%0d pb_surfw=%0d pb_surfc=%0d",
              occ_pb[0], occ_pb[1], occ_pb[2], occ_pb[3], occ_pb[6], occ_pb[7],
              occ_pb[8], occ_pb[9], occ_pb[10]);
+    // ── texel-cache miss rate (informational) ─────────────────────────────────
+    // The one metric that makes a texwait number comparable ACROSS texel-port
+    // models: it counts DEMAND MISSES, which are a property of the access pattern
+    // and the prefetch lead, not of memory latency. Derivation from blitter_top's
+    // pb FSM: `B_LOOK: pb <= B_FILL` is unconditional, so pb enters B_LOOK once per
+    // non-surface covered pixel; a MISS goes B_FILL -> B_WAIT -> B_LOOK, i.e. one
+    // EXTRA B_LOOK per miss. Surface-sourced pixels take B_SURFW/B_SURFC and never
+    // touch the texel cache, so they are excluded from the denominator (pb_surfw is
+    // one cycle per surface pixel). This is the same arithmetic the Task 7 report
+    // quoted its 23.7% -> 0.23% from, reproduced here so it is read off the run
+    // instead of recomputed by hand.
+    // wd_fires must be 0: a non-zero count means the fill watchdog (WD_TIMEOUT =
+    // 4096 cyc) fired and RE-ISSUED a fill, which would make texwait an artifact of
+    // the watchdog rather than of the memory system.
+    nonsurf_px = blt.perf_covered_px - occ_pb[9];
+    miss_retry = occ_pb[1] - nonsurf_px;
+    $display("MISS nonsurf_px=%0d look=%0d retries=%0d rate=%0.3f%% wd_fires=%0d",
+             nonsurf_px, occ_pb[1], miss_retry,
+             (nonsurf_px > 0) ? (100.0 * miss_retry / nonsurf_px) : 0.0,
+             blt.wd_fire_count);
 `ifdef STREAM_EXP_VISITS
     // ── hand-computed bucket calibration (synthetic anchor only) ──────────────
     // Only a vector set whose expected counts are derivable from the geometry

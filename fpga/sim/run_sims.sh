@@ -164,7 +164,24 @@ SKIP="tb_profile"
 # and exact_bad=5 respectively. Non-overlapping is load-bearing — an overlapping triangle
 # would overpaint the dropped pixels and re-hide the hole. ~2 s. See the tb header for the
 # per-triangle derivation and why the M1 margin is inherently only a few pixels.
-NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
+#
+# [Phase 3B Task 1] tb_blitter_trilist_streamcache is the SAME captured-frame harness
+# with the REAL texel path: `STREAM_REALCACHE` swaps the fixed-3-cycle P_SRC stub for
+# sdram_fb_cache ch5 + the mt48 chip model (the pair tb_blitter_trilist_sdram already
+# co-simulates), leaving everything else — DDR image, behavioral DDR3 + its
+# poll-before-issue gate, buckets, gates — untouched, so the texwait delta against the
+# stub sibling is attributable to texel latency alone. It exists because the stub's
+# `texwait` is a FLOOR (0.013 ms post-levers) and the device's is 3.42 ms; this bench
+# measures the real number and is what decided the Stage-B/Quartus gate. Pre-lever it
+# reproduces device texwait to −0.7% (quiet) / −0.6% (arrival) — see
+# .superpowers/sdd/stageB-task-1-report.md.
+# NONGATING + NIGHTLY_ONLY purely on RUNTIME (mt48 co-sim, ~10x the stub replay's ~30s,
+# and contention-sensitive), NOT because anything about it is known-shaky: it gates
+# strict bit-exactness and all five cross-checks internally, and bit-exactness is the
+# load-bearing precondition here (same DDR image, same texels, only slower — a single
+# changed pixel means the SDRAM image or its address mapping is wrong and every cycle
+# number in the run is worthless). A failure is surfaced by the NON-GATING banner.
+NONGATING="tb_comp_replay tb_blitter_trilist_sdram tb_blitter_trilist_streamcache"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
 # NIGHTLY_ONLY: TBs excluded from the PR tier. tb_comp_replay is a non-gating visual-
@@ -174,7 +191,7 @@ NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 # ~1.6ms sim, so it gates in EVERY tier (incl. PR).
 # [gmloader-GPU slim] tb_bgplane_maptrans and tb_bgplane_inval_teeth were RETIRED
 # with OP_BGPLANE_WRITE (see the note above); they no longer exist to defer.
-NIGHTLY_ONLY="tb_comp_replay"
+NIGHTLY_ONLY="tb_comp_replay tb_blitter_trilist_streamcache"
 
 # +defines applied to EVERY compile in the nightly tier to restore full
 # HW-faithful geometry/rate. Harmless on TBs that don't reference a macro, so
@@ -221,6 +238,14 @@ timeout_s() { case "$1" in
   # [Phase 3A Task 5] Captured-device-frame replay: 1.56 M sim cycles (a real frame is
   # ~10x the synthetic scenarios), ~32 s standalone. 300 s covers CI-core contention.
   tb_blitter_trilist_stream)               echo 300 ;;
+  # [Phase 3B Task 1] Same replay through the REAL texel path (see the NONGATING note).
+  # 1.44 M sim cycles with the bit-level mt48 model in the loop. MEASURED: 147 s run
+  # alone, 1384 s inside a full --tier=nightly pass. That 9.4x spread is not CPU
+  # scheduling -- the mt48 model declares four 8M x 16-bit bank arrays, so two
+  # concurrent instances (this bench + tb_blitter_trilist_sdram) put the whole run under
+  # memory pressure. Budget 3600 s: >2.5x the measured worst case, and since the bench
+  # is nightly-only a generous budget costs the PR tier nothing.
+  tb_blitter_trilist_streamcache)          echo 3600 ;;
   # [gmloader-GPU slim] tb_bgplane_equivalence/write_pipe_xl/3plane_xl/maptrans/
   # inval_teeth and tb_pal8_bgplane were RETIRED with OP_BGPLANE_WRITE/OP_CLUT_
   # UPLOAD (see the SKIP-block note above); their budget entries are gone too.
