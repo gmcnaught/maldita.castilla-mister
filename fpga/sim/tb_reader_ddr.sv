@@ -177,16 +177,22 @@ module tb_reader_ddr;
     reg [31:0] last_scanfrm = 32'hFFFF_FFFF;
     reg        nf_q2 = 1'b0;
     integer    rtl_cnt;
-    always @(posedge clk) begin
-        nf_q2 <= tim_nf;
-        if (!reset && tim_nf && !nf_q2) tb_frames = tb_frames + 1;
-    end
 
     // (e1) continuous tracking invariant: the reader's ddr_clk-domain counter equals the
     // bench's clk_vid-domain frame count, modulo the fixed new_frame CDC latency (a couple
     // of cycles, never a whole frame). Counting twice, counting on new_line, counting on a
     // level instead of an edge, or not counting all break this within the first frames.
+    // tb_frames is updated (blocking) and read in this SAME always block, in program order,
+    // so the check always sees the current-cycle value — no cross-block scheduling race
+    // against the update. (Previously a separate always block read tb_frames from another
+    // block's blocking assignment; iverilog's inter-block evaluation order for that pair is
+    // not guaranteed, so the check could observe either the pre- or post-update value on a
+    // frame-boundary cycle. That non-determinism was masked, not fixed, by the +-1 tolerance
+    // below — the tolerance stays because the CDC latency is real, not because of the race.)
     always @(posedge clk) begin
+        nf_q2 <= tim_nf;
+        if (!reset && tim_nf && !nf_q2) tb_frames = tb_frames + 1;
+
         if (!reset) begin
             rtl_cnt = u_reader.scan_frame_cnt;
             track_checks = track_checks + 1;

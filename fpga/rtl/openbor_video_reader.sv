@@ -24,8 +24,8 @@
 //    0x3A000000 + 0x028     : Joystick P4
 //    0x3A000000 + 0x030     : Audio ring write pointer (ARM writes)
 //    0x3A000000 + 0x038     : Audio ring read pointer  (FPGA writes)
-//    0x3A000000 + 0x70018   : Scanout frame counter (FPGA writes) — see SCANFRM_ADDR
-//    0x3A000000 + 0x7001C   : Scanout frame period, ddr_clk cycles (FPGA writes)
+//    0x3BFB0018              : Scanout frame counter (FPGA writes) — see SCANFRM_ADDR
+//    0x3BFB001C              : Scanout frame period, ddr_clk cycles (FPGA writes)
 //    0x3A000000 + 0x040     : Buffer 0 (288x216 RGB565 = 124,416 bytes; 256KB region)
 //    0x3A040040             : Buffer 1 (288x216 RGB565; 256KB region)
 //    0x3A080000             : Cart data buffer (past video buffers)
@@ -179,6 +179,10 @@ localparam [28:0] VSYNC_ADDR      = FB_QW_BASE + 29'h0E000; // debug vblank-coun
 //     n0=$(busybox devmem 0x3BFB0018 32); sleep 10; n1=$(busybox devmem 0x3BFB0018 32)
 //     scanout fps = (n1 - n0) / 10        # 0 delta => scanout stopped, not "slow"
 //   Both words are written in ONE 64-bit DDR beat, so a qword read is a coherent pair.
+//   Two SEPARATE 32-bit `devmem` reads (one at +0x18, one at +0x1C) are NOT mutually
+//   atomic — a frame boundary can land between them and pair a count with the wrong
+//   period. If the two values must correspond, read the count FIRST (period staleness
+//   is harmless — it just describes the previous interval), or issue one 64-bit read.
 //
 //   Published from the per-frame writeback chain (ST_WRITE_SCANFRM, the tail of the
 //   JOY/VSYNC chain) in EVERY build — SCANOUT_ONLY ship builds included, unlike
