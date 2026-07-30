@@ -1546,6 +1546,15 @@ module blitter_top #(
                 // products happen in A_MUL0 -> pipelined DSP) and dispatch down A,
                 // advancing the cursor at dispatch (stage-1 decoupling).
                 A_PIX: begin
+                    // [span walk] UNREACHABLE BY CONSTRUCTION, kept as a defensive
+                    // landing. tri_cv is now cleared in exactly one place -- A_ROWY's
+                    // last row -- and that same cycle sets pa<=A_DONE, so pa is never
+                    // A_PIX while tri_cv is 0. Pre-span-walk this WAS the live exit
+                    // (advance_cursor cleared tri_cv when the bbox cursor ran out and
+                    // A_PIX noticed on the next tick); do not read it as evidence that
+                    // the walk still terminates that way. It survives only so a pa
+                    // desync (or the `default:` arm) lands somewhere that drains pb
+                    // instead of emitting pixels outside the bbox.
                     if (!tri_cv) begin
                         pa<=A_DONE;           // walk exhausted; let B drain
                     end else if (sk_cov) begin

@@ -46,11 +46,12 @@
 //                 A_ROWY: once per bbox row, both triangles: 121 + 121 == 242.
 //                 A_SEEK, tri A (span start s(y) = y+1, so it advances by one column
 //                   per row): row 60 costs 2 (uncovered at ox=60 -> step right;
-//                   covered at 61 -> found); rows 61..178 cost 2 each, entering at
-//                   the previous row's start y and stepping to y+1: 2*119 == 238;
-//                   row 179 costs 2 (uncovered at 179 -> step right to 180 == maxx
-//                   -> still uncovered -> empty row); row 180 costs 1 (already at
-//                   maxx, uncovered -> empty).  238 + 2 + 1 == 241.
+//                   covered at 61 -> found); rows 61..178 -- that is 178-61+1 == 118
+//                   rows -- cost 2 each, entering at the previous row's start y and
+//                   stepping to y+1: 2*118 == 236; row 179 costs 2 (uncovered at 179
+//                   -> step right to 180 == maxx -> still uncovered -> empty row);
+//                   row 180 costs 1 (already at maxx, uncovered -> empty).
+//                   2 + 236 + 2 + 1 == 241.
 //                 A_SEEK, tri B (s(y) == 60 == ox on every row, so the seek never
 //                   moves): 1 cycle per row, 121 rows == 121.
 //                 rowsetup == 242 + 241 + 121 == 604, i.e. 2.50 cyc/row over 242

@@ -1,0 +1,16 @@
+MFTRACE G f=1 off=0 stride=16 texw=8 texh=8 fmt=0 blend=0 key=0 alpha=255 flags=0 nt=5
+MFTRACE V -320 160 0 0 ffffffff
+MFTRACE V 640 160 128 0 ffffffff
+MFTRACE V 640 1120 128 128 ffffffff
+MFTRACE V 1608 168 0 0 ffffffff
+MFTRACE V 968 808 0 128 ffffffff
+MFTRACE V 2248 808 128 128 ffffffff
+MFTRACE V 3208 168 0 0 ffffffff
+MFTRACE V 2568 808 0 128 ffffffff
+MFTRACE V 3848 808 128 128 ffffffff
+MFTRACE V 1608 1768 0 0 ffffffff
+MFTRACE V 968 2408 0 128 ffffffff
+MFTRACE V 2248 2408 128 128 ffffffff
+MFTRACE V 3208 1768 0 0 ffffffff
+MFTRACE V 2888 2088 0 128 ffffffff
+MFTRACE V 2568 2088 128 128 ffffffff

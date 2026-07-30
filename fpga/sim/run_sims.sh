@@ -153,6 +153,17 @@ SKIP="tb_profile"
 # from the geometry (pix_covered=120*120=14400, pix_visits=2*121*121=29282, wr=3*14400)
 # and are ASSERTED via STREAM_EXP_*, so this is the calibration anchor for the bucket
 # semantics themselves. ~5 s.
+#
+# [Phase 3A Task 6] tb_blitter_trilist_spanedge is the same harness again, GATING, on a
+# vector set built to close two MEASURED holes in the bit-exact gate: when the span walk
+# landed, two deliberate off-by-ones in the walk's LEFT endpoint (sk_covm's `>=` -> `>`,
+# and the `tri_px == tri_ox` clamp -> `== tri_ox+1`) were caught by NONE of the other ten
+# trilist benches — both need a leftward seek, which the captured frames and the synthetic
+# quad barely exercise. Its five non-overlapping triangles (one off-left-CLAMPED, four with
+# vertices on pixel centres and a slope -1 left edge) make each mutation fail: exact_bad=760
+# and exact_bad=5 respectively. Non-overlapping is load-bearing — an overlapping triangle
+# would overpaint the dropped pixels and re-hide the hole. ~2 s. See the tb header for the
+# per-triangle derivation and why the M1 margin is inherently only a few pixels.
 NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
