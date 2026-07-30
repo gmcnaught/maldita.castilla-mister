@@ -10,6 +10,12 @@
 //       (Y-reversed) line.
 //   (c) OUTPUT orientation (Y only): during active display, the output pixel cur_pix at screen
 //       (hcol, vcount) == the active buffer's pixel at STORAGE (hcol AND vcount UNCHANGED).
+//   (d) JOY writeback: each frame start publishes the live joystick words.
+//   (e) [Phase 3 B2] SCANOUT-PERIOD COUNTER: the reader's scan_frame_cnt advances EXACTLY
+//       once per scanout frame boundary, is published to SCANFRM_ADDR once per frame in the
+//       SCANOUT_ONLY *ship* configuration (which skips VSYNC_ADDR entirely), each published
+//       value is +1 on the last, and the published period equals the timing generator's
+//       exact frame period in ddr_clk cycles (H_TOTAL x V_TOTAL x the ce_pix divider).
 // (c) is the make-or-break: it catches a wrong-axis fix (an accidental X reversal, or none).
 //
 // Copyright (C) 2026 — GPL-3.0
@@ -150,6 +156,72 @@ module tb_reader_ddr;
                 if (r_din !== {32'd0, JOY1_VAL}) begin
                     if (joy_errs < 8) $display("  JOY1 DATA MISMATCH got=%h exp=%h", r_din, {32'd0, JOY1_VAL});
                     joy_errs = joy_errs + 1;
+                end
+            end
+        end
+    end
+
+    // ── (e) [Phase 3 B2] scanout frame counter + period ───────────────────────────
+    // SCANFRM_ADDR = VSYNC_ADDR + 3 = FB + 0x0E003 (byte 0x3BFB0018 at the ship base).
+    // This bench runs the reader in the SHIP configuration (SCANOUT_ONLY=1, no
+    // SOLARUS_DBG_PROBES), which is exactly the build where VSYNC_ADDR is NOT written —
+    // so reaching this address proves the counter publishes on the ship path.
+    localparam [28:0] SCANFRMA = FB + 29'h0E003;
+    // Exact scanout period in bench clk cycles: H_TOTAL(380) x V_TOTAL(262) x the 1-in-4
+    // ce_pix divider above. Both the timing generator and the reader see the same clock
+    // here, so this is an EXACT expectation, not a tolerance.
+    localparam integer EXP_PERIOD = 380 * 262 * 4;   // 398,240
+
+    integer tb_frames      = 0;   // bench-side count of tim_nf rising edges = ground truth
+    integer scanfrm_writes = 0, scanfrm_errs = 0, period_checks = 0, track_checks = 0;
+    reg [31:0] last_scanfrm = 32'hFFFF_FFFF;
+    reg        nf_q2 = 1'b0;
+    integer    rtl_cnt;
+    always @(posedge clk) begin
+        nf_q2 <= tim_nf;
+        if (!reset && tim_nf && !nf_q2) tb_frames = tb_frames + 1;
+    end
+
+    // (e1) continuous tracking invariant: the reader's ddr_clk-domain counter equals the
+    // bench's clk_vid-domain frame count, modulo the fixed new_frame CDC latency (a couple
+    // of cycles, never a whole frame). Counting twice, counting on new_line, counting on a
+    // level instead of an edge, or not counting all break this within the first frames.
+    always @(posedge clk) begin
+        if (!reset) begin
+            rtl_cnt = u_reader.scan_frame_cnt;
+            track_checks = track_checks + 1;
+            if (rtl_cnt > tb_frames || (tb_frames - rtl_cnt) > 1) begin
+                if (scanfrm_errs < 8)
+                    $display("  SCANFRM TRACK MISMATCH t=%0t rtl=%0d tb=%0d", $time, rtl_cnt, tb_frames);
+                scanfrm_errs = scanfrm_errs + 1;
+            end
+        end
+    end
+
+    // (e2) the published qword: one write per frame, low word == the live counter and
+    // exactly +1 on the previous write, high word == the exact frame period.
+    always @(posedge clk) begin
+        if (!reset && r_we && !r_ddr_busy && r_addr == SCANFRMA) begin
+            scanfrm_writes = scanfrm_writes + 1;
+            if (r_din[31:0] !== u_reader.scan_frame_cnt) begin
+                if (scanfrm_errs < 8) $display("  SCANFRM PUBLISH MISMATCH got=%0d live=%0d",
+                    r_din[31:0], u_reader.scan_frame_cnt);
+                scanfrm_errs = scanfrm_errs + 1;
+            end
+            if (last_scanfrm !== 32'hFFFF_FFFF && r_din[31:0] !== (last_scanfrm + 32'd1)) begin
+                if (scanfrm_errs < 8) $display("  SCANFRM DELTA != 1: prev=%0d now=%0d",
+                    last_scanfrm, r_din[31:0]);
+                scanfrm_errs = scanfrm_errs + 1;
+            end
+            last_scanfrm = r_din[31:0];
+            // Period: frame 1's interval is measured from reset (not a real boundary), so
+            // check from frame 2 on — those are true boundary-to-boundary intervals.
+            if (r_din[31:0] >= 32'd2) begin
+                period_checks = period_checks + 1;
+                if (r_din[63:32] !== EXP_PERIOD) begin
+                    if (scanfrm_errs < 8) $display("  SCANFRM PERIOD MISMATCH frame=%0d got=%0d exp=%0d",
+                        r_din[31:0], r_din[63:32], EXP_PERIOD);
+                    scanfrm_errs = scanfrm_errs + 1;
                 end
             end
         end
@@ -298,6 +370,22 @@ module tb_reader_ddr;
                      joy0_writes, joy1_writes, joy_errs);
             $fatal;
         end
+        // (e) [Phase 3 B2] scanout-period counter: published on the SHIP path, once per
+        // frame, monotonic +1, exact period. rtl_cnt is re-read here for the final equality.
+        rtl_cnt = u_reader.scan_frame_cnt;
+        $display("SCANFRM: writes=%0d period_checks=%0d track_checks=%0d rtl_cnt=%0d tb_frames=%0d errs=%0d",
+                 scanfrm_writes, period_checks, track_checks, rtl_cnt, tb_frames, scanfrm_errs);
+        if (scanfrm_writes < 5 || period_checks < 3 || track_checks < 1000) begin
+            $display("RESULT: FAIL — scanout counter under-exercised (writes=%0d period_checks=%0d track_checks=%0d)",
+                     scanfrm_writes, period_checks, track_checks);
+            $fatal;
+        end
+        if (scanfrm_errs || rtl_cnt > tb_frames || (tb_frames - rtl_cnt) > 1) begin
+            $display("RESULT: FAIL — scanout frame counter errs=%0d rtl_cnt=%0d tb_frames=%0d",
+                     scanfrm_errs, rtl_cnt, tb_frames);
+            $fatal;
+        end
+        $display("reader_ddr: scanout counter @SCANFRM_ADDR advances exactly once per scanout frame (period=%0d cyc), published on the SCANOUT_ONLY ship path", EXP_PERIOD);
         $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; FORWARD scanout — screen(c,d)=buf(c,d), no re-ordering, both buffers");
         $display("RESULT: PASS");
         $finish;

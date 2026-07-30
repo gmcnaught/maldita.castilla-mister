@@ -24,6 +24,8 @@
 //    0x3A000000 + 0x028     : Joystick P4
 //    0x3A000000 + 0x030     : Audio ring write pointer (ARM writes)
 //    0x3A000000 + 0x038     : Audio ring read pointer  (FPGA writes)
+//    0x3A000000 + 0x70018   : Scanout frame counter (FPGA writes) — see SCANFRM_ADDR
+//    0x3A000000 + 0x7001C   : Scanout frame period, ddr_clk cycles (FPGA writes)
 //    0x3A000000 + 0x040     : Buffer 0 (288x216 RGB565 = 124,416 bytes; 256KB region)
 //    0x3A040040             : Buffer 1 (288x216 RGB565; 256KB region)
 //    0x3A080000             : Cart data buffer (past video buffers)
@@ -160,6 +162,31 @@ localparam [28:0] CART_DATA_ADDR = FB_QW_BASE + 29'h10000;  // cart path gated o
 // producer — produce exactly one frame per scan into the non-displayed buffer instead
 // of free-running at ~60fps and racing the buffer switch (which tore the analog output).
 localparam [28:0] VSYNC_ADDR      = FB_QW_BASE + 29'h0E000; // debug vblank-counter writeback (in-region)
+// ── [Phase 3 B2] SCANOUT-PERIOD COUNTER (host-readable) ──────────────────────────────────
+// Closes Phase 2 open question 4: C_DONE (0x3B000028) counts FABRIC completions, which
+// is NOT the displayed frame rate. This is the only measurement of the ACTUAL scanout
+// period — the frame boundary the timing generator produces and this reader scans.
+//
+//   SCANFRM_ADDR = FB_QW_BASE + 0x0E003  =  byte 0x3BFB0018  (ship FB_QW_BASE 0x3BF40000)
+//     +0x3BFB0018 (dword, ddr_din[31:0])  = scan_frame_cnt   free-running, monotonic,
+//         wraps at 2^32. Increments EXACTLY ONCE per scanout frame boundary (the
+//         new_frame pulse from openbor_video_timing, resynchronised to ddr_clk).
+//     +0x3BFB001C (dword, ddr_din[63:32]) = scan_period_cyc  ddr_clk (clk_sys, 98.4375
+//         MHz) cycles between the last two frame boundaries. Nominal 59.92 Hz =
+//         1,642,672 cycles; ms = scan_period_cyc / 98437.5.
+//
+//   Host use (the bench takes a DELTA over a window, exactly like C_DONE):
+//     n0=$(busybox devmem 0x3BFB0018 32); sleep 10; n1=$(busybox devmem 0x3BFB0018 32)
+//     scanout fps = (n1 - n0) / 10        # 0 delta => scanout stopped, not "slow"
+//   Both words are written in ONE 64-bit DDR beat, so a qword read is a coherent pair.
+//
+//   Published from the per-frame writeback chain (ST_WRITE_SCANFRM, the tail of the
+//   JOY/VSYNC chain) in EVERY build — SCANOUT_ONLY ship builds included, unlike
+//   VSYNC_ADDR which ship builds skip. Cost: one extra 1-qword DDR write per frame.
+//   Placement: above BUF1-end (0x3BFA5840) and below DIAG_ADDR (0x3BFF0000), in the
+//   same sentinel-clean tail the VSYNC/beacon probes already own; qwords +0/+1/+2 of
+//   VSYNC_ADDR are taken (vsync, dbg_addr/dbg_diag, beacon), +3 was spare.
+localparam [28:0] SCANFRM_ADDR    = VSYNC_ADDR + 29'd3;     // = byte 0x3BFB0018
 // [reader-health instrument] SOLARUS_DBG_PROBES-only per-frame reader-health record.
 // Placed in the tail (byte 0x3BFF0000) that device sentinels proved clean/unused —
 // well above BUF1-end (0x3BFA5840), clear of ctrl/joy/buffers, so a devmem peek can
@@ -317,6 +344,7 @@ localparam [4:0] ST_PAINT            = 5'd20;  // blitter paint-test rectangle
 localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti-tearing)
 localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
 localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven liveness beacon
+localparam [4:0] ST_WRITE_SCANFRM    = 5'd24;  // [Phase 3 B2] scanout frame counter + period
 
 // [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
 // {dbg_blt, beacon_cnt} to VSYNC_ADDR+2 (byte 0x3A070010) from ST_IDLE. Timer-
@@ -327,6 +355,22 @@ localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven 
 reg [21:0] beacon_tick;
 reg        beacon_pending;
 reg [31:0] beacon_cnt;
+
+// [Phase 3 B2] scanout-period instrument — see SCANFRM_ADDR above for the host contract.
+// CDC: ALL THREE registers live in ddr_clk. The ONLY domain crossing is the pre-existing
+// 1-bit new_frame -> new_frame_ddr 3-FF synchroniser (#103), which already yields exactly
+// one ddr_clk pulse per clk_vid frame boundary; new_frame is held for a full ce_pix period
+// (9 CLK_VIDEO cycles = ~167 ns) so it can never be missed by the ~10.2 ns ddr_clk. No
+// multi-bit value ever crosses a clock boundary, and the host reads the pair through the
+// single 64-bit DDR write below, so no gray code / handshake is needed — or possible to
+// get wrong — here.
+//
+// Counted on new_frame_ddr, NOT at the writeback state: if a publish is ever delayed past
+// a frame the count still reflects reality (the delta just lands one write later), which
+// is the property the host measurement depends on.
+reg [31:0] scan_frame_cnt;   // monotonic, +1 per scanout frame boundary
+reg [31:0] scan_free_cyc;    // ddr_clk cycles since the last boundary (reset each frame)
+reg [31:0] scan_period_cyc;  // captured scan_free_cyc: cycles between the last two frames
 
 reg  [4:0]  state;
 reg  [31:0] ctrl_word;
@@ -464,11 +508,25 @@ always @(posedge ddr_clk) begin
         beacon_tick        <= 22'd1;
         beacon_pending     <= 1'b0;
         beacon_cnt         <= 32'd0;
+        scan_frame_cnt     <= 32'd0;
+        scan_free_cyc      <= 32'd0;
+        scan_period_cyc    <= 32'd0;
     end
     else begin
         // [wedge probe v5] beacon timer — free-running, independent of new_frame.
         beacon_tick <= beacon_tick + 22'd1;
         if (beacon_tick == 22'd0) beacon_pending <= 1'b1;
+
+        // [Phase 3 B2] scanout-period instrument. Free-running in ddr_clk; the frame
+        // boundary is the already-synchronised new_frame_ddr pulse. The later
+        // scan_free_cyc assignment wins on a boundary cycle, so the free counter
+        // restarts at 0 and scan_period_cyc holds the exact inter-boundary cycle count.
+        scan_free_cyc <= scan_free_cyc + 32'd1;
+        if (new_frame_ddr) begin
+            scan_frame_cnt  <= scan_frame_cnt + 32'd1;
+            scan_period_cyc <= scan_free_cyc + 32'd1;
+            scan_free_cyc   <= 32'd0;
+        end
         lb_we <= 1'b0;
         if (fifo_aclr_cnt != 4'd0) fifo_aclr_cnt <= fifo_aclr_cnt - 4'd1;
         if (!ddr_busy) ddr_rd <= 1'b0;
@@ -641,10 +699,13 @@ always @(posedge ddr_clk) begin
                     ddr_din      <= {32'd0, joystick_3};
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
+                    // [Phase 3 B2] the SCANOUT_ONLY ship path no longer returns straight
+                    // to ST_POLL_CTRL: it tails through ST_WRITE_SCANFRM so the scanout
+                    // frame counter is published in EVERY build (VSYNC_ADDR stays skipped).
 `ifdef SOLARUS_DBG_PROBES
                     state        <= ST_WRITE_VSYNC;
 `else
-                    state        <= SCANOUT_ONLY ? ST_POLL_CTRL : ST_WRITE_VSYNC;
+                    state        <= SCANOUT_ONLY ? ST_WRITE_SCANFRM : ST_WRITE_VSYNC;
 `endif
                 end
             end
@@ -701,6 +762,23 @@ always @(posedge ddr_clk) begin
                 if (!ddr_busy) begin
                     ddr_addr     <= VSYNC_ADDR + 29'd1;
                     ddr_din      <= {dbg_diag, dbg_addr};
+                    ddr_burstcnt <= 8'd1;
+                    ddr_we       <= 1'b1;
+                    state        <= ST_WRITE_SCANFRM;
+                end
+            end
+
+            // [Phase 3 B2] scanout-period counter publish — the LAST link of the
+            // per-frame writeback chain on every path (ship SCANOUT_ONLY comes here
+            // straight from ST_WRITE_JOY3, probe builds via ST_WRITE_VSYNC/DBGA), so
+            // it runs exactly once per consumed new_frame. See SCANFRM_ADDR above:
+            //   [31:0]  scan_frame_cnt  (byte 0x3BFB0018) — host takes a delta
+            //   [63:32] scan_period_cyc (byte 0x3BFB001C) — ddr_clk cyc between frames
+            // One 64-bit beat => the pair is always coherent for a qword read.
+            ST_WRITE_SCANFRM: begin
+                if (!ddr_busy) begin
+                    ddr_addr     <= SCANFRM_ADDR;
+                    ddr_din      <= {scan_period_cyc, scan_frame_cnt};
                     ddr_burstcnt <= 8'd1;
                     ddr_we       <= 1'b1;
                     state        <= ST_POLL_CTRL;

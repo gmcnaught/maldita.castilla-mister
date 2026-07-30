@@ -98,6 +98,10 @@ Possibly a fencepost in the clear width, or a horizontal analogue of the known
 - `root@192.168.20.81` (passwordless). Peek regs: `busybox devmem <addr> 32`.
   C_SUBMIT `0x3B000000`, C_DONE `0x3B000028`, C_STATUS `0x3B000030`, wedge probe A
   `0x3B00003C`, B `0x3B000034`, scanout ctrl `0x3BF40000`, reader DIAG `0x3BFF0000`.
+- **Scanout frame counter `0x3BFB0018`** (+ frame period in clk_sys cycles at `0x3BFB001C`).
+  `C_DONE` counts FABRIC completions; this counts DISPLAYED frames. Take a delta over a
+  window: `scanout fps = (n1-n0)/seconds`; `ms = devmem 0x3BFB001C / 98437.5`. Defined in
+  `fpga/rtl/openbor_video_reader.sv` (`SCANFRM_ADDR`), gated by `tb_reader_ddr`.
 - Load the core from the MiSTer menu under `_Other` (the `main=` hook in `MiSTer.ini`
   `[Maldita Castilla]` launches the wrapper). `load_core` via `/dev/MiSTer_cmd` behaves the same.
 - Check `ps | grep /media/fat/MiSTer` before trusting `load_core` — if the frontend is not
