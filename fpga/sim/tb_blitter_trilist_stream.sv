@@ -302,6 +302,16 @@ module `STREAM_TB_NAME;
   // A-pipeline occupancy: cycles with at least one of the six stages live, and the
   // FIFO pushes it produces (must equal pix_covered -- every dispatched pixel is
   // pushed exactly once, which is what the drain-condition mutation breaks).
+  //
+  // CAVEAT for anyone tuning TEXFIFO_D or hunting a pipeline bubble: ax_live is an OR
+  // over blt.ax_v, so PER-STAGE occupancy is no longer observable from the CYC/CYCX
+  // lines. Pre-3b each stage was a distinct pa encoding and occ_pa[1..6] gave six
+  // separate counts; now the six stages advance in lockstep every cycle, so per-stage
+  // counts would all be equal to the push count anyway and the informative quantity is
+  // the OR (how much of the frame has ANY pixel in flight) plus pa_hold (how much the
+  // dispatcher was throttled). If a future change makes the stages able to advance
+  // INDEPENDENTLY -- e.g. a variable-latency stage, or per-stage back-pressure -- this
+  // single OR stops being sufficient and the per-bit counts have to come back.
   wire ax_live   = umbrella && blt.ax_busy;
   wire ax_push   = umbrella && blt.ax_v[5];
 

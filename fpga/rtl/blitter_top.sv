@@ -493,11 +493,17 @@ module blitter_top #(
     // per-pixel latched intermediates
     reg  [7:0]   cr_q, cg_q, cb_q, ca_q;   // interpolated colour for the blend
     reg  [1:0]   tex_lane_q;               // 16-bit lane within the fetched texel qword
-    // pa-private pipeline register carrying THIS pixel's texel qword tag from A_ADDR2 to
-    // A_ISSUE. tri_p0_addr must NOT be (ab)used for this hand-carry: pb's B_FILL demand-miss
-    // write (`tri_p0_addr <= {b_qtag,3'd0}`) is a second writer of that register in the same
-    // always block, and can clobber pa's in-flight address on a same-cycle collision or during
-    // any pf_full stall in A_ISSUE — see docs/superpowers/.../uvfull-rootcause-report.md.
+    // Pipeline-private register carrying THIS pixel's texel qword tag from the addr2 stage
+    // (ax_v[4]) to the issue stage (ax_v[5]). tri_p0_addr must NOT be (ab)used for this
+    // hand-carry: pb's B_FILL demand-miss write (`tri_p0_addr <= {b_qtag,3'd0}`) is a second
+    // writer of that register in the same always block and can clobber pa's in-flight address
+    // on a same-cycle collision — see docs/superpowers/.../uvfull-rootcause-report.md.
+    // [pipeline stage 3b] CORRECTION to this note: the second half of the original hazard,
+    // "or during any pf_full stall in A_ISSUE", no longer exists — A_ISSUE is gone and the
+    // issue STAGE cannot stall (the credit scheme makes pf_full unreachable at a push, see
+    // ax_cred below). The same-cycle-collision half is unchanged and still the reason this
+    // register exists, so do not fold pa_qtag back into tri_p0_addr on the strength of the
+    // stall having gone away.
     reg  [23:0]  pa_qtag;                  // pa-private: this pixel's SDRAM qword tag
     reg  [15:0]  texel_q, dst_q;           // fetched texel + dst pixel
     reg  [14:0]  dst_qw_q;                 // comp_fbram qword index for this pixel
@@ -580,7 +586,8 @@ module blitter_top #(
     // unconditionally every cycle, the only hold is on the walk cursor in A_PIX, and
     // A_SEEK/A_ROWY are free to make row progress while the dispatcher is credit-starved.
     reg  [5:0]   ax_v;                     // stage valid bits (see above)
-    reg  [3:0]   ax_cred;                  // dispatched-but-not-yet-popped pixels, 0..TEXFIFO_D
+    // ax_cred is declared further down, immediately after TEXFIFO_D — its width is derived
+    // from that depth and the two must not be editable apart. See the note there.
     // Carries for the values whose PRODUCER and CONSUMER are more than one stage apart
     // (everything else — wu_q.., pp_*, mul_*, itu_q/itv_q, tex_row, pa_qtag — is written
     // by stage k and read by stage k+1, so the existing single copy already IS that
@@ -602,6 +609,30 @@ module blitter_top #(
     // = 75 bits. Pointer-with-extra-MSB scheme gives full/empty disambiguation.
     localparam integer TEXFIFO_D  = 8;
     localparam integer TEXFIFO_AW = 3;      // $clog2(TEXFIFO_D)
+    // [pipeline stage 3b] ax_cred lives HERE, next to the depth it is derived from,
+    // rather than up with the other ax_* registers: its width is a function of
+    // TEXFIFO_D and the two must never be edited apart (see the issue stage's
+    // "THREE THINGS MUST MOVE TOGETHER" note). Keeping them adjacent is the cheapest
+    // way to make that impossible to miss -- and Verilog requires it anyway, since
+    // $clog2(TEXFIFO_D+1) cannot reference a localparam declared further down.
+    // ax_cred holds 0..TEXFIFO_D INCLUSIVE, so its width must be $clog2(TEXFIFO_D+1), NOT
+    // $clog2(TEXFIFO_D). DERIVED, never hand-written: a fixed [3:0] happens to be right at
+    // TEXFIFO_D=8 but becomes a WIDTH TRAP the moment the depth is raised (the obvious next
+    // experiment — see the prefetch-lead note in the Task 7 report). At TEXFIFO_D=16 a 4-bit
+    // ax_cred makes `ax_cred < TEXFIFO_D` a TAUTOLOGY (the reg cannot reach 16), so the
+    // dispatcher would never throttle — and because the credit scheme is what let the
+    // `if (!pf_full)` guard be removed from the issue stage, there is nothing downstream to
+    // catch it: it would silently overrun the payload FIFO.
+    localparam integer AX_CW = $clog2(TEXFIFO_D+1);
+    reg  [AX_CW-1:0] ax_cred;              // dispatched-but-not-yet-popped pixels, 0..TEXFIFO_D
+`ifndef SYNTHESIS
+    // Belt-and-braces on the paragraph above, in case AX_CW is ever hand-overridden rather
+    // than derived. Elaboration-time, so it costs nothing and cannot be missed.
+    initial if ((1 << AX_CW) < (TEXFIFO_D + 1)) begin
+        $display("FAIL 3B-CREDW: ax_cred is %0d bits, which cannot represent TEXFIFO_D=%0d; the ax_room compare is a tautology and the dispatcher will overrun the FIFO", AX_CW, TEXFIFO_D);
+        $finish;
+    end
+`endif
     localparam integer PW = 32+15+2+24+2;   // payload width = 75
     reg  [PW-1:0] pf_mem [0:TEXFIFO_D-1];
     reg  [TEXFIFO_AW:0] pf_wr, pf_rd;       // extra MSB for full/empty disambiguation
@@ -1179,7 +1210,7 @@ module blitter_top #(
             snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             tri_bbox_neg<=1'b0; sk_dir_set<=1'b0; sk_left<=1'b0;
-            ax_v<=6'd0; ax_cred<=4'd0;   // [pipeline stage 3b]
+            ax_v<=6'd0; ax_cred<={AX_CW{1'b0}};   // [pipeline stage 3b]
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
             tri_surf_rd_en<=1'b0; tri_src_surface<=1'b0;   // [app-surface v1]
@@ -1579,7 +1610,7 @@ module blitter_top #(
                     // ax_busy low and pf_empty high (see the drain test), so nothing is
                     // being discarded here — this is belt-and-braces, matching the
                     // pre-existing pf_wr/pf_rd reset.
-                    ax_v<=6'd0; ax_cred<=4'd0;
+                    ax_v<=6'd0; ax_cred<={AX_CW{1'b0}};
                     state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
@@ -1614,7 +1645,11 @@ module blitter_top #(
                 // exactly one driver for each: a dispatch and a pop in the SAME cycle
                 // net to zero, which a pair of separate increments/decrements in the two
                 // case arms could not express (the later NBA would simply win).
-                ax_cred <= ax_cred + {3'd0, ax_disp} - {3'd0, ax_pop};
+                // Width-agnostic on purpose: the 1-bit ax_disp/ax_pop are zero-extended
+                // to ax_cred's width by the assignment's context, so this line survives a
+                // TEXFIFO_D change. It was `{3'd0, ax_disp}` -- correct at AX_CW==4 and a
+                // silent truncation at any other width.
+                ax_cred <= ax_cred + ax_disp - ax_pop;
                 ax_v    <= {ax_v[4:0], ax_disp};
                 // ==== sub-FSM A: coverage walk (pa) -> the ax_v-clocked mul/addr/issue
                 //      pipeline (below the case) -> the payload FIFO ====
@@ -1864,8 +1899,19 @@ module blitter_top #(
                 // absence is a load-bearing consequence of the credit scheme, not an
                 // oversight: ax_cred <= TEXFIFO_D bounds (pixels in the pipe + pixels in
                 // the FIFO), and the pixel being pushed is still counted in the pipe, so
-                // FIFO occupancy here is at most TEXFIFO_D-1. If TEXFIFO_D or the credit
-                // bound is ever changed independently of the other, restore the guard.
+                // FIFO occupancy here is at most TEXFIFO_D-1.
+                //
+                // THREE THINGS MUST MOVE TOGETHER, and only the first two are obvious:
+                //   1. TEXFIFO_D / TEXFIFO_AW (the FIFO's own depth and pointer width)
+                //   2. the `ax_room` bound at the ax_room declaration
+                //   3. **ax_cred's WIDTH** — it must stay $clog2(TEXFIFO_D+1), i.e. wide
+                //      enough for the INCLUSIVE value TEXFIFO_D. That is why AX_CW is
+                //      derived rather than written: at TEXFIFO_D=16 a 4-bit ax_cred makes
+                //      `ax_cred < TEXFIFO_D` a tautology, the dispatcher never throttles,
+                //      and with this guard removed nothing downstream notices. Sim catches
+                //      it (3B-CREDW at elaboration, then 3B-PFFULL below); synthesis will
+                //      not. If any of the three is ever changed independently of the
+                //      others, restore the `if (!pf_full)` guard.
                 if (ax_v[5]) begin
 `ifndef SYNTHESIS
                     // The credit invariant, ASSERTED rather than trusted: this is what
@@ -1875,7 +1921,7 @@ module blitter_top #(
                         $display("FAIL 3B-PFFULL: A-pipeline push into a FULL payload FIFO at t=%0t (ax_cred=%0d) -- credit accounting is broken", $time, ax_cred);
                         $finish;
                     end
-                    if (ax_cred == 4'd0) begin
+                    if (ax_cred == {AX_CW{1'b0}}) begin
                         $display("FAIL 3B-CRED0: A-pipeline push with zero credits outstanding at t=%0t", $time);
                         $finish;
                     end
