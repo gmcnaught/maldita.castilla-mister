@@ -449,7 +449,16 @@ module blitter_top #(
 
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
-    reg  [15:0]  tri_ox;                               // bbox-min x (row-wrap target)
+    reg  [15:0]  tri_ox;                               // bbox-min x (seek's left clamp)
+    // [span walk] the ROW's first covered x, i.e. where A_ROWY restarts the next row.
+    // The pre-span walk restarted every row at tri_ox and paid one coverage test per
+    // bbox column; this holds the previous row's SPAN START so the seek only has to
+    // travel |s(y+1)-s(y)| columns (see the span-walk block comment below).
+    reg  [15:0]  row_px;
+    reg          row_pend;                             // dispatched pixel sat at tri_maxx: A_ISSUE -> A_ROWY
+    reg          sk_dir_set;                           // this row's seek direction is locked
+    reg          sk_left;                              // locked direction: 1=leftward, 0=rightward
+    reg          tri_bbox_neg;                         // bbox-max went NEGATIVE -> reject the triangle
     // [pipeline stage 1] The (px,py)+accumulator "cursor" is now advanced at the
     // moment a pixel is DISPATCHED from S_TRI_PIX (not 12 cycles later at the tail),
     // decoupling coverage/attr generation from the datapath depth so the walk can
@@ -460,7 +469,15 @@ module blitter_top #(
     reg  [15:0]  pxs, pys;                             // dispatched pixel's (px,py) snapshot
     reg  [31:0]  tri_vbase;                            // this triangle's first vertex-qword addr
     reg  signed [63:0] w0, w1, w2;                     // running coverage edges (this pixel)
-    reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=ox)
+    reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=row_px)
+    // [span walk] the same three edges one column to the LEFT (x = tri_px-1). The
+    // leftward seek needs to know whether the left NEIGHBOUR is covered; carrying it
+    // as a register keeps that decision a sign-bit test instead of putting three
+    // 64-bit subtracts in front of the A_SEEK branch. Maintained by the same moves as
+    // w0/w1/w2: a right step COPIES w->wm (no adder), a left step copies wm->w and
+    // subtracts one dx from wm, a row step adds dy to both.
+    reg  signed [63:0] w0m, w1m, w2m;                  // coverage edges at x = tri_px-1
+    reg  signed [63:0] row_w0m, row_w1m, row_w2m;      // ... at x = row_px-1
     // [timing/DSP] weighted attr sums are 48-bit in the setup (ts_W*_0 / ts_dW*)
     // and stay within that envelope over the bbox walk (see blt_tri_setup header),
     // so hold them in 48-bit — not 64 — to keep the per-pixel W*area_recip
@@ -486,7 +503,10 @@ module blitter_top #(
     // sub-FSMs that run every cycle while the main state sits at the umbrella
     // S_TRI_RUN, overlapping one pixel's blend/write (B) with the next pixel's
     // address-gen + texel fetch (A):
-    //   pa (address-gen): walk coverage -> W*recip mul -> texel addr -> issue P_SRC read
+    //   pa (address-gen): span walk -> W*recip mul -> texel addr -> issue P_SRC read
+    //       ([span walk] the walk is A_SEEK -> A_PIX* -> A_ROWY per row: locate the
+    //        row's covered interval, emit it left-to-right, step the row. It no longer
+    //        tests every bbox column -- see the span-walk block comment further down.)
     //   pb (consume+blend): wait texel -> dst read -> 3-stage blend -> comp_fbram write
     // They rendezvous through a depth-TEXFIFO_D payload FIFO (pf_mem), so A can run up
     // to TEXFIFO_D pixels ahead of B. Because A computes pixel N+1 (clobbering the live
@@ -494,8 +514,13 @@ module blitter_top #(
     // popped from the FIFO (b_* regs) rather than the live regs. Triangle
     // constants (c_blend/c_alpha/c_src_*) are stable while pixels are in flight (the
     // pipe drains before the next triangle's setup), so they need no snapshot.
-    localparam [2:0] A_PIX=3'd0, A_MUL0=3'd1, A_MUL1=3'd2, A_MUL=3'd3,
-                     A_ADDR=3'd4, A_ADDR2=3'd5, A_ISSUE=3'd6, A_DONE=3'd7;
+    // [span walk] pa widened 3 -> 4 bits for A_SEEK / A_ROWY. Encodings 0..7 are
+    // UNCHANGED so historical wedge-probe pa values still decode as they always did;
+    // the probe WORD LAYOUT did have to shift by one bit (see wedge_snap below).
+    localparam [3:0] A_PIX=4'd0, A_MUL0=4'd1, A_MUL1=4'd2, A_MUL=4'd3,
+                     A_ADDR=4'd4, A_ADDR2=4'd5, A_ISSUE=4'd6, A_DONE=4'd7,
+                     A_SEEK=4'd8,     // find this row's FIRST covered x
+                     A_ROWY=4'd9;     // step to the next row from the row-start snapshot
     // pb widened to 4 bits: the qword-BRAM read is pipelined through B_LOOK (present the
     // slot as a REGISTERED read address so tq_data infers M10K) and B_WAIT (stall on a
     // demand/prefetch fill, then re-read). This breaks the b_qtag -> 256-entry distributed
@@ -517,7 +542,7 @@ module blitter_top #(
                      // [app-surface v1] surface texel read: issue surf_rd (B_SURF_W is the
                      // 1-cyc BRAM latency), latch the texel (B_SURF_C), then dst/blend.
                      B_SURF_W=4'd9, B_SURF_C=4'd10;
-    reg  [2:0]   pa;                       // address-gen sub-FSM state
+    reg  [3:0]   pa;                       // address-gen sub-FSM state
     reg  [3:0]   pb;                       // consume+blend sub-FSM state
 
     // [Task 2] depth-D payload FIFO decouples pa from pb: pa pushes each pixel's
@@ -652,8 +677,13 @@ module blitter_top #(
     // (max continuous fill_busy), and the bbox (runaway-walk check), all latched at the peak of
     // dbg_stuck (deepest dwell) and published on the NEXT control-block write after recovery
     // (a stuck blitter writes nothing, so we can't publish DURING the stall — latch + defer).
-    //   word A -> C_SRCSEL.hi  (host 0x3B00003C): [5:0]=state_at_peak [8:6]=pa [12:9]=pb
-    //             [13]=fill_busy_at_peak [14]=fb_dma_busy_at_peak [31:16]=peak_stuck[23:8]
+    //   word A -> C_SRCSEL.hi  (host 0x3B00003C): [5:0]=state_at_peak [9:6]=pa [13:10]=pb
+    //             [14]=fill_busy_at_peak [15]=fb_dma_busy_at_peak [31:16]=peak_stuck[23:8]
+    // ⚠ LAYOUT CHANGED (span walk): pa grew 3 -> 4 bits (A_SEEK/A_ROWY), consuming the
+    // one spare bit, so pb/fill/fbdma each shifted UP by one. pa/pb VALUES 0..7 still
+    // mean what they always meant; the FIELD POSITIONS above do not match device dumps
+    // taken before this commit. Decode pre-span-walk word A with the old layout
+    // ([8:6]=pa [12:9]=pb [13]=fill [14]=fbdma).
     //   word B -> C_STATUS.hi  (host 0x3B000034): max_fbdma_run[31:0] (copy-stall severity)
     // Read (v3): state_at_peak==44 (S_SNAP_DRAIN) + fb_dma_busy_at_peak=1 + max_fbdma_run huge
     // => comp_fb_dma cannot finish its copy (its DDR writes are not being accepted => the
@@ -664,7 +694,7 @@ module blitter_top #(
     // Placed AFTER pa/pb/fill_busy/tri_max* decls: `default_nettype none` forbids forward refs.
     reg  [23:0] peak_stuck;
     reg  [5:0]  state_at_peak;
-    reg  [2:0]  pa_at_peak;
+    reg  [3:0]  pa_at_peak;
     reg  [3:0]  pb_at_peak;
     reg         fill_at_peak;
     reg  [15:0] maxx_at_peak, maxy_at_peak;
@@ -685,7 +715,7 @@ module blitter_top #(
     reg         fbdma_at_peak;   // was comp_fb_dma mid-copy at the deepest dwell?
     always @(posedge clk) begin
         if (rst) begin
-            peak_stuck<=24'd0; state_at_peak<=6'd0; pa_at_peak<=3'd0; pb_at_peak<=4'd0;
+            peak_stuck<=24'd0; state_at_peak<=6'd0; pa_at_peak<=4'd0; pb_at_peak<=4'd0;
             fill_at_peak<=1'b0; maxx_at_peak<=16'd0; maxy_at_peak<=16'd0;
             fill_run<=24'd0; max_fill_run<=24'd0;
             fbdma_run<=32'd0; max_fbdma_run<=32'd0; fbdma_at_peak<=1'b0;
@@ -713,7 +743,7 @@ module blitter_top #(
     // word A (host 0x3B00003C): peak_stuck magnitude replaces max_fill_run — device-measured
     // wd_fire_count==0 and fill_at_peak has never been the story, whereas the DWELL DEPTH is
     // what distinguishes "0.17s saturated" from a brief hiccup. bit14 = fbdma_at_peak (new).
-    wire [31:0] wedge_snap  = {peak_stuck[23:8], 1'b0, fbdma_at_peak, fill_at_peak,
+    wire [31:0] wedge_snap  = {peak_stuck[23:8], fbdma_at_peak, fill_at_peak,
                                pb_at_peak, pa_at_peak, state_at_peak};
     // word B (host 0x3B000034): the bbox is retired (maxx/maxy read `FB_W-1/`FB_H-1 = 287/215,
     // the legitimate full-screen composite quad, never diagnostic). Carries the copy-stall
@@ -944,35 +974,124 @@ module blitter_top #(
                             : (tri_maxx_c < 0 ? 16'd0 : tri_maxx_c[15:0]);
     wire [15:0] tri_maxy_cl = (tri_maxy_c > TRI_MAXY_LIM) ? TRI_MAXY_LIM[15:0]
                             : (tri_maxy_c < 0 ? 16'd0 : tri_maxy_c[15:0]);
+    // [span walk] ...and a bbox-max that came out NEGATIVE means the triangle is
+    // entirely off-screen left/above. The clamps above cannot express that (tri_maxx
+    // is unsigned) and used to RAISE it to 0, so S_TRI_SWAIT's (ts_ox > tri_maxx)
+    // guard did not fire and the walk ground through a degenerate 1-column strip: 12
+    // triangles / 1,160 wasted coverage tests per quiet frame (Task 5 §3.3). The
+    // refmodel is unambiguous -- blt_tri.c clamps maxx only on the HIGH side, so
+    // `for(px=minx; px<=maxx)` with minx clamped to 0 and maxx<0 runs ZERO iterations
+    // -- hence rejecting here is bit-exact, not a behaviour change. Fixed with the span
+    // walk rather than after it because the span walk would otherwise make those
+    // triangles COST MORE (an empty row is a seek + a row step, i.e. ~2 cycles/row,
+    // where the bbox walk paid 1): leaving it would have booked a regression.
+    wire tri_bbox_neg_c = (tri_maxx_c < 0) || (tri_maxy_c < 0);
 
-    // [pipeline stage 1] advance the walk cursor one pixel: within a row step the
-    // running edge/attr accumulators by their per-x deltas; at row end wrap x to the
-    // bbox-min and step the row-start latches by the per-y deltas; past the last row
-    // clear tri_cv (cursor exhausted). Bit-identical to the former S_TRI_ADV tail,
-    // but now invoked at DISPATCH time so the cursor is decoupled from datapath depth.
-    // The <= assignments schedule on the calling always block's clock edge.
-    task automatic advance_cursor;
+    // ══ [span walk] per-row covered-interval traversal ═════════════════════════
+    //  Replaces the bbox scan (one coverage test per bbox column, ~2.03x the covered
+    //  pixels on the captured quiet frame). Each edge function is LINEAR in x --
+    //  w_k(x) = w_k(x0) + (x-x0)*dw_k/dx -- so per row the covered set {x : w0>=0 &&
+    //  w1>=0 && w2>=0} is the intersection of three half-lines, i.e. a single
+    //  CONTIGUOUS interval. The walk therefore only has to find that interval's LEFT
+    //  end, emit rightward until coverage drops (or tri_maxx), and move on.
+    //
+    //  NO DIVIDE. The obvious closed form for the interval end is
+    //  ceil(-w_k/dw_kdx) -- a per-row divide, and comb divide is this design's known
+    //  STA failure mode (see blt_tri_setup's UNROLL=1 note). Instead the endpoint is
+    //  found INCREMENTALLY from the PREVIOUS row's endpoint, using the same adders the
+    //  walk already had: the left end s(y) of a triangle moves by |s(y+1)-s(y)|
+    //  columns per row, and summed over the triangle that telescopes to the total
+    //  variation of a convex boundary, i.e. O(bbox width) -- NOT O(width) per row.
+    //  Measured: 2.9 seek+rowstep cycles per row on the quiet frame.
+    //
+    //  DIRECTION IS LOCKED per row (sk_dir_set/sk_left), which is a correctness
+    //  requirement, not a tuning knob. Deciding the direction fresh each cycle from
+    //  the violated edges LIVELOCKS on an EMPTY row: with a lower bound s=5 and an
+    //  upper bound e=4, x=4 sees only the lower bound violated ("go right") and x=5
+    //  only the upper ("go left"), forever. No single x sees both violated, so the
+    //  conflict test cannot catch it. A locked direction makes px strictly monotone
+    //  within a row, so the seek is bounded by the bbox width by construction. (This
+    //  was found by the Python cycle-model of this FSM, which hit its runaway guard.)
+    //
+    //  BIT-EXACTNESS is by construction, not by tolerance: the emitted pixel SET and
+    //  ORDER are identical to the bbox walk (same rows in increasing y, same covered
+    //  x in increasing order), and the accumulator values are path-independent exact
+    //  integer sums of the same per-x/per-y deltas. The seek never leaves
+    //  [tri_ox, tri_maxx], so it visits no position the bbox walk did not.
+    //  Cross-checked against the refmodel's own comparisons (blt_tri.c: edge() sign
+    //  tests with top_left() bias at pixel centres) by the strict bit-exact gate.
+
+    // Coverage of the current cursor, and of its LEFT NEIGHBOUR (the registered w*m).
+    wire sk_cov  = (w0  >= 0) && (w1  >= 0) && (w2  >= 0);
+    wire sk_covm = (w0m >= 0) && (w1m >= 0) && (w2m >= 0);
+    // Which way an uncovered cursor must move to reach the interval. An edge violated
+    // with dw/dx>0 is a LOWER bound (go right); with dw/dx<0 an UPPER bound (go left);
+    // with dw/dx==0 the edge is x-independent, so a violation means the WHOLE row is
+    // out (sk_block) -- that is the horizontal-edge case.
+    wire sk_need_r = ((w0<0) && (ts_dw0dx>0)) || ((w1<0) && (ts_dw1dx>0)) || ((w2<0) && (ts_dw2dx>0));
+    wire sk_need_l = ((w0<0) && (ts_dw0dx<0)) || ((w1<0) && (ts_dw1dx<0)) || ((w2<0) && (ts_dw2dx<0));
+    wire sk_block  = ((w0<0) && (ts_dw0dx==0))|| ((w1<0) && (ts_dw1dx==0))|| ((w2<0) && (ts_dw2dx==0));
+    // The row's direction: locked after the first A_SEEK cycle. A cursor that is
+    // already covered can only be at-or-right-of the interval's left end, so it seeks
+    // LEFT for minimality; an uncovered cursor with an upper bound violated is right
+    // of the interval and also seeks left; otherwise it is left of it and seeks right.
+    wire sk_l = sk_dir_set ? sk_left : (sk_cov || sk_need_l);
+
+    // [span walk] one column right: the current edges BECOME the left-neighbour set
+    // (a copy, no adder), and the live accumulators take one dx step.
+    task automatic step_right;
         begin
-            if (tri_px < tri_maxx) begin
-                tri_px <= tri_px + 16'd1;
-                w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
-                Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
-                Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
-            end else if (tri_py < tri_maxy) begin
-                tri_py <= tri_py + 16'd1;
-                tri_px <= tri_ox;
-                row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
-                row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
-                row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
-                row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
-                row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
-                row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
-                row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
-                row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
-                row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
-            end else begin
-                tri_cv <= 1'b0;
-            end
+            tri_px <= tri_px + 16'd1;
+            w0m<=w0; w1m<=w1; w2m<=w2;
+            w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
+            Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
+            Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
+        end
+    endtask
+    // [span walk] one column left: the left-neighbour set BECOMES the current edges,
+    // and the new left neighbour is one further dx back. Only the seek moves left, so
+    // the attribute accumulators need the subtract only here.
+    task automatic step_left;
+        begin
+            tri_px <= tri_px - 16'd1;
+            w0<=w0m; w1<=w1m; w2<=w2m;
+            w0m<=w0m-ts_dw0dx; w1m<=w1m-ts_dw1dx; w2m<=w2m-ts_dw2dx;
+            Wu<=Wu-ts_dWudx; Wv<=Wv-ts_dWvdx; Wr<=Wr-ts_dWrdx;
+            Wg<=Wg-ts_dWgdx; Wb<=Wb-ts_dWbdx; Wa<=Wa-ts_dWadx;
+        end
+    endtask
+    // [span walk] pin the row-start snapshot to wherever the seek finished. This is
+    // what makes the next row's seek short: A_ROWY restarts from the SPAN START, not
+    // from tri_ox, and not from the row's right end either (that would cost a whole
+    // span's worth of leftward steps per row -- the flaw that makes a naive span walk
+    // no cheaper than the bbox scan). Register-to-register copies: no logic.
+    task automatic snap_row;
+        begin
+            row_px<=tri_px;
+            row_w0<=w0; row_w1<=w1; row_w2<=w2;
+            row_w0m<=w0m; row_w1m<=w1m; row_w2m<=w2m;
+            row_Wu<=Wu; row_Wv<=Wv; row_Wr<=Wr; row_Wg<=Wg; row_Wb<=Wb; row_Wa<=Wa;
+        end
+    endtask
+    // [span walk] next row, from the row-start snapshot (NOT from the live cursor,
+    // which the emit phase has already run to the span's right end). Same per-y delta
+    // adds the old row-wrap did, feeding both the live and the snapshot copies.
+    task automatic step_row;
+        begin
+            tri_py <= tri_py + 16'd1;
+            tri_px <= row_px;
+            row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
+            row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
+            row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
+            row_w0m<=row_w0m+ts_dw0dy; w0m<=row_w0m+ts_dw0dy;
+            row_w1m<=row_w1m+ts_dw1dy; w1m<=row_w1m+ts_dw1dy;
+            row_w2m<=row_w2m+ts_dw2dy; w2m<=row_w2m+ts_dw2dy;
+            row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
+            row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
+            row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
+            row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
+            row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
+            row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
         end
     endtask
 
@@ -993,6 +1112,7 @@ module blitter_top #(
             fb_dma_start<=1'b0; // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
+            tri_bbox_neg<=1'b0; row_pend<=1'b0; sk_dir_set<=1'b0; sk_left<=1'b0;
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
             tri_surf_rd_en<=1'b0; tri_src_surface<=1'b0;   // [app-surface v1]
@@ -1349,28 +1469,44 @@ module blitter_top #(
             S_TRI_SETUP: begin
                 tri_setup_start <= 1'b1;
                 tri_maxx <= tri_maxx_cl; tri_maxy <= tri_maxy_cl;
+                // [span walk] register the off-left/above reject alongside the clamps
+                // it cannot express (see tri_bbox_neg_c), for the same reason: keep the
+                // raw-vertex compare cloud out of the S_TRI_SWAIT seed cycle.
+                tri_bbox_neg <= tri_bbox_neg_c;
                 state<=S_TRI_SWAIT;
             end
             // Wait for setup valid; seed bbox + running accumulators at (ox,oy).
-            // Skip degenerate or fully-off (min>max) triangles.
+            // Skip degenerate, off-left/above (negative bbox-max) or fully-off
+            // (min>max) triangles.
             S_TRI_SWAIT: if (ts_valid) begin
-                // guard against registered bbox-max (set at S_TRI_SETUP)
-                if (ts_degenerate || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
+                // guard against registered bbox-max / bbox-neg (set at S_TRI_SETUP)
+                if (ts_degenerate || tri_bbox_neg || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
                     state<=S_TRI_NEXT;
                 else begin
                     tri_ox <= ts_ox;
                     tri_px <= ts_ox;      tri_py <= ts_oy;
+                    row_px <= ts_ox;
                     tri_cv <= 1'b1;        // cursor starts inside the bbox
                     // tri_maxx/tri_maxy already registered at S_TRI_SETUP
                     w0<=ts_w0_0; w1<=ts_w1_0; w2<=ts_w2_0;
                     row_w0<=ts_w0_0; row_w1<=ts_w1_0; row_w2<=ts_w2_0;
+                    // [span walk] left-neighbour edges at x = ox-1. One column outside
+                    // the bbox, and never CONSULTED there (the seek's left move is
+                    // gated on tri_px > tri_ox), but seeded exactly rather than left
+                    // undefined so no branch can ever depend on an x.
+                    w0m<=ts_w0_0-ts_dw0dx; w1m<=ts_w1_0-ts_dw1dx; w2m<=ts_w2_0-ts_dw2dx;
+                    row_w0m<=ts_w0_0-ts_dw0dx; row_w1m<=ts_w1_0-ts_dw1dx;
+                    row_w2m<=ts_w2_0-ts_dw2dx;
                     Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
                     // (the qword cache persists across triangles in a command; it is
                     // dropped only at the per-command STAGE barrier, not here.)
-                    pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
+                    // [span walk] pa starts in A_SEEK, not A_PIX: even the FIRST row
+                    // must have its span start located before any pixel is emitted.
+                    pa<=A_SEEK; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
+                    row_pend<=1'b0; sk_dir_set<=1'b0;
                     state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
@@ -1402,19 +1538,27 @@ module blitter_top #(
                 end
                 // ==== sub-FSM A: coverage walk -> W*recip mul -> texel addr -> issue P_SRC ====
                 case (pa)
-                // Evaluate coverage at (tri_px,tri_py). If covered, LATCH the multiply
-                // operands into single-fanout regs (the six W*area_recip products happen
-                // in A_MUL0 -> pipelined DSP) and dispatch down A; always advance the walk
-                // cursor now (stage-1 decoupling). Non-covered pixels skip in 1 cyc.
+                // [span walk] EMIT phase. A_PIX is only ever entered AT a covered pixel
+                // (A_SEEK found the row's span start) or one column past the previous
+                // one, so its coverage test is now the SPAN-END test rather than a bbox
+                // rejection: the first uncovered cursor ends the row. If covered, LATCH
+                // the multiply operands into single-fanout regs (the six W*area_recip
+                // products happen in A_MUL0 -> pipelined DSP) and dispatch down A,
+                // advancing the cursor at dispatch (stage-1 decoupling).
                 A_PIX: begin
                     if (!tri_cv) begin
-                        pa<=A_DONE;           // cursor exhausted; let B drain
-                    end else if ((w0>=0) && (w1>=0) && (w2>=0)) begin
+                        pa<=A_DONE;           // walk exhausted; let B drain
+                    end else if (sk_cov) begin
                         pxs <= tri_px; pys <= tri_py;
                         wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
                         wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
                         recip_q <= $signed(ts_area_recip);
-                        advance_cursor;
+                        // A span may run to the bbox's right edge. Do NOT step past it
+                        // (the cursor must stay inside the bbox so the seek's clamps and
+                        // the accumulator range are unchanged): hold at tri_maxx and let
+                        // A_ISSUE hand off to A_ROWY when this pixel is queued.
+                        if (tri_px < tri_maxx) step_right;
+                        else                   row_pend <= 1'b1;
                         // [Phase 1 A4] Count at DISPATCH. This branch is taken exactly once
                         // per COVERED pixel (all three edge functions non-negative), before
                         // any downstream work — the denominator cyc/px needs. Deliberately
@@ -1423,7 +1567,51 @@ module blitter_top #(
                         perf_covered_px <= perf_covered_px + 32'd1;
                         pa<=A_MUL0;
                     end else begin
-                        advance_cursor;       // non-covered: skip in 1 cyc, stay in A_PIX
+                        pa<=A_ROWY;           // past the span's right end: next row
+                    end
+                end
+                // [span walk] SEEK phase: find this row's FIRST covered x, one column
+                // per cycle, in the row's locked direction. Costs ~2.9 cycles per row
+                // (seek + row step) against the ~1 cycle per bbox COLUMN it replaces.
+                // See the span-walk block comment above for why the direction is locked
+                // and why this is division-free. Leaving the seek in either direction
+                // pins the row-start snapshot (snap_row) to the cursor, so the next
+                // row starts from THIS row's span start.
+                A_SEEK: begin
+                    if (!sk_dir_set) begin sk_left <= sk_l; sk_dir_set <= 1'b1; end
+                    if (sk_block) begin
+                        // an x-independent edge is violated: no x on this row is covered
+                        snap_row; pa<=A_ROWY;
+                    end else if (sk_l) begin
+                        if (sk_cov) begin
+                            // covered: this is the span start iff the left neighbour is
+                            // NOT covered (or there is no left neighbour inside the bbox)
+                            if ((tri_px == tri_ox) || !sk_covm) begin snap_row; pa<=A_PIX; end
+                            else                                       step_left;
+                        end else if (sk_need_r || (tri_px == tri_ox)) begin
+                            // a LOWER bound became violated while walking left (the
+                            // interval is empty), or the bbox's left edge was reached
+                            snap_row; pa<=A_ROWY;
+                        end else step_left;
+                    end else begin
+                        // rightward: approaching from the left, so the first covered x
+                        // IS the span start -- no minimality check needed
+                        if (sk_cov) begin snap_row; pa<=A_PIX; end
+                        else if (sk_need_l || (tri_px == tri_maxx)) begin
+                            snap_row; pa<=A_ROWY;   // interval empty / bbox right edge
+                        end else step_right;
+                    end
+                end
+                // [span walk] step to the next row from the row-start snapshot, or
+                // finish the triangle. This is the ONLY place tri_cv is cleared.
+                A_ROWY: begin
+                    if (tri_py < tri_maxy) begin
+                        step_row;
+                        sk_dir_set <= 1'b0;   // the new row re-locks its own direction
+                        pa<=A_SEEK;
+                    end else begin
+                        tri_cv <= 1'b0;
+                        pa<=A_DONE;           // walk exhausted; let B drain
                     end
                 end
             // Interpolation stage 1b: two 48x24 partial products per lane, split on
@@ -1553,7 +1741,11 @@ module blitter_top #(
                     {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q,
                      (tri_src_surface ? {9'd0, surf_qw_q} : pa_qtag), tex_lane_q};
                 pf_wr <= pf_wr + 1'b1;
-                pa<=A_PIX;
+                // [span walk] the pixel just queued sat at tri_maxx, so the span ended
+                // with it and there is no next column to test on this row: go straight
+                // to the row step instead of paying an A_PIX cycle to discover that.
+                pa <= row_pend ? A_ROWY : A_PIX;
+                row_pend <= 1'b0;
             end
             // Address-gen drained (cursor exhausted). Idle until B finishes.
             A_DONE: ;

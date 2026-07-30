@@ -17,9 +17,15 @@
 //
 //   wall-clock   = cycles from first pb activity to the LAST pixel retiring, / pixels.
 //     pa and pb run CONCURRENTLY behind the depth-8 payload FIFO, so end-to-end
-//     throughput is max(pa, pb), not pb. pa costs ~8 cyc per RETIRED pixel (7 states
-//     plus ~1 bbox-rejection cycle, since A_PIX re-enters itself for every non-covered
-//     pixel), so wall stays ~8 even once pb drops to 6.
+//     throughput is max(pa, pb), not pb.
+//     [span walk, Phase 3A Task 6] pa USED to cost ~8 cyc per retired pixel: 7 states
+//     plus ~1 bbox-rejection cycle, because A_PIX re-entered itself for every
+//     non-covered bbox column. The walk now derives each row's covered interval
+//     instead of scanning the bbox (A_SEEK/A_PIX/A_ROWY), which deleted that ~1
+//     cycle/pixel and replaced it with ~2.9 cycles per ROW: pa is ~7.1 cyc/px on the
+//     captured frames. So pa and pb have very nearly CONVERGED (7.1 vs 6) and the
+//     EXPIRY note below is now live -- wall tracks pa only barely. The pb figure this
+//     file gates is unaffected either way; it measures pb occupancy directly.
 //
 // Reporting only pb-occupancy would overstate the win as 1.33x; reporting only wall
 // would make a correctly working A2 look like a no-op. The gate is on pb-occupancy —

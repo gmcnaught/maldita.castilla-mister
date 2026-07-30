@@ -71,8 +71,10 @@
 // (implicit) verdict.
 //
 // ── OUTPUT CONTRACT (consumed by Tasks 6/7/8) ───────────────────────────────
-//   CYC total=<n> tri=<n> pix_visits=<n> pix_covered=<n> texwait=<n> wr=<n> \
-//       setup=<n> vfetch=<n> pix=<n> other=<n>
+//   CYC total=<n> tri=<n> pix_visits=<n> pix_covered=<n> rowsetup=<n> \
+//       texwait=<n> wr=<n> setup=<n> vfetch=<n> pix=<n> other=<n>
+// Parse this line BY FIELD NAME, never by position: `rowsetup` was inserted
+// mid-line when the span walk landed, and more fields may follow.
 // total : cycles the fabric is busy on the frame == blt.perf_frame_cyc, the SAME
 //         definition as the device's C_STATUS-published `frame` counter, so
 //         total/98.4375e6 is directly comparable to the device's frame ms.
@@ -82,11 +84,20 @@
 //         are in the `vfetch` bucket (below) but not in `tri` -- that asymmetry
 //         is the RTL's, not this bench's, and it is why total > tri by more than
 //         the CLEAR.
-// pix_visits  : bbox coverage TESTS, i.e. cycles with pa==A_PIX && tri_cv. Each
-//         such cycle evaluates exactly one candidate pixel and advances the
-//         cursor (both A_PIX branches call advance_cursor), so this equals the
-//         analyzer's bbox_px. It is an OCCUPANCY count, not a partition bucket
-//         (pa runs concurrently with pb).
+// pix_visits  : EMIT-phase coverage tests, i.e. cycles with pa==A_PIX && tri_cv.
+//         [span walk] This NO LONGER equals the analyzer's bbox_px. Pre-span-walk
+//         the walk tested every bbox column, so pix_visits == bbox_px (372,644 on
+//         quiet f0, 2.03x the covered pixels -- the bbox tax). A_PIX is now only
+//         entered AT a covered pixel or one column past the previous one, so
+//         pix_visits == pix_covered + one SPAN-END test per row whose span stops
+//         short of tri_maxx. The bbox-column count is no longer measurable here
+//         because the RTL no longer visits those columns -- that is the point.
+//         Still an OCCUPANCY count, not a partition bucket (pa runs with pb).
+// rowsetup    : [span walk] cycles with pa in {A_SEEK, A_ROWY} && tri_cv -- the
+//         per-row cost that BUYS the bbox-tax saving: locating the row's span
+//         start (A_SEEK, one column per cycle in the row's locked direction) and
+//         stepping to the next row from the row-start snapshot (A_ROWY). Quote it
+//         next to pix_visits: pix_visits+rowsetup is what replaced bbox_px.
 // pix_covered : dispatched covered pixels == blt.perf_covered_px (the A_PIX
 //         branch that latches the multiply operands). Equals the analyzer's
 //         covered_px. Independently re-counted TB-side and cross-asserted.
@@ -96,7 +107,13 @@
 //   2 setup  : state in {SETUP,SWAIT}
 //   3 texwait: umbrella && pb==B_WAIT      (== blt.perf_texwait_cyc)
 //   4 wr     : umbrella && pb in {B_WR,B_WR2,B_WR3}
-//   5 pix    : umbrella && pa==A_PIX && tri_cv   (bbox tests NOT shadowed by pb)
+//   5 pix    : umbrella && pa in {A_PIX,A_SEEK,A_ROWY} && tri_cv -- the whole
+//              coverage WALK (emit + row setup), for the cycles not shadowed by a
+//              higher-priority pb bucket. [span walk] widened from A_PIX alone so
+//              the walk's per-row cost stays inside the SAME bucket its per-pixel
+//              cost is in; had A_SEEK/A_ROWY fallen through to `other`, a change
+//              that traded pixel tests for row setup would have looked like a pure
+//              win in `pix` with the cost hidden in the catch-all.
 //   6 other  : everything else -- pa's mul/addr/issue cycles, pb's LOOK/FILL/
 //              SURF cycles, S_TRI_NEXT, the CLEAR fill, ring/control fetch and
 //              the perf publish tail.
@@ -245,18 +262,29 @@ module `STREAM_TB_NAME;
   wire in_setup  = (blt.state == blt.S_TRI_SETUP) || (blt.state == blt.S_TRI_SWAIT);
   wire in_texw   = umbrella && (blt.pb == blt.B_WAIT);
   wire in_wr     = umbrella && ((blt.pb == blt.B_WR) || (blt.pb == blt.B_WR2) || (blt.pb == blt.B_WR3));
-  // one candidate pixel tested per cycle (both A_PIX branches advance the cursor)
-  wire pix_test  = umbrella && (blt.pa == blt.A_PIX) && blt.tri_cv;
+  // [span walk] the walk is now three pa states: A_PIX emits (and its coverage test
+  // doubles as the span-end test), A_SEEK locates the next row's span start, A_ROWY
+  // steps the row. pix_emit is kept SEPARATE from the partition condition because
+  // cov_disp below must not see A_SEEK's own covered cycle (the one that FINDS the
+  // span start and hands off to A_PIX) -- that would double-count the first pixel of
+  // every row against perf_covered_px.
+  wire pix_emit  = umbrella && (blt.pa == blt.A_PIX) && blt.tri_cv;
+  wire row_setup = umbrella && ((blt.pa == blt.A_SEEK) || (blt.pa == blt.A_ROWY))
+                            && blt.tri_cv;
+  wire pix_test  = pix_emit || row_setup;
   // the covered-DISPATCH branch: coverage test passes on all three edge functions.
   // Same condition perf_covered_px increments on (blitter_top.sv ~line 1423);
   // re-derived here so the bench does not just echo the register it is checking.
-  wire cov_disp  = pix_test && ($signed(blt.w0) >= 0) && ($signed(blt.w1) >= 0)
+  wire cov_disp  = pix_emit && ($signed(blt.w0) >= 0) && ($signed(blt.w1) >= 0)
                             && ($signed(blt.w2) >= 0);
 
   integer cyc_total, cyc_tri, cyc_vfetch, cyc_setup, cyc_texw, cyc_wr, cyc_pix, cyc_other;
-  integer pix_visits, tb_covered;
-  // CYCX detail: pa/pb occupancy (overlapping, not a partition) + non-TRILIST cost
-  integer occ_pa [0:7];
+  integer pix_visits, cyc_rowsetup, tb_covered;
+  // CYCX detail: pa/pb occupancy (overlapping, not a partition) + non-TRILIST cost.
+  // occ_pa is [0:15]: pa widened 3 -> 4 bits for the span walk's A_SEEK/A_ROWY, and an
+  // 8-entry array would have SILENTLY DROPPED those two states' counts (iverilog
+  // discards an out-of-bounds array write) -- a plausible-looking zero.
+  integer occ_pa [0:15];
   integer occ_pb [0:15];
   integer cyc_nontri, cyc_vwait;
   integer bi;
@@ -264,9 +292,10 @@ module `STREAM_TB_NAME;
 
   initial begin
     cyc_total=0; cyc_tri=0; cyc_vfetch=0; cyc_setup=0; cyc_texw=0; cyc_wr=0;
-    cyc_pix=0; cyc_other=0; pix_visits=0; tb_covered=0; cyc_nontri=0; cyc_vwait=0;
+    cyc_pix=0; cyc_other=0; pix_visits=0; cyc_rowsetup=0; tb_covered=0;
+    cyc_nontri=0; cyc_vwait=0;
     counting=0;
-    for (bi=0;bi<8;bi=bi+1)  occ_pa[bi]=0;
+    for (bi=0;bi<16;bi=bi+1) occ_pa[bi]=0;
     for (bi=0;bi<16;bi=bi+1) occ_pb[bi]=0;
   end
 
@@ -284,7 +313,8 @@ module `STREAM_TB_NAME;
     else if (pix_test)  cyc_pix    <= cyc_pix    + 1;
     else                cyc_other  <= cyc_other  + 1;
     // occupancy counts (independent of the partition)
-    if (pix_test) pix_visits <= pix_visits + 1;
+    if (pix_emit)  pix_visits    <= pix_visits + 1;
+    if (row_setup) cyc_rowsetup <= cyc_rowsetup + 1;
     if (cov_disp) tb_covered <= tb_covered + 1;
     if (umbrella) begin
       occ_pa[blt.pa] <= occ_pa[blt.pa] + 1;
@@ -390,12 +420,12 @@ module `STREAM_TB_NAME;
       $display("GATE-MISMATCH: tb_covered=%0d != perf_covered_px=%0d", tb_covered, blt.perf_covered_px);
     end
 
-    $display("CYC total=%0d tri=%0d pix_visits=%0d pix_covered=%0d texwait=%0d wr=%0d setup=%0d vfetch=%0d pix=%0d other=%0d",
-             cyc_total, cyc_tri, pix_visits, blt.perf_covered_px, cyc_texw, cyc_wr,
-             cyc_setup, cyc_vfetch, cyc_pix, cyc_other);
-    $display("CYCX nontri=%0d vwait=%0d pa_pix=%0d pa_mul0=%0d pa_mul1=%0d pa_mul=%0d pa_addr=%0d pa_addr2=%0d pa_issue=%0d pa_done=%0d",
+    $display("CYC total=%0d tri=%0d pix_visits=%0d pix_covered=%0d rowsetup=%0d texwait=%0d wr=%0d setup=%0d vfetch=%0d pix=%0d other=%0d",
+             cyc_total, cyc_tri, pix_visits, blt.perf_covered_px, cyc_rowsetup,
+             cyc_texw, cyc_wr, cyc_setup, cyc_vfetch, cyc_pix, cyc_other);
+    $display("CYCX nontri=%0d vwait=%0d pa_pix=%0d pa_mul0=%0d pa_mul1=%0d pa_mul=%0d pa_addr=%0d pa_addr2=%0d pa_issue=%0d pa_done=%0d pa_seek=%0d pa_rowy=%0d",
              cyc_nontri, cyc_vwait, occ_pa[0], occ_pa[1], occ_pa[2], occ_pa[3],
-             occ_pa[4], occ_pa[5], occ_pa[6], occ_pa[7]);
+             occ_pa[4], occ_pa[5], occ_pa[6], occ_pa[7], occ_pa[8], occ_pa[9]);
     $display("CYCX pb_idle=%0d pb_look=%0d pb_fill=%0d pb_wait=%0d pb_wr=%0d pb_wr2=%0d pb_wr3=%0d pb_surfw=%0d pb_surfc=%0d",
              occ_pb[0], occ_pb[1], occ_pb[2], occ_pb[3], occ_pb[6], occ_pb[7],
              occ_pb[8], occ_pb[9], occ_pb[10]);
@@ -415,6 +445,10 @@ module `STREAM_TB_NAME;
     if (cyc_wr !== `STREAM_EXP_WR) begin
       gate_fail = 1'b1;
       $display("GATE-MISMATCH: wr=%0d, hand-computed %0d", cyc_wr, `STREAM_EXP_WR);
+    end
+    if (cyc_rowsetup !== `STREAM_EXP_ROWSETUP) begin
+      gate_fail = 1'b1;
+      $display("GATE-MISMATCH: rowsetup=%0d, hand-computed %0d", cyc_rowsetup, `STREAM_EXP_ROWSETUP);
     end
 `endif
     // partition self-check: the six buckets must reconstruct total exactly.
