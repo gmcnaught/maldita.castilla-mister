@@ -127,7 +127,61 @@ SKIP="tb_profile"
 # defect. Left NON-GATING as a dev tool (real SDRAM co-sim, ~45s wall) rather than
 # promoted to gating; re-promote if it proves stably green over time. See
 # .superpowers/sdd/task-3-report.md, .superpowers/sdd/task-8-report.md.
-NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
+#
+# [Phase 3A Task 5] tb_blitter_trilist_stream is GATING (not in NONGATING below).
+# It replays a CAPTURED DEVICE FRAME of Maldita's draw stream — vectors/stream_quiet_f0_*
+# from gen_tri_stream.c, 106 TRILIST commands / 212 triangles / 48 texture pages — through
+# the production blitter_top and diffs the whole composited WORK bank against the
+# refmodel golden. It is the only bench whose scene is real device geometry rather than a
+# hand-written scenario, so it catches coverage/blend/addressing breakage that only shows
+# up at production scale (48 distinct strides, 78 COLORKEY + 28 COPY draws in one ring, a
+# BLT_F_SRC_SURFACE composite, and triangles clipped off all four screen edges).
+# bad=0/62208 AND bit-exact. ~32 s standalone -> 300 s budget below. The gate is STRICT
+# bit-exactness (exact_bad==0), not the siblings' +-1 LSB tolerance: this bench is the
+# Stage-B oracle for a pixel-walk rewrite and rounding drift lands as a 1-LSB diff.
+# It also prints the CYC/CYCX/MS cycle decomposition Tasks 6-8 predict against; those
+# lines are informational, but five internal cross-checks are gated (TB buckets vs the
+# RTL's own perf_frame_cyc / perf_tri_cyc / perf_texwait_cyc / perf_covered_px, plus the
+# bucket partition summing to the total) — any of which prints RESULT: FAIL.
+# Other frames are runnable by name after regenerating their vectors; see the tb header
+# and gen_tri_golden.mk's stream-vectors target.
+#
+# tb_blitter_trilist_synthquad is the same harness (a 3-line wrapper that `include's it)
+# on the SYNTHETIC single-quad vector set, and it is GATING too. It exists because the
+# captured frames' expected cycle counts are only knowable by running them — the buckets
+# could drift and still look plausible. The synthetic quad's counts are hand-computable
+# from the geometry (pix_covered=120*120=14400, pix_visits=2*121*121=29282, wr=3*14400)
+# and are ASSERTED via STREAM_EXP_*, so this is the calibration anchor for the bucket
+# semantics themselves. ~5 s.
+#
+# [Phase 3A Task 6] tb_blitter_trilist_spanedge is the same harness again, GATING, on a
+# vector set built to close two MEASURED holes in the bit-exact gate: when the span walk
+# landed, two deliberate off-by-ones in the walk's LEFT endpoint (sk_covm's `>=` -> `>`,
+# and the `tri_px == tri_ox` clamp -> `== tri_ox+1`) were caught by NONE of the other ten
+# trilist benches — both need a leftward seek, which the captured frames and the synthetic
+# quad barely exercise. Its five non-overlapping triangles (one off-left-CLAMPED, four with
+# vertices on pixel centres and slope -1 left edges (T3: -2)) make each mutation fail: exact_bad=760
+# and exact_bad=5 respectively. Non-overlapping is load-bearing — an overlapping triangle
+# would overpaint the dropped pixels and re-hide the hole. ~2 s. See the tb header for the
+# per-triangle derivation and why the M1 margin is inherently only a few pixels.
+#
+# [Phase 3B Task 1] tb_blitter_trilist_streamcache is the SAME captured-frame harness
+# with the REAL texel path: `STREAM_REALCACHE` swaps the fixed-3-cycle P_SRC stub for
+# sdram_fb_cache ch5 + the mt48 chip model (the pair tb_blitter_trilist_sdram already
+# co-simulates), leaving everything else — DDR image, behavioral DDR3 + its
+# poll-before-issue gate, buckets, gates — untouched, so the texwait delta against the
+# stub sibling is attributable to texel latency alone. It exists because the stub's
+# `texwait` is a FLOOR (0.013 ms post-levers) and the device's is 3.42 ms; this bench
+# measures the real number and is what decided the Stage-B/Quartus gate. Pre-lever it
+# reproduces device texwait to −0.7% (quiet) / −0.6% (arrival) — see
+# .superpowers/sdd/stageB-task-1-report.md.
+# NONGATING + NIGHTLY_ONLY purely on RUNTIME (mt48 co-sim, ~10x the stub replay's ~30s,
+# and contention-sensitive), NOT because anything about it is known-shaky: it gates
+# strict bit-exactness and all five cross-checks internally, and bit-exactness is the
+# load-bearing precondition here (same DDR image, same texels, only slower — a single
+# changed pixel means the SDRAM image or its address mapping is wrong and every cycle
+# number in the run is worthless). A failure is surfaced by the NON-GATING banner.
+NONGATING="tb_comp_replay tb_blitter_trilist_sdram tb_blitter_trilist_streamcache"
 
 # ── tiers ───────────────────────────────────────────────────────────────────
 # NIGHTLY_ONLY: TBs excluded from the PR tier. tb_comp_replay is a non-gating visual-
@@ -137,7 +191,7 @@ NONGATING="tb_comp_replay tb_blitter_trilist_sdram"
 # ~1.6ms sim, so it gates in EVERY tier (incl. PR).
 # [gmloader-GPU slim] tb_bgplane_maptrans and tb_bgplane_inval_teeth were RETIRED
 # with OP_BGPLANE_WRITE (see the note above); they no longer exist to defer.
-NIGHTLY_ONLY="tb_comp_replay"
+NIGHTLY_ONLY="tb_comp_replay tb_blitter_trilist_streamcache"
 
 # +defines applied to EVERY compile in the nightly tier to restore full
 # HW-faithful geometry/rate. Harmless on TBs that don't reference a macro, so
@@ -181,6 +235,17 @@ timeout_s() { case "$1" in
   # co-simulates the bit-level SDRAM chip model, unlike every stub-P_SRC sibling).
   # Generous budget so ordinary CI contention doesn't spuriously non-gate-fail it.
   tb_blitter_trilist_sdram)                echo 480 ;;
+  # [Phase 3A Task 5] Captured-device-frame replay: 1.56 M sim cycles (a real frame is
+  # ~10x the synthetic scenarios), ~32 s standalone. 300 s covers CI-core contention.
+  tb_blitter_trilist_stream)               echo 300 ;;
+  # [Phase 3B Task 1] Same replay through the REAL texel path (see the NONGATING note).
+  # 1.44 M sim cycles with the bit-level mt48 model in the loop. MEASURED: 147 s run
+  # alone, 1384 s inside a full --tier=nightly pass. That 9.4x spread is not CPU
+  # scheduling -- the mt48 model declares four 8M x 16-bit bank arrays, so two
+  # concurrent instances (this bench + tb_blitter_trilist_sdram) put the whole run under
+  # memory pressure. Budget 3600 s: >2.5x the measured worst case, and since the bench
+  # is nightly-only a generous budget costs the PR tier nothing.
+  tb_blitter_trilist_streamcache)          echo 3600 ;;
   # [gmloader-GPU slim] tb_bgplane_equivalence/write_pipe_xl/3plane_xl/maptrans/
   # inval_teeth and tb_pal8_bgplane were RETIRED with OP_BGPLANE_WRITE/OP_CLUT_
   # UPLOAD (see the SKIP-block note above); their budget entries are gone too.

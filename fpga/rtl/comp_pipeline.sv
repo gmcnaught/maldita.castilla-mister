@@ -508,13 +508,36 @@ module comp_pipeline (
 `ifdef FABRIC_ASSERT
   // [#110 SVA] The prefetch assumes ONE read outstanding with a strict 1-cycle p0_ok:
   // it advances sf_idx / the source qword index on every p0_ok while in F_WALK. A p0_ok
-  // that arrives with NO read outstanding (fstate==F_IDLE) would be a spurious ack the
-  // walker isn't expecting -> a mis-advance / stale source index. Assert p0_ok is gated
-  // by an outstanding read. (Metastability aside, this catches a P_SRC-model contract
-  // break: ok without a preceding rd.)
+  // that arrives there without one of OUR reads outstanding is a spurious ack the walker
+  // is not expecting -> a mis-advance / stale source index. (Metastability aside, this
+  // catches a P_SRC-model contract break: ok without a preceding rd.)
+  //
+  // [Phase 3B Task 1] The original form asserted `!(p0_ok && fstate == F_IDLE)` and was a
+  // FALSE POSITIVE on every TRILIST frame: blitter_top muxes only p0_addr/p0_rd on
+  // tri_busy (blitter_top.sv "assign p0_addr = tri_busy ? ..."), while p0_ok is broadcast
+  // to BOTH clients, so every texel the rasterizer fetches also strobes p0_ok here with
+  // this module idle. That is benign by construction -- the sf_idx/f_fill_qw advance lives
+  // inside the F_WALK case arm, so nothing in F_IDLE consumes the strobe -- and the two
+  // clients are mutually exclusive (comp_pipeline cannot have a fetch in flight while
+  // tri_busy steers the port away from it). Measured: 32,480 fires on one quiet frame in
+  // tb_blitter_trilist_stream, i.e. the -DFABRIC_ASSERT nightly tier was RED on all three
+  // TRILIST replay benches (two of them GATING) plus tb_blitter_trilist_sdram, purely from
+  // this. Found while registering tb_blitter_trilist_streamcache; pre-existing.
+  //
+  // Tightened to the real hazard: an ok arriving WHILE WALKING that does not belong to a
+  // read this module issued. sva_own_rd tracks our own p0_rd -> p0_ok window; it is inside
+  // the ifdef, so nothing outside the assertion changes and synthesis is untouched. This
+  // still catches the #110 contract break (an ok with no preceding rd) in the only state
+  // where such an ok can corrupt anything.
+  reg sva_own_rd;
+  always @(posedge clk) begin
+    if (rst)        sva_own_rd <= 1'b0;
+    else if (p0_rd) sva_own_rd <= 1'b1;
+    else if (p0_ok) sva_own_rd <= 1'b0;
+  end
   always @(posedge clk) if (!rst)
-    assert (!(p0_ok && fstate == F_IDLE))
-    else $display("FABRIC-ASSERT FAIL [comp_pipeline]: p0_ok with no read outstanding (fstate=F_IDLE) @%0t -> prefetch mis-advance", $time);
+    assert (!(p0_ok && (fstate != F_IDLE) && !sva_own_rd))
+    else $display("FABRIC-ASSERT FAIL [comp_pipeline]: p0_ok in fstate=%0d with no read of ours outstanding @%0t -> prefetch mis-advance", fstate, $time);
 `endif
 
   // ── per-pixel compositing pipeline ───────────────────────────────────────────

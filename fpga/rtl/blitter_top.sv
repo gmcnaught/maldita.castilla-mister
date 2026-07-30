@@ -449,7 +449,20 @@ module blitter_top #(
 
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
-    reg  [15:0]  tri_ox;                               // bbox-min x (row-wrap target)
+    reg  [15:0]  tri_ox;                               // bbox-min x (seek's left clamp)
+    // [span walk] the ROW's first covered x, i.e. where A_ROWY restarts the next row.
+    // The pre-span walk restarted every row at tri_ox and paid one coverage test per
+    // bbox column; this holds the previous row's SPAN START so the seek only has to
+    // travel |s(y+1)-s(y)| columns (see the span-walk block comment below).
+    reg  [15:0]  row_px;
+    // [pipeline stage 3b] row_pend is DELETED. It existed only to defer the
+    // A_PIX -> A_ROWY hand-off for a pixel dispatched at tri_maxx until A_ISSUE had
+    // queued it; with the chain pipelined, A_PIX takes that branch on the dispatch
+    // cycle itself (the pixel's coords/attrs are already latched and A_ROWY touches
+    // only the walk cursor), which also removes one hop per span that ended at tri_maxx.
+    reg          sk_dir_set;                         // this row's seek direction is locked
+    reg          sk_left;                              // locked direction: 1=leftward, 0=rightward
+    reg          tri_bbox_neg;                         // bbox-max went NEGATIVE -> reject the triangle
     // [pipeline stage 1] The (px,py)+accumulator "cursor" is now advanced at the
     // moment a pixel is DISPATCHED from S_TRI_PIX (not 12 cycles later at the tail),
     // decoupling coverage/attr generation from the datapath depth so the walk can
@@ -460,7 +473,15 @@ module blitter_top #(
     reg  [15:0]  pxs, pys;                             // dispatched pixel's (px,py) snapshot
     reg  [31:0]  tri_vbase;                            // this triangle's first vertex-qword addr
     reg  signed [63:0] w0, w1, w2;                     // running coverage edges (this pixel)
-    reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=ox)
+    reg  signed [63:0] row_w0, row_w1, row_w2;         // coverage edges at row start (x=row_px)
+    // [span walk] the same three edges one column to the LEFT (x = tri_px-1). The
+    // leftward seek needs to know whether the left NEIGHBOUR is covered; carrying it
+    // as a register keeps that decision a sign-bit test instead of putting three
+    // 64-bit subtracts in front of the A_SEEK branch. Maintained by the same moves as
+    // w0/w1/w2: a right step COPIES w->wm (no adder), a left step copies wm->w and
+    // subtracts one dx from wm, a row step adds dy to both.
+    reg  signed [63:0] w0m, w1m, w2m;                  // coverage edges at x = tri_px-1
+    reg  signed [63:0] row_w0m, row_w1m, row_w2m;      // ... at x = row_px-1
     // [timing/DSP] weighted attr sums are 48-bit in the setup (ts_W*_0 / ts_dW*)
     // and stay within that envelope over the bbox walk (see blt_tri_setup header),
     // so hold them in 48-bit — not 64 — to keep the per-pixel W*area_recip
@@ -472,11 +493,17 @@ module blitter_top #(
     // per-pixel latched intermediates
     reg  [7:0]   cr_q, cg_q, cb_q, ca_q;   // interpolated colour for the blend
     reg  [1:0]   tex_lane_q;               // 16-bit lane within the fetched texel qword
-    // pa-private pipeline register carrying THIS pixel's texel qword tag from A_ADDR2 to
-    // A_ISSUE. tri_p0_addr must NOT be (ab)used for this hand-carry: pb's B_FILL demand-miss
-    // write (`tri_p0_addr <= {b_qtag,3'd0}`) is a second writer of that register in the same
-    // always block, and can clobber pa's in-flight address on a same-cycle collision or during
-    // any pf_full stall in A_ISSUE — see docs/superpowers/.../uvfull-rootcause-report.md.
+    // Pipeline-private register carrying THIS pixel's texel qword tag from the addr2 stage
+    // (ax_v[4]) to the issue stage (ax_v[5]). tri_p0_addr must NOT be (ab)used for this
+    // hand-carry: pb's B_FILL demand-miss write (`tri_p0_addr <= {b_qtag,3'd0}`) is a second
+    // writer of that register in the same always block and can clobber pa's in-flight address
+    // on a same-cycle collision — see docs/superpowers/.../uvfull-rootcause-report.md.
+    // [pipeline stage 3b] CORRECTION to this note: the second half of the original hazard,
+    // "or during any pf_full stall in A_ISSUE", no longer exists — A_ISSUE is gone and the
+    // issue STAGE cannot stall (the credit scheme makes pf_full unreachable at a push, see
+    // ax_cred below). The same-cycle-collision half is unchanged and still the reason this
+    // register exists, so do not fold pa_qtag back into tri_p0_addr on the strength of the
+    // stall having gone away.
     reg  [23:0]  pa_qtag;                  // pa-private: this pixel's SDRAM qword tag
     reg  [15:0]  texel_q, dst_q;           // fetched texel + dst pixel
     reg  [14:0]  dst_qw_q;                 // comp_fbram qword index for this pixel
@@ -486,7 +513,10 @@ module blitter_top #(
     // sub-FSMs that run every cycle while the main state sits at the umbrella
     // S_TRI_RUN, overlapping one pixel's blend/write (B) with the next pixel's
     // address-gen + texel fetch (A):
-    //   pa (address-gen): walk coverage -> W*recip mul -> texel addr -> issue P_SRC read
+    //   pa (address-gen): span walk -> W*recip mul -> texel addr -> issue P_SRC read
+    //       ([span walk] the walk is A_SEEK -> A_PIX* -> A_ROWY per row: locate the
+    //        row's covered interval, emit it left-to-right, step the row. It no longer
+    //        tests every bbox column -- see the span-walk block comment further down.)
     //   pb (consume+blend): wait texel -> dst read -> 3-stage blend -> comp_fbram write
     // They rendezvous through a depth-TEXFIFO_D payload FIFO (pf_mem), so A can run up
     // to TEXFIFO_D pixels ahead of B. Because A computes pixel N+1 (clobbering the live
@@ -494,8 +524,20 @@ module blitter_top #(
     // popped from the FIFO (b_* regs) rather than the live regs. Triangle
     // constants (c_blend/c_alpha/c_src_*) are stable while pixels are in flight (the
     // pipe drains before the next triangle's setup), so they need no snapshot.
-    localparam [2:0] A_PIX=3'd0, A_MUL0=3'd1, A_MUL1=3'd2, A_MUL=3'd3,
-                     A_ADDR=3'd4, A_ADDR2=3'd5, A_ISSUE=3'd6, A_DONE=3'd7;
+    // [span walk] pa widened 3 -> 4 bits for A_SEEK / A_ROWY. Encodings 0..7 are
+    // UNCHANGED so historical wedge-probe pa values still decode as they always did;
+    // the probe WORD LAYOUT did have to shift by one bit (see wedge_snap below).
+    // [pipeline stage 3b] A_MUL0=1 / A_MUL1=2 / A_MUL=3 / A_ADDR=4 / A_ADDR2=5 /
+    // A_ISSUE=6 are DELETED. The mul/addr/issue chain is no longer SEQUENCED by pa; it
+    // is a 6-deep feed-forward PIPELINE clocked by the ax_v valid shifter (below), so
+    // pa now only ever holds A_PIX / A_DONE / A_SEEK / A_ROWY and can dispatch one
+    // covered pixel PER CYCLE instead of one per seven. Encodings 1..6 are left as a
+    // HOLE rather than renumbered — exactly as B_DSTW/B_DSTC were — so a pre-stage-3b
+    // wedge-probe dump whose pa_at_peak reads 1..6 still decodes as "somewhere in the
+    // mul/addr chain" instead of silently meaning something else.
+    localparam [3:0] A_PIX=4'd0, A_DONE=4'd7,
+                     A_SEEK=4'd8,     // find this row's FIRST covered x
+                     A_ROWY=4'd9;     // step to the next row from the row-start snapshot
     // pb widened to 4 bits: the qword-BRAM read is pipelined through B_LOOK (present the
     // slot as a REGISTERED read address so tq_data infers M10K) and B_WAIT (stall on a
     // demand/prefetch fill, then re-read). This breaks the b_qtag -> 256-entry distributed
@@ -517,8 +559,48 @@ module blitter_top #(
                      // [app-surface v1] surface texel read: issue surf_rd (B_SURF_W is the
                      // 1-cyc BRAM latency), latch the texel (B_SURF_C), then dst/blend.
                      B_SURF_W=4'd9, B_SURF_C=4'd10;
-    reg  [2:0]   pa;                       // address-gen sub-FSM state
+    reg  [3:0]   pa;                       // address-gen sub-FSM state
     reg  [3:0]   pb;                       // consume+blend sub-FSM state
+
+    // ── [pipeline stage 3b] the A chain as a PIPELINE, not an FSM walk ───────────
+    // The six ex-states A_MUL0..A_ISSUE had no stall and no branch between them: each
+    // read the previous one's output registers and wrote its own. That is a pipeline
+    // written as a sequencer, and it cost 6 cycles of pa occupancy per covered pixel on
+    // top of the A_PIX dispatch cycle (7.15 cyc/px measured, vs pb's 6.0) — so pa, not
+    // the blend path, set wall-clock throughput.
+    //
+    // ax_v[k] means "the register set written by stage k+1 holds a live pixel". It is a
+    // pure shift register: ax_v <= {ax_v[4:0], ax_disp}. Stage bodies live after the
+    // case(pa) below, each gated on its own ax_v bit, and they fire CONCURRENTLY — six
+    // different pixels in flight.
+    //
+    // WHY NO BACK-PRESSURE INSIDE THE PIPELINE. pb consumes ~1 px / 6 cyc, so a 1 px/cyc
+    // dispatcher would fill the payload FIFO and then have to stall mid-pipeline — a
+    // clock-enable on ~2.5 kbit of wide multiply registers (and the DSP output regs),
+    // i.e. a high-fanout enable on exactly the paths Task 6's timing discipline was
+    // protecting. Instead the dispatcher takes a CREDIT: ax_cred counts pixels dispatched
+    // but not yet popped off the FIFO by pb, and A_PIX only dispatches while
+    // ax_cred < TEXFIFO_D. FIFO occupancy is then (ax_cred - pixels still in the pipe),
+    // and the pushing pixel is itself still in the pipe, so occupancy at a push is
+    // <= TEXFIFO_D-1: the push can NEVER find pf_full. The pipeline therefore shifts
+    // unconditionally every cycle, the only hold is on the walk cursor in A_PIX, and
+    // A_SEEK/A_ROWY are free to make row progress while the dispatcher is credit-starved.
+    reg  [5:0]   ax_v;                     // stage valid bits (see above)
+    // ax_cred is declared further down, immediately after TEXFIFO_D — its width is derived
+    // from that depth and the two must not be editable apart. See the note there.
+    // Carries for the values whose PRODUCER and CONSUMER are more than one stage apart
+    // (everything else — wu_q.., pp_*, mul_*, itu_q/itv_q, tex_row, pa_qtag — is written
+    // by stage k and read by stage k+1, so the existing single copy already IS that
+    // pipeline register and needs no duplication: NBA read-before-write per cycle).
+    //   pxs/pys      written at dispatch, read 3 stages later (dst_qw multiply)
+    //   itu_q        written by the mul stage, read 2 stages later (A_ADDR2's byte add)
+    //   cr_q..dst_*  written by the mul stage, read 3 stages later (the FIFO push)
+    reg  [15:0]  ax2_px, ax2_py, ax3_px, ax3_py;
+    reg  signed [31:0] ax5_itu;
+    reg  [7:0]   ax5_cr, ax5_cg, ax5_cb, ax5_ca;
+    reg  [7:0]   ax6_cr, ax6_cg, ax6_cb, ax6_ca;
+    reg  [14:0]  ax5_dst_qw, ax6_dst_qw;
+    reg  [1:0]   ax5_dst_lane, ax6_dst_lane;
 
     // [Task 2] depth-D payload FIFO decouples pa from pb: pa pushes each pixel's
     // payload as it finishes address-gen and races ahead up to TEXFIFO_D pixels; pb
@@ -526,7 +608,34 @@ module blitter_top #(
     // Payload = {ca,cb,cg,cr[8b each]=32, dst_qw[15], dst_lane[2], qtag[24], texlane[2]}
     // = 75 bits. Pointer-with-extra-MSB scheme gives full/empty disambiguation.
     localparam integer TEXFIFO_D  = 8;
-    localparam integer TEXFIFO_AW = 3;      // $clog2(TEXFIFO_D)
+    localparam integer TEXFIFO_AW = $clog2(TEXFIFO_D);
+    // [pipeline stage 3b] ax_cred lives HERE, next to the depth it is derived from,
+    // rather than up with the other ax_* registers: its width is a function of
+    // TEXFIFO_D and the two must never be edited apart (see the issue stage's
+    // "THREE THINGS MUST MOVE TOGETHER" note). Keeping them adjacent is the cheapest
+    // way to make that impossible to miss -- and Verilog requires it anyway, since
+    // $clog2(TEXFIFO_D+1) cannot reference a localparam declared further down.
+    // TEXFIFO_AW itself is now DERIVED (not hand-written) for the same reason ax_cred's
+    // width is derived below: a fixed pointer width is a WIDTH TRAP the moment TEXFIFO_D
+    // changes. Only TEXFIFO_D should ever be edited by hand.
+    // ax_cred holds 0..TEXFIFO_D INCLUSIVE, so its width must be $clog2(TEXFIFO_D+1), NOT
+    // $clog2(TEXFIFO_D). DERIVED, never hand-written: a fixed [3:0] happens to be right at
+    // TEXFIFO_D=8 but becomes a WIDTH TRAP the moment the depth is raised (the obvious next
+    // experiment — see the prefetch-lead note in the Task 7 report). At TEXFIFO_D=16 a 4-bit
+    // ax_cred makes `ax_cred < TEXFIFO_D` a TAUTOLOGY (the reg cannot reach 16), so the
+    // dispatcher would never throttle — and because the credit scheme is what let the
+    // `if (!pf_full)` guard be removed from the issue stage, there is nothing downstream to
+    // catch it: it would silently overrun the payload FIFO.
+    localparam integer AX_CW = $clog2(TEXFIFO_D+1);
+    reg  [AX_CW-1:0] ax_cred;              // dispatched-but-not-yet-popped pixels, 0..TEXFIFO_D
+`ifndef SYNTHESIS
+    // Belt-and-braces on the paragraph above, in case AX_CW is ever hand-overridden rather
+    // than derived. Elaboration-time, so it costs nothing and cannot be missed.
+    initial if ((1 << AX_CW) < (TEXFIFO_D + 1)) begin
+        $display("FAIL 3B-CREDW: ax_cred is %0d bits, which cannot represent TEXFIFO_D=%0d; the ax_room compare is a tautology and the dispatcher will overrun the FIFO", AX_CW, TEXFIFO_D);
+        $finish;
+    end
+`endif
     localparam integer PW = 32+15+2+24+2;   // payload width = 75
     reg  [PW-1:0] pf_mem [0:TEXFIFO_D-1];
     reg  [TEXFIFO_AW:0] pf_wr, pf_rd;       // extra MSB for full/empty disambiguation
@@ -652,8 +761,13 @@ module blitter_top #(
     // (max continuous fill_busy), and the bbox (runaway-walk check), all latched at the peak of
     // dbg_stuck (deepest dwell) and published on the NEXT control-block write after recovery
     // (a stuck blitter writes nothing, so we can't publish DURING the stall — latch + defer).
-    //   word A -> C_SRCSEL.hi  (host 0x3B00003C): [5:0]=state_at_peak [8:6]=pa [12:9]=pb
-    //             [13]=fill_busy_at_peak [14]=fb_dma_busy_at_peak [31:16]=peak_stuck[23:8]
+    //   word A -> C_SRCSEL.hi  (host 0x3B00003C): [5:0]=state_at_peak [9:6]=pa [13:10]=pb
+    //             [14]=fill_busy_at_peak [15]=fb_dma_busy_at_peak [31:16]=peak_stuck[23:8]
+    // ⚠ LAYOUT CHANGED (span walk): pa grew 3 -> 4 bits (A_SEEK/A_ROWY), consuming the
+    // one spare bit, so pb/fill/fbdma each shifted UP by one. pa/pb VALUES 0..7 still
+    // mean what they always meant; the FIELD POSITIONS above do not match device dumps
+    // taken before this commit. Decode pre-span-walk word A with the old layout
+    // ([8:6]=pa [12:9]=pb [13]=fill [14]=fbdma).
     //   word B -> C_STATUS.hi  (host 0x3B000034): max_fbdma_run[31:0] (copy-stall severity)
     // Read (v3): state_at_peak==44 (S_SNAP_DRAIN) + fb_dma_busy_at_peak=1 + max_fbdma_run huge
     // => comp_fb_dma cannot finish its copy (its DDR writes are not being accepted => the
@@ -664,7 +778,7 @@ module blitter_top #(
     // Placed AFTER pa/pb/fill_busy/tri_max* decls: `default_nettype none` forbids forward refs.
     reg  [23:0] peak_stuck;
     reg  [5:0]  state_at_peak;
-    reg  [2:0]  pa_at_peak;
+    reg  [3:0]  pa_at_peak;
     reg  [3:0]  pb_at_peak;
     reg         fill_at_peak;
     reg  [15:0] maxx_at_peak, maxy_at_peak;
@@ -685,7 +799,7 @@ module blitter_top #(
     reg         fbdma_at_peak;   // was comp_fb_dma mid-copy at the deepest dwell?
     always @(posedge clk) begin
         if (rst) begin
-            peak_stuck<=24'd0; state_at_peak<=6'd0; pa_at_peak<=3'd0; pb_at_peak<=4'd0;
+            peak_stuck<=24'd0; state_at_peak<=6'd0; pa_at_peak<=4'd0; pb_at_peak<=4'd0;
             fill_at_peak<=1'b0; maxx_at_peak<=16'd0; maxy_at_peak<=16'd0;
             fill_run<=24'd0; max_fill_run<=24'd0;
             fbdma_run<=32'd0; max_fbdma_run<=32'd0; fbdma_at_peak<=1'b0;
@@ -713,7 +827,7 @@ module blitter_top #(
     // word A (host 0x3B00003C): peak_stuck magnitude replaces max_fill_run — device-measured
     // wd_fire_count==0 and fill_at_peak has never been the story, whereas the DWELL DEPTH is
     // what distinguishes "0.17s saturated" from a brief hiccup. bit14 = fbdma_at_peak (new).
-    wire [31:0] wedge_snap  = {peak_stuck[23:8], 1'b0, fbdma_at_peak, fill_at_peak,
+    wire [31:0] wedge_snap  = {peak_stuck[23:8], fbdma_at_peak, fill_at_peak,
                                pb_at_peak, pa_at_peak, state_at_peak};
     // word B (host 0x3B000034): the bbox is retired (maxx/maxy read `FB_W-1/`FB_H-1 = 287/215,
     // the legitimate full-screen composite quad, never diagnostic). Carries the copy-stall
@@ -944,35 +1058,140 @@ module blitter_top #(
                             : (tri_maxx_c < 0 ? 16'd0 : tri_maxx_c[15:0]);
     wire [15:0] tri_maxy_cl = (tri_maxy_c > TRI_MAXY_LIM) ? TRI_MAXY_LIM[15:0]
                             : (tri_maxy_c < 0 ? 16'd0 : tri_maxy_c[15:0]);
+    // [span walk] ...and a bbox-max that came out NEGATIVE means the triangle is
+    // entirely off-screen left/above. The clamps above cannot express that (tri_maxx
+    // is unsigned) and used to RAISE it to 0, so S_TRI_SWAIT's (ts_ox > tri_maxx)
+    // guard did not fire and the walk ground through a degenerate 1-column strip: 12
+    // triangles / 1,160 wasted coverage tests per quiet frame (Task 5 §3.3). The
+    // refmodel is unambiguous -- blt_tri.c clamps maxx only on the HIGH side, so
+    // `for(px=minx; px<=maxx)` with minx clamped to 0 and maxx<0 runs ZERO iterations
+    // -- hence rejecting here is bit-exact, not a behaviour change. Fixed with the span
+    // walk rather than after it because the span walk would otherwise make those
+    // triangles COST MORE (an empty row is a seek + a row step, i.e. ~2 cycles/row,
+    // where the bbox walk paid 1): leaving it would have booked a regression.
+    wire tri_bbox_neg_c = (tri_maxx_c < 0) || (tri_maxy_c < 0);
 
-    // [pipeline stage 1] advance the walk cursor one pixel: within a row step the
-    // running edge/attr accumulators by their per-x deltas; at row end wrap x to the
-    // bbox-min and step the row-start latches by the per-y deltas; past the last row
-    // clear tri_cv (cursor exhausted). Bit-identical to the former S_TRI_ADV tail,
-    // but now invoked at DISPATCH time so the cursor is decoupled from datapath depth.
-    // The <= assignments schedule on the calling always block's clock edge.
-    task automatic advance_cursor;
+    // ══ [span walk] per-row covered-interval traversal ═════════════════════════
+    //  Replaces the bbox scan (one coverage test per bbox column, ~2.03x the covered
+    //  pixels on the captured quiet frame). Each edge function is LINEAR in x --
+    //  w_k(x) = w_k(x0) + (x-x0)*dw_k/dx -- so per row the covered set {x : w0>=0 &&
+    //  w1>=0 && w2>=0} is the intersection of three half-lines, i.e. a single
+    //  CONTIGUOUS interval. The walk therefore only has to find that interval's LEFT
+    //  end, emit rightward until coverage drops (or tri_maxx), and move on.
+    //
+    //  NO DIVIDE. The obvious closed form for the interval end is
+    //  ceil(-w_k/dw_kdx) -- a per-row divide, and comb divide is this design's known
+    //  STA failure mode (see blt_tri_setup's UNROLL=1 note). Instead the endpoint is
+    //  found INCREMENTALLY from the PREVIOUS row's endpoint, using the same adders the
+    //  walk already had: the left end s(y) of a triangle moves by |s(y+1)-s(y)|
+    //  columns per row, and summed over the triangle that telescopes to the total
+    //  variation of a convex boundary, i.e. O(bbox width) -- NOT O(width) per row.
+    //  Measured: 2.9 seek+rowstep cycles per row on the quiet frame.
+    //
+    //  DIRECTION IS LOCKED per row (sk_dir_set/sk_left), which is a correctness
+    //  requirement, not a tuning knob. Deciding the direction fresh each cycle from
+    //  the violated edges LIVELOCKS on an EMPTY row: with a lower bound s=5 and an
+    //  upper bound e=4, x=4 sees only the lower bound violated ("go right") and x=5
+    //  only the upper ("go left"), forever. No single x sees both violated, so the
+    //  conflict test cannot catch it. A locked direction makes px strictly monotone
+    //  within a row, so the seek is bounded by the bbox width by construction. (This
+    //  was found by the Python cycle-model of this FSM, which hit its runaway guard.)
+    //
+    //  BIT-EXACTNESS is by construction, not by tolerance: the emitted pixel SET and
+    //  ORDER are identical to the bbox walk (same rows in increasing y, same covered
+    //  x in increasing order), and the accumulator values are path-independent exact
+    //  integer sums of the same per-x/per-y deltas. The seek never leaves
+    //  [tri_ox, tri_maxx], so it visits no position the bbox walk did not.
+    //  Cross-checked against the refmodel's own comparisons (blt_tri.c: edge() sign
+    //  tests with top_left() bias at pixel centres) by the strict bit-exact gate.
+
+    // Coverage of the current cursor, and of its LEFT NEIGHBOUR (the registered w*m).
+    wire sk_cov  = (w0  >= 0) && (w1  >= 0) && (w2  >= 0);
+    wire sk_covm = (w0m >= 0) && (w1m >= 0) && (w2m >= 0);
+    // Which way an uncovered cursor must move to reach the interval. An edge violated
+    // with dw/dx>0 is a LOWER bound (go right); with dw/dx<0 an UPPER bound (go left);
+    // with dw/dx==0 the edge is x-independent, so a violation means the WHOLE row is
+    // out (sk_block) -- that is the horizontal-edge case.
+    wire sk_need_r = ((w0<0) && (ts_dw0dx>0)) || ((w1<0) && (ts_dw1dx>0)) || ((w2<0) && (ts_dw2dx>0));
+    wire sk_need_l = ((w0<0) && (ts_dw0dx<0)) || ((w1<0) && (ts_dw1dx<0)) || ((w2<0) && (ts_dw2dx<0));
+    wire sk_block  = ((w0<0) && (ts_dw0dx==0))|| ((w1<0) && (ts_dw1dx==0))|| ((w2<0) && (ts_dw2dx==0));
+    // The row's direction: locked after the first A_SEEK cycle. A cursor that is
+    // already covered can only be at-or-right-of the interval's left end, so it seeks
+    // LEFT for minimality; an uncovered cursor with an upper bound violated is right
+    // of the interval and also seeks left; otherwise it is left of it and seeks right.
+    wire sk_l = sk_dir_set ? sk_left : (sk_cov || sk_need_l);
+
+    // ── [pipeline stage 3b] A-pipeline flow control ───────────────────────────────
+    // ax_room : a credit is available, so A_PIX may dispatch this cycle.
+    // ax_disp : a covered pixel IS being dispatched this cycle (the single definition —
+    //           A_PIX's dispatch branch, the credit increment and the ax_v shift all
+    //           key off this one wire so they cannot drift out of step).
+    // ax_pop  : pb takes a payload off the FIFO this cycle (returns the credit).
+    // ax_busy : the pipeline still holds at least one pixel. LOAD-BEARING: the triangle
+    //           drain test must include it, or S_TRI_NEXT can be entered with up to six
+    //           pixels still in flight — they would be pushed into the FIFO after the
+    //           next triangle's setup has already reset pf_wr/pf_rd, i.e. silently
+    //           dropped or written with the wrong triangle's constants.
+    wire ax_room = (ax_cred < TEXFIFO_D);
+    wire ax_busy = |ax_v;
+    wire ax_disp = (state==S_TRI_PIX) && (pa==A_PIX) && tri_cv && sk_cov && ax_room;
+    wire ax_pop  = (state==S_TRI_PIX) && (pb==B_IDLE) && !pf_empty;
+
+    // [span walk] one column right: the current edges BECOME the left-neighbour set
+    // (a copy, no adder), and the live accumulators take one dx step.
+    task automatic step_right;
         begin
-            if (tri_px < tri_maxx) begin
-                tri_px <= tri_px + 16'd1;
-                w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
-                Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
-                Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
-            end else if (tri_py < tri_maxy) begin
-                tri_py <= tri_py + 16'd1;
-                tri_px <= tri_ox;
-                row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
-                row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
-                row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
-                row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
-                row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
-                row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
-                row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
-                row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
-                row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
-            end else begin
-                tri_cv <= 1'b0;
-            end
+            tri_px <= tri_px + 16'd1;
+            w0m<=w0; w1m<=w1; w2m<=w2;
+            w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
+            Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
+            Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
+        end
+    endtask
+    // [span walk] one column left: the left-neighbour set BECOMES the current edges,
+    // and the new left neighbour is one further dx back. Only the seek moves left, so
+    // the attribute accumulators need the subtract only here.
+    task automatic step_left;
+        begin
+            tri_px <= tri_px - 16'd1;
+            w0<=w0m; w1<=w1m; w2<=w2m;
+            w0m<=w0m-ts_dw0dx; w1m<=w1m-ts_dw1dx; w2m<=w2m-ts_dw2dx;
+            Wu<=Wu-ts_dWudx; Wv<=Wv-ts_dWvdx; Wr<=Wr-ts_dWrdx;
+            Wg<=Wg-ts_dWgdx; Wb<=Wb-ts_dWbdx; Wa<=Wa-ts_dWadx;
+        end
+    endtask
+    // [span walk] pin the row-start snapshot to wherever the seek finished. This is
+    // what makes the next row's seek short: A_ROWY restarts from the SPAN START, not
+    // from tri_ox, and not from the row's right end either (that would cost a whole
+    // span's worth of leftward steps per row -- the flaw that makes a naive span walk
+    // no cheaper than the bbox scan). Register-to-register copies: no logic.
+    task automatic snap_row;
+        begin
+            row_px<=tri_px;
+            row_w0<=w0; row_w1<=w1; row_w2<=w2;
+            row_w0m<=w0m; row_w1m<=w1m; row_w2m<=w2m;
+            row_Wu<=Wu; row_Wv<=Wv; row_Wr<=Wr; row_Wg<=Wg; row_Wb<=Wb; row_Wa<=Wa;
+        end
+    endtask
+    // [span walk] next row, from the row-start snapshot (NOT from the live cursor,
+    // which the emit phase has already run to the span's right end). Same per-y delta
+    // adds the old row-wrap did, feeding both the live and the snapshot copies.
+    task automatic step_row;
+        begin
+            tri_py <= tri_py + 16'd1;
+            tri_px <= row_px;
+            row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
+            row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
+            row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
+            row_w0m<=row_w0m+ts_dw0dy; w0m<=row_w0m+ts_dw0dy;
+            row_w1m<=row_w1m+ts_dw1dy; w1m<=row_w1m+ts_dw1dy;
+            row_w2m<=row_w2m+ts_dw2dy; w2m<=row_w2m+ts_dw2dy;
+            row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
+            row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
+            row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
+            row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
+            row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
+            row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
         end
     endtask
 
@@ -993,6 +1212,8 @@ module blitter_top #(
             fb_dma_start<=1'b0; // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
+            tri_bbox_neg<=1'b0; sk_dir_set<=1'b0; sk_left<=1'b0;
+            ax_v<=6'd0; ax_cred<={AX_CW{1'b0}};   // [pipeline stage 3b]
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
             tri_surf_rd_en<=1'b0; tri_src_surface<=1'b0;   // [app-surface v1]
@@ -1349,28 +1570,50 @@ module blitter_top #(
             S_TRI_SETUP: begin
                 tri_setup_start <= 1'b1;
                 tri_maxx <= tri_maxx_cl; tri_maxy <= tri_maxy_cl;
+                // [span walk] register the off-left/above reject alongside the clamps
+                // it cannot express (see tri_bbox_neg_c), for the same reason: keep the
+                // raw-vertex compare cloud out of the S_TRI_SWAIT seed cycle.
+                tri_bbox_neg <= tri_bbox_neg_c;
                 state<=S_TRI_SWAIT;
             end
             // Wait for setup valid; seed bbox + running accumulators at (ox,oy).
-            // Skip degenerate or fully-off (min>max) triangles.
+            // Skip degenerate, off-left/above (negative bbox-max) or fully-off
+            // (min>max) triangles.
             S_TRI_SWAIT: if (ts_valid) begin
-                // guard against registered bbox-max (set at S_TRI_SETUP)
-                if (ts_degenerate || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
+                // guard against registered bbox-max / bbox-neg (set at S_TRI_SETUP)
+                if (ts_degenerate || tri_bbox_neg || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
                     state<=S_TRI_NEXT;
                 else begin
                     tri_ox <= ts_ox;
                     tri_px <= ts_ox;      tri_py <= ts_oy;
+                    row_px <= ts_ox;
                     tri_cv <= 1'b1;        // cursor starts inside the bbox
                     // tri_maxx/tri_maxy already registered at S_TRI_SETUP
                     w0<=ts_w0_0; w1<=ts_w1_0; w2<=ts_w2_0;
                     row_w0<=ts_w0_0; row_w1<=ts_w1_0; row_w2<=ts_w2_0;
+                    // [span walk] left-neighbour edges at x = ox-1. One column outside
+                    // the bbox, and never CONSULTED there (the seek's left move is
+                    // gated on tri_px > tri_ox), but seeded exactly rather than left
+                    // undefined so no branch can ever depend on an x.
+                    w0m<=ts_w0_0-ts_dw0dx; w1m<=ts_w1_0-ts_dw1dx; w2m<=ts_w2_0-ts_dw2dx;
+                    row_w0m<=ts_w0_0-ts_dw0dx; row_w1m<=ts_w1_0-ts_dw1dx;
+                    row_w2m<=ts_w2_0-ts_dw2dx;
                     Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
                     // (the qword cache persists across triangles in a command; it is
                     // dropped only at the per-command STAGE barrier, not here.)
-                    pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
+                    // [span walk] pa starts in A_SEEK, not A_PIX: even the FIRST row
+                    // must have its span start located before any pixel is emitted.
+                    pa<=A_SEEK; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
+                    sk_dir_set<=1'b0;
+                    // [pipeline stage 3b] arm the A pipeline empty with all credits free.
+                    // Safe because the previous triangle could only reach S_TRI_NEXT with
+                    // ax_busy low and pf_empty high (see the drain test), so nothing is
+                    // being discarded here — this is belt-and-braces, matching the
+                    // pre-existing pf_wr/pf_rd reset.
+                    ax_v<=6'd0; ax_cred<={AX_CW{1'b0}};
                     state<=S_TRI_PIX;   // umbrella S_TRI_RUN: tick pa || pb
                 end
             end
@@ -1400,165 +1643,315 @@ module blitter_top #(
                     wd_fire_count       <= (wd_fire_count==24'hFFFFFF) ? wd_fire_count
                                                                        : wd_fire_count + 24'd1;
                 end
-                // ==== sub-FSM A: coverage walk -> W*recip mul -> texel addr -> issue P_SRC ====
+                // [pipeline stage 3b] credit accounting + the pipeline valid shifter.
+                // Written ONCE here, outside both sub-FSM case statements, so there is
+                // exactly one driver for each: a dispatch and a pop in the SAME cycle
+                // net to zero, which a pair of separate increments/decrements in the two
+                // case arms could not express (the later NBA would simply win).
+                // Width-agnostic on purpose: the 1-bit ax_disp/ax_pop are zero-extended
+                // to ax_cred's width by the assignment's context, so this line survives a
+                // TEXFIFO_D change. It was `{3'd0, ax_disp}` -- correct at AX_CW==4 and a
+                // silent truncation at any other width.
+                ax_cred <= ax_cred + ax_disp - ax_pop;
+                ax_v    <= {ax_v[4:0], ax_disp};
+                // ==== sub-FSM A: coverage walk (pa) -> the ax_v-clocked mul/addr/issue
+                //      pipeline (below the case) -> the payload FIFO ====
                 case (pa)
-                // Evaluate coverage at (tri_px,tri_py). If covered, LATCH the multiply
-                // operands into single-fanout regs (the six W*area_recip products happen
-                // in A_MUL0 -> pipelined DSP) and dispatch down A; always advance the walk
-                // cursor now (stage-1 decoupling). Non-covered pixels skip in 1 cyc.
+                // [span walk] EMIT phase. A_PIX is only ever entered AT a covered pixel
+                // (A_SEEK found the row's span start) or one column past the previous
+                // one, so its coverage test is now the SPAN-END test rather than a bbox
+                // rejection: the first uncovered cursor ends the row. If covered, LATCH
+                // the multiply operands into single-fanout regs (the six W*area_recip
+                // products happen in the ax_v[0] stage -> pipelined DSP) and dispatch,
+                // advancing the cursor at dispatch (stage-1 decoupling).
+                //
+                // [pipeline stage 3b] A_PIX now RE-ENTERS ITSELF on a dispatch instead of
+                // handing pa down the mul chain, so a span emits one pixel per cycle. Three
+                // outcomes, in this priority order:
+                //   span end (!sk_cov)        -> A_ROWY. Needs no credit: nothing is issued.
+                //   covered  & ax_room        -> dispatch, step the cursor, stay in A_PIX
+                //                               (or go straight to A_ROWY at tri_maxx).
+                //   covered  & !ax_room       -> HOLD. No cursor step, no counter bump, no
+                //                               state change: the cycle is a pure stall
+                //                               waiting for pb to return a credit. This is
+                //                               the steady state (pb is 6x slower), which is
+                //                               why the bench must qualify its "productive
+                //                               A_PIX cycle" count with ax_room — see the
+                //                               pix_visits note in tb_blitter_trilist_stream.
                 A_PIX: begin
+                    // [span walk] UNREACHABLE BY CONSTRUCTION, kept as a defensive
+                    // landing. tri_cv is now cleared in exactly one place -- A_ROWY's
+                    // last row -- and that same cycle sets pa<=A_DONE, so pa is never
+                    // A_PIX while tri_cv is 0. Pre-span-walk this WAS the live exit
+                    // (advance_cursor cleared tri_cv when the bbox cursor ran out and
+                    // A_PIX noticed on the next tick); do not read it as evidence that
+                    // the walk still terminates that way. It survives only so a pa
+                    // desync (or the `default:` arm) lands somewhere that drains pb
+                    // instead of emitting pixels outside the bbox.
                     if (!tri_cv) begin
-                        pa<=A_DONE;           // cursor exhausted; let B drain
-                    end else if ((w0>=0) && (w1>=0) && (w2>=0)) begin
+                        pa<=A_DONE;           // walk exhausted; let B drain
+                    end else if (!sk_cov) begin
+                        pa<=A_ROWY;           // past the span's right end: next row
+                    end else if (ax_room) begin
                         pxs <= tri_px; pys <= tri_py;
                         wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
                         wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
                         recip_q <= $signed(ts_area_recip);
-                        advance_cursor;
+                        // A span may run to the bbox's right edge. Do NOT step past it
+                        // (the cursor must stay inside the bbox so the seek's clamps and
+                        // the accumulator range are unchanged). [pipeline stage 3b] the
+                        // old row_pend hand-off through A_ISSUE is gone: pa is free to go
+                        // to A_ROWY on the dispatch cycle itself, because the dispatched
+                        // pixel's coords/attrs are already latched (pxs/pys/wu_q..) and
+                        // A_ROWY's step_row touches only the walk cursor, never the
+                        // in-flight pipeline. That also removes one A_PIX->A_ROWY hop.
+                        if (tri_px < tri_maxx) step_right;
+                        else                   pa<=A_ROWY;
                         // [Phase 1 A4] Count at DISPATCH. This branch is taken exactly once
                         // per COVERED pixel (all three edge functions non-negative), before
                         // any downstream work — the denominator cyc/px needs. Deliberately
                         // NOT counted in the non-covered path: that skips the pixel in one
                         // cycle and is not covered work.
                         perf_covered_px <= perf_covered_px + 32'd1;
-                        pa<=A_MUL0;
+                        // pa stays in A_PIX: the next column is tested next cycle.
+                    end
+                    // else: credit-starved. Hold everything; ax_disp is low so nothing
+                    // enters the pipeline and the cursor does not move.
+                end
+                // [span walk] SEEK phase: find this row's FIRST covered x, one column
+                // per cycle, in the row's locked direction. Costs ~2.9 cycles per row
+                // (seek + row step) against the ~1 cycle per bbox COLUMN it replaces.
+                // See the span-walk block comment above for why the direction is locked
+                // and why this is division-free. Leaving the seek in either direction
+                // pins the row-start snapshot (snap_row) to the cursor, so the next
+                // row starts from THIS row's span start.
+                A_SEEK: begin
+                    if (!sk_dir_set) begin sk_left <= sk_l; sk_dir_set <= 1'b1; end
+                    if (sk_block) begin
+                        // an x-independent edge is violated: no x on this row is covered
+                        snap_row; pa<=A_ROWY;
+                    end else if (sk_l) begin
+                        if (sk_cov) begin
+                            // covered: this is the span start iff the left neighbour is
+                            // NOT covered (or there is no left neighbour inside the bbox)
+                            if ((tri_px == tri_ox) || !sk_covm) begin snap_row; pa<=A_PIX; end
+                            else                                       step_left;
+                        end else if (sk_need_r || (tri_px == tri_ox)) begin
+                            // a LOWER bound became violated while walking left (the
+                            // interval is empty), or the bbox's left edge was reached
+                            snap_row; pa<=A_ROWY;
+                        end else step_left;
                     end else begin
-                        advance_cursor;       // non-covered: skip in 1 cyc, stay in A_PIX
+                        // rightward: approaching from the left, so the first covered x
+                        // IS the span start -- no minimality check needed
+                        if (sk_cov) begin snap_row; pa<=A_PIX; end
+                        else if (sk_need_l || (tri_px == tri_maxx)) begin
+                            snap_row; pa<=A_ROWY;   // interval empty / bbox right edge
+                        end else step_right;
                     end
                 end
-            // Interpolation stage 1b: two 48x24 partial products per lane, split on
-            // recip's 24-bit halves (operands >= 0 -> unsigned). Registered -> each
-            // is a shallow pipelined multiply; the tile-adder tree of a full 48x48
-            // is broken up and finished in S_TRI_MUL1.
-            A_MUL0: begin
-                pp_u_lo <= $unsigned(wu_q) * recip_q[23:0];  pp_u_hi <= $unsigned(wu_q) * recip_q[47:24];
-                pp_v_lo <= $unsigned(wv_q) * recip_q[23:0];  pp_v_hi <= $unsigned(wv_q) * recip_q[47:24];
-                pp_r_lo <= $unsigned(wr_q) * recip_q[23:0];  pp_r_hi <= $unsigned(wr_q) * recip_q[47:24];
-                pp_g_lo <= $unsigned(wg_q) * recip_q[23:0];  pp_g_hi <= $unsigned(wg_q) * recip_q[47:24];
-                pp_b_lo <= $unsigned(wb_q) * recip_q[23:0];  pp_b_hi <= $unsigned(wb_q) * recip_q[47:24];
-                pp_a_lo <= $unsigned(wa_q) * recip_q[23:0];  pp_a_hi <= $unsigned(wa_q) * recip_q[47:24];
-                pa<=A_MUL1;
-            end
-            // Interpolation stage 1c: recombine the partial products (adds only).
-            // mul_X = pp_lo + (pp_hi << 24) == wX_q * recip_q (bit-exact).
-            A_MUL1: begin
-                mul_u <= {24'd0,pp_u_lo} + {pp_u_hi,24'd0};
-                mul_v <= {24'd0,pp_v_lo} + {pp_v_hi,24'd0};
-                mul_r <= {24'd0,pp_r_lo} + {pp_r_hi,24'd0};
-                mul_g <= {24'd0,pp_g_lo} + {pp_g_hi,24'd0};
-                mul_b <= {24'd0,pp_b_lo} + {pp_b_hi,24'd0};
-                mul_a <= {24'd0,pp_a_lo} + {pp_a_hi,24'd0};
-                pa<=A_MUL;
-            end
-            // Interpolation stage 2: round the products and do the nearest-texel
-            // clamp; register the clamped coords. The texel-ADDRESS multiply
-            // (itv*stride) is deferred to S_TRI_ADDR so it is NOT chained with the
-            // wide 96-bit W*recip rounding here in one cycle — that chain was the
-            // reported worst path (mul_v[40] -> tri_p0_addr, -5.576 ns).
-            A_MUL: begin
-                // texel coords (u12.4) then nearest-texel with clamp.
-                // FLOOR (plain >>>4), not +8 round: the interpolant is sampled
-                // at pixel centres so it already carries the destination's
-                // +half-pixel; the old +8 landed one texel down-right of GL/SW
-                // nearest on every 1:1 corner-UV draw (device-visible as
-                // mangled glyph text, 2026-07-26). MUST match refmodel
-                // blt_tri.c tex_nearest/tex_nearest_surface. Also drops one
-                // 64-bit add from the texel-address path.
-                rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
-                rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
-                itu   = rnd_u >>> 4;
-                itv   = rnd_v >>> 4;
-                // [app-surface v1] clamp bound: for a surface source the texel extent is the
-                // FIXED `FB_W x `FB_H surface (c_src_x/c_src_y are NOT consulted — they may be 0),
-                // matching the refmodel tex_nearest_surface; else the command's tex_w/tex_h.
-                tw1r  = tri_src_surface ? (`FB_W - 16'd1) : (c_src_x - 16'd1);
-                th1r  = tri_src_surface ? (`FB_H - 16'd1) : (c_src_y - 16'd1);
-                if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
-                if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
-                itu_q <= itu; itv_q <= itv;   // registered for the S_TRI_ADDR multiply
-                // per-vertex colour
-                rnd_r = (mul_r + (96'sd1<<<39)) >>> 40;
-                rnd_g = (mul_g + (96'sd1<<<39)) >>> 40;
-                rnd_b = (mul_b + (96'sd1<<<39)) >>> 40;
-                rnd_a = (mul_a + (96'sd1<<<39)) >>> 40;
-                cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
-                cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
-                // comp_fbram destination qword/lane for this pixel (independent of
-                // the texel-address multiply, so it stays here). Uses the dispatched
-                // pixel's snapshot (pxs/pys), since the walk cursor has already moved on.
-                dst_qw_q   <= pys*FB_STRIDE_QW16 + (pxs>>2);
-                dst_lane_q <= pxs[1:0];
-                pa<=A_ADDR;
-            end
-            // Interpolation stage 3a: the texel-row multiply itv*stride, REGISTERED
-            // in its own cycle. itv_q is a clamped texel row (<= tex_h-1), so the
-            // low 16 bits carry the whole value -> a single 16x16 DSP; registering
-            // the product (input itv_q + output tex_row) makes it a pipelined DSP.
-            // Doing it combinationally into the address add was an ~8.9 ns multiply
-            // feeding tri_p0_addr (the -2.0 ns worst path).
-            A_ADDR: begin
-                // [app-surface v1] row stride: a surface row is `FB_STRIDE_QW qwords
-                // (`FB_W px) wide; an SDRAM texture row is c_src_stride BYTES. Same
-                // registered 16x16 DSP.
-                tex_row <= itv_q[15:0] * (tri_src_surface ? FB_STRIDE_QW16 : c_src_stride);
-                pa<=A_ADDR2;
-            end
-            // Interpolation stage 3b: texel byte address add + P_SRC read (adds
-            // only; no multiply). One extra cycle per covered pixel, negligible vs.
-            // the SDRAM texel-read wait.
-            A_ADDR2: begin
-                if (tri_src_surface) begin
-                    // [app-surface v1] surface qword = itv*stride + (itu>>2), lane = itu[1:0].
-                    // tex_row already holds itv*stride (qwords). No SDRAM byte address / P_SRC
-                    // read — the texel is a 1-cyc comp_fbram surf_rd hit (B_SURF_*).
-                    surf_qw_q  <= tex_row[14:0] + {2'b0, itu_q[14:2]};   // itu>>2
-                    tex_lane_q <= itu_q[1:0];
-                end else begin
-                    // texel byte address (8-byte aligned; lane = byte[2:1]). Only the
-                    // adds + register writes live here; the prefetch fill-kick moved to
-                    // A_ISSUE so tq_hit's tag lookup is not chained behind texbyte's adder.
-                    texbyte = c_src_off + tex_row + (itu_q<<<1);
-                    pa_qtag     <= texbyte[26:3];
-                    tex_lane_q  <= texbyte[2:1];
+                // [span walk] step to the next row from the row-start snapshot, or
+                // finish the triangle. This is the ONLY place tri_cv is cleared.
+                A_ROWY: begin
+                    if (tri_py < tri_maxy) begin
+                        step_row;
+                        sk_dir_set <= 1'b0;   // the new row re-locks its own direction
+                        pa<=A_SEEK;
+                    end else begin
+                        tri_cv <= 1'b0;
+                        pa<=A_DONE;           // walk exhausted; let B drain
+                    end
                 end
-                pa<=A_ISSUE;
-            end
-            // Push this pixel's payload into the depth-D FIFO. Stall only when the FIFO
-            // is full (pa may run up to TEXFIFO_D pixels ahead of pb). Payload packing
-            // MUST match pb's B_IDLE unpack exactly. Uses pa_qtag (pa-private, latched at
-            // A_ADDR2) rather than tri_p0_addr: tri_p0_addr is a shared bus-address register
-            // that pb's B_FILL demand-miss path also writes, and a same-cycle collision or a
-            // pf_full stall here would clobber it before this push — see
-            // docs/superpowers/.../uvfull-rootcause-report.md.
-            A_ISSUE: if (!pf_full) begin
-                // best-effort prefetch: kick a fill for this qword when the arbiter is idle
-                // and it isn't the qword we just prefetched (last_pf_qtag skips the common
-                // 4-consecutive-pixels-share-a-qword case). No tag-RAM read here — that lets
-                // tq_tag be a single-reader M10K (see decl). Prefetch is best-effort; pb's
-                // B_LOOK/B_FILL demand path is the correctness backbone (bit-exact either way).
-                // [app-surface v1] no SDRAM prefetch for a surface source (the texel is a
-                // 1-cyc surf_rd BRAM hit, no tq cache); guard the fill-kick on !surface.
-                // tri_p0_addr (the actual P_SRC bus address) is only written here, at the
-                // moment a read is actually issued — never as a pipeline hand-carry.
-                if (!tri_src_surface && (pa_qtag != last_pf_qtag) && !fill_busy) begin
-                    tri_p0_rd    <= 1'b1;
-                    tri_p0_addr  <= {pa_qtag, 3'd0};
-                    fill_busy    <= 1'b1;
-                    fill_slot    <= pa_qtag[TEXQ_AW-1:0];
-                    fill_tag     <= pa_qtag[TEXQ_AW +: TEXQ_TW];
-                    last_pf_qtag <= pa_qtag;
-                end
-                // qtag field carries the SDRAM qword tag, or (surface) surf_qw zero-extended.
-                pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
-                    {ca_q, cb_q, cg_q, cr_q, dst_qw_q, dst_lane_q,
-                     (tri_src_surface ? {9'd0, surf_qw_q} : pa_qtag), tex_lane_q};
-                pf_wr <= pf_wr + 1'b1;
-                pa<=A_PIX;
-            end
             // Address-gen drained (cursor exhausted). Idle until B finishes.
             A_DONE: ;
             default: pa<=A_PIX;
             endcase
+
+                // ==== [pipeline stage 3b] the A CHAIN, as six concurrent pipeline
+                //      stages instead of six pa states ============================
+                // Each block is the body of the ex-pa-state named beside it, verbatim,
+                // with its `pa<=` hand-off replaced by the ax_v shift (done once above)
+                // and its cross-stage reads re-pointed at the ax*_ carries. Every stage
+                // fires INDEPENDENTLY, so up to six different pixels are in flight and a
+                // covered pixel is dispatched every cycle the credit allows.
+                //
+                // BIT-EXACTNESS ARGUMENT (why this cannot change a pixel):
+                //  * The arithmetic is byte-for-byte the code that was in the case arms —
+                //    same operand widths, same signedness, same rounding constants.
+                //  * A value written by stage k and read by stage k+1 keeps its single
+                //    register: NBA semantics make the read see the PREVIOUS cycle's write,
+                //    which is exactly the hand-off the sequencer had. The three values
+                //    whose consumer is 2-3 stages downstream (pxs/pys, itu_q, the colour
+                //    + dst pair) are the ONLY ones that had to be carried, and they are
+                //    carried by plain register copies.
+                //  * Pixels enter and leave in walk order (one FIFO, one push site), so
+                //    pb sees the identical payload sequence it saw before.
+                //  * The prefetch kick is unchanged and remains best-effort; pb's
+                //    B_LOOK/B_FILL demand path is still the correctness backbone.
+
+                // ── stage 1 -> 2 (ex-A_MUL0). Interpolation stage 1b: two 48x24 partial
+                // products per lane, split on recip's 24-bit halves (operands >= 0 ->
+                // unsigned). Registered -> each is a shallow pipelined multiply; the
+                // tile-adder tree of a full 48x48 is broken up and finished next stage.
+                if (ax_v[0]) begin
+                    pp_u_lo <= $unsigned(wu_q) * recip_q[23:0];  pp_u_hi <= $unsigned(wu_q) * recip_q[47:24];
+                    pp_v_lo <= $unsigned(wv_q) * recip_q[23:0];  pp_v_hi <= $unsigned(wv_q) * recip_q[47:24];
+                    pp_r_lo <= $unsigned(wr_q) * recip_q[23:0];  pp_r_hi <= $unsigned(wr_q) * recip_q[47:24];
+                    pp_g_lo <= $unsigned(wg_q) * recip_q[23:0];  pp_g_hi <= $unsigned(wg_q) * recip_q[47:24];
+                    pp_b_lo <= $unsigned(wb_q) * recip_q[23:0];  pp_b_hi <= $unsigned(wb_q) * recip_q[47:24];
+                    pp_a_lo <= $unsigned(wa_q) * recip_q[23:0];  pp_a_hi <= $unsigned(wa_q) * recip_q[47:24];
+                    ax2_px <= pxs; ax2_py <= pys;   // carry: consumed 2 stages on
+                end
+                // ── stage 2 -> 3 (ex-A_MUL1). Interpolation stage 1c: recombine the
+                // partial products (adds only). mul_X = pp_lo + (pp_hi << 24) ==
+                // wX_q * recip_q (bit-exact).
+                if (ax_v[1]) begin
+                    mul_u <= {24'd0,pp_u_lo} + {pp_u_hi,24'd0};
+                    mul_v <= {24'd0,pp_v_lo} + {pp_v_hi,24'd0};
+                    mul_r <= {24'd0,pp_r_lo} + {pp_r_hi,24'd0};
+                    mul_g <= {24'd0,pp_g_lo} + {pp_g_hi,24'd0};
+                    mul_b <= {24'd0,pp_b_lo} + {pp_b_hi,24'd0};
+                    mul_a <= {24'd0,pp_a_lo} + {pp_a_hi,24'd0};
+                    ax3_px <= ax2_px; ax3_py <= ax2_py;
+                end
+                // ── stage 3 -> 4 (ex-A_MUL). Interpolation stage 2: round the products
+                // and do the nearest-texel clamp; register the clamped coords. The
+                // texel-ADDRESS multiply (itv*stride) is deferred to the next stage so it
+                // is NOT chained with the wide 96-bit W*recip rounding here in one cycle —
+                // that chain was the reported worst path (mul_v[40] -> tri_p0_addr,
+                // -5.576 ns).
+                if (ax_v[2]) begin
+                    // texel coords (u12.4) then nearest-texel with clamp.
+                    // FLOOR (plain >>>4), not +8 round: the interpolant is sampled
+                    // at pixel centres so it already carries the destination's
+                    // +half-pixel; the old +8 landed one texel down-right of GL/SW
+                    // nearest on every 1:1 corner-UV draw (device-visible as
+                    // mangled glyph text, 2026-07-26). MUST match refmodel
+                    // blt_tri.c tex_nearest/tex_nearest_surface. Also drops one
+                    // 64-bit add from the texel-address path.
+                    rnd_u = (mul_u + (96'sd1<<<39)) >>> 40;
+                    rnd_v = (mul_v + (96'sd1<<<39)) >>> 40;
+                    itu   = rnd_u >>> 4;
+                    itv   = rnd_v >>> 4;
+                    // [app-surface v1] clamp bound: for a surface source the texel extent is the
+                    // FIXED `FB_W x `FB_H surface (c_src_x/c_src_y are NOT consulted — they may be 0),
+                    // matching the refmodel tex_nearest_surface; else the command's tex_w/tex_h.
+                    tw1r  = tri_src_surface ? (`FB_W - 16'd1) : (c_src_x - 16'd1);
+                    th1r  = tri_src_surface ? (`FB_H - 16'd1) : (c_src_y - 16'd1);
+                    if (itu < 0) itu = 0; else if (itu > $signed({16'd0,tw1r})) itu = $signed({16'd0,tw1r});
+                    if (itv < 0) itv = 0; else if (itv > $signed({16'd0,th1r})) itv = $signed({16'd0,th1r});
+                    itu_q <= itu; itv_q <= itv;   // registered for the next stage's multiply
+                    // per-vertex colour
+                    rnd_r = (mul_r + (96'sd1<<<39)) >>> 40;
+                    rnd_g = (mul_g + (96'sd1<<<39)) >>> 40;
+                    rnd_b = (mul_b + (96'sd1<<<39)) >>> 40;
+                    rnd_a = (mul_a + (96'sd1<<<39)) >>> 40;
+                    cr_q <= rnd_r[7:0]; cg_q <= rnd_g[7:0];
+                    cb_q <= rnd_b[7:0]; ca_q <= rnd_a[7:0];
+                    // comp_fbram destination qword/lane for this pixel (independent of
+                    // the texel-address multiply, so it stays here). Uses THIS pixel's
+                    // (px,py), carried down from its dispatch cycle in ax3_px/ax3_py —
+                    // pxs/pys now belong to a LATER pixel (the walk kept dispatching).
+                    dst_qw_q   <= ax3_py*FB_STRIDE_QW16 + (ax3_px>>2);
+                    dst_lane_q <= ax3_px[1:0];
+                end
+                // ── stage 4 -> 5 (ex-A_ADDR). Interpolation stage 3a: the texel-row
+                // multiply itv*stride, REGISTERED in its own cycle. itv_q is a clamped
+                // texel row (<= tex_h-1), so the low 16 bits carry the whole value -> a
+                // single 16x16 DSP; registering the product (input itv_q + output tex_row)
+                // makes it a pipelined DSP. Doing it combinationally into the address add
+                // was an ~8.9 ns multiply feeding tri_p0_addr (the -2.0 ns worst path).
+                if (ax_v[3]) begin
+                    // [app-surface v1] row stride: a surface row is `FB_STRIDE_QW qwords
+                    // (`FB_W px) wide; an SDRAM texture row is c_src_stride BYTES. Same
+                    // registered 16x16 DSP.
+                    tex_row <= itv_q[15:0] * (tri_src_surface ? FB_STRIDE_QW16 : c_src_stride);
+                    ax5_itu <= itu_q;             // carry: the byte add is one stage on
+                    ax5_cr  <= cr_q; ax5_cg <= cg_q; ax5_cb <= cb_q; ax5_ca <= ca_q;
+                    ax5_dst_qw <= dst_qw_q; ax5_dst_lane <= dst_lane_q;
+                end
+                // ── stage 5 -> 6 (ex-A_ADDR2). Interpolation stage 3b: texel byte address
+                // add + tag split (adds only; no multiply).
+                if (ax_v[4]) begin
+                    if (tri_src_surface) begin
+                        // [app-surface v1] surface qword = itv*stride + (itu>>2), lane = itu[1:0].
+                        // tex_row already holds itv*stride (qwords). No SDRAM byte address / P_SRC
+                        // read — the texel is a 1-cyc comp_fbram surf_rd hit (B_SURF_*).
+                        surf_qw_q  <= tex_row[14:0] + {2'b0, ax5_itu[14:2]};   // itu>>2
+                        tex_lane_q <= ax5_itu[1:0];
+                    end else begin
+                        // texel byte address (8-byte aligned; lane = byte[2:1]). Only the
+                        // adds + register writes live here; the prefetch fill-kick is in
+                        // the issue stage so tq_hit's tag lookup is not chained behind
+                        // texbyte's adder.
+                        texbyte = c_src_off + tex_row + (ax5_itu<<<1);
+                        pa_qtag     <= texbyte[26:3];
+                        tex_lane_q  <= texbyte[2:1];
+                    end
+                    ax6_cr <= ax5_cr; ax6_cg <= ax5_cg; ax6_cb <= ax5_cb; ax6_ca <= ax5_ca;
+                    ax6_dst_qw <= ax5_dst_qw; ax6_dst_lane <= ax5_dst_lane;
+                end
+                // ── stage 6 (ex-A_ISSUE). Push this pixel's payload into the depth-D
+                // FIFO. Payload packing MUST match pb's B_IDLE unpack exactly. Uses
+                // pa_qtag (pipeline-private) rather than tri_p0_addr: tri_p0_addr is a
+                // shared bus-address register that pb's B_FILL demand-miss path also
+                // writes, and a same-cycle collision would clobber the in-flight address —
+                // see docs/superpowers/.../uvfull-rootcause-report.md.
+                //
+                // [pipeline stage 3b] the old `if (!pf_full)` stall is GONE, and its
+                // absence is a load-bearing consequence of the credit scheme, not an
+                // oversight: ax_cred <= TEXFIFO_D bounds (pixels in the pipe + pixels in
+                // the FIFO), and the pixel being pushed is still counted in the pipe, so
+                // FIFO occupancy here is at most TEXFIFO_D-1.
+                //
+                // THREE THINGS MUST MOVE TOGETHER, and only the first two are obvious:
+                //   1. TEXFIFO_D / TEXFIFO_AW (the FIFO's own depth and pointer width)
+                //   2. the `ax_room` bound at the ax_room declaration
+                //   3. **ax_cred's WIDTH** — it must stay $clog2(TEXFIFO_D+1), i.e. wide
+                //      enough for the INCLUSIVE value TEXFIFO_D. That is why AX_CW is
+                //      derived rather than written: at TEXFIFO_D=16 a 4-bit ax_cred makes
+                //      `ax_cred < TEXFIFO_D` a tautology, the dispatcher never throttles,
+                //      and with this guard removed nothing downstream notices. Sim catches
+                //      it (3B-CREDW at elaboration, then 3B-PFFULL below); synthesis will
+                //      not. If any of the three is ever changed independently of the
+                //      others, restore the `if (!pf_full)` guard.
+                if (ax_v[5]) begin
+`ifndef SYNTHESIS
+                    // The credit invariant, ASSERTED rather than trusted: this is what
+                    // replaced the `if (!pf_full)` stall, and a golden-framebuffer diff
+                    // would only catch it once the overflow happened to change a pixel.
+                    if (pf_full) begin
+                        $display("FAIL 3B-PFFULL: A-pipeline push into a FULL payload FIFO at t=%0t (ax_cred=%0d) -- credit accounting is broken", $time, ax_cred);
+                        $finish;
+                    end
+                    if (ax_cred == {AX_CW{1'b0}}) begin
+                        $display("FAIL 3B-CRED0: A-pipeline push with zero credits outstanding at t=%0t", $time);
+                        $finish;
+                    end
+`endif
+                    // best-effort prefetch: kick a fill for this qword when the arbiter is idle
+                    // and it isn't the qword we just prefetched (last_pf_qtag skips the common
+                    // 4-consecutive-pixels-share-a-qword case). No tag-RAM read here — that lets
+                    // tq_tag be a single-reader M10K (see decl). Prefetch is best-effort; pb's
+                    // B_LOOK/B_FILL demand path is the correctness backbone (bit-exact either way).
+                    // [app-surface v1] no SDRAM prefetch for a surface source (the texel is a
+                    // 1-cyc surf_rd BRAM hit, no tq cache); guard the fill-kick on !surface.
+                    // tri_p0_addr (the actual P_SRC bus address) is only written here, at the
+                    // moment a read is actually issued — never as a pipeline hand-carry.
+                    if (!tri_src_surface && (pa_qtag != last_pf_qtag) && !fill_busy) begin
+                        tri_p0_rd    <= 1'b1;
+                        tri_p0_addr  <= {pa_qtag, 3'd0};
+                        fill_busy    <= 1'b1;
+                        fill_slot    <= pa_qtag[TEXQ_AW-1:0];
+                        fill_tag     <= pa_qtag[TEXQ_AW +: TEXQ_TW];
+                        last_pf_qtag <= pa_qtag;
+                    end
+                    // qtag field carries the SDRAM qword tag, or (surface) surf_qw zero-extended.
+                    pf_mem[pf_wr[TEXFIFO_AW-1:0]] <=
+                        {ax6_ca, ax6_cb, ax6_cg, ax6_cr, ax6_dst_qw, ax6_dst_lane,
+                         (tri_src_surface ? {9'd0, surf_qw_q} : pa_qtag), tex_lane_q};
+                    pf_wr <= pf_wr + 1'b1;
+                end
 
             // ==== sub-FSM B: wait texel -> dst read -> 3-stage blend -> comp_fbram write ====
             case (pb)
@@ -1750,9 +2143,15 @@ module blitter_top #(
             default: pb<=B_IDLE;
             endcase
 
-            // Triangle drained when address-gen is done, the blend pipe is empty, and
-            // no texel is outstanding -> advance to the next triangle / finish.
-            if ((pa==A_DONE) && (pb==B_IDLE) && pf_empty && !fill_busy)
+            // Triangle drained when address-gen is done, the A pipeline has emptied, the
+            // blend pipe is empty, and no texel is outstanding -> next triangle / finish.
+            // [pipeline stage 3b] !ax_busy is REQUIRED here and is the mutation-checked
+            // control signal for this change: pa now reaches A_DONE up to six cycles
+            // BEFORE the last dispatched pixels have been pushed, and pf_empty is true
+            // during that window (pb has drained everything pushed so far), so without
+            // !ax_busy this test fires early and S_TRI_SWAIT's pf_wr/pf_rd/ax_v reset
+            // discards them. See the "drop a pixel" mutation in the Task 7 report.
+            if ((pa==A_DONE) && !ax_busy && (pb==B_IDLE) && pf_empty && !fill_busy)
                 state<=S_TRI_NEXT;
             end
             // Triangle done: advance to the next triangle, else finish the command.
@@ -2064,6 +2463,24 @@ module blitter_top #(
     // tri_busy; otherwise comp_pipeline drives it.
     assign p0_addr = tri_busy ? tri_p0_addr : p_src_sdram_addr;
     assign p0_rd   = tri_busy ? tri_p0_rd   : p_src_sdram_rd;
+
+`ifdef FABRIC_ASSERT
+    // [#110 SVA companion] comp_pipeline's tightened #110 assertion (comp_pipeline.sv
+    // "sva_own_rd") tracks only its OWN p0_rd -> p0_ok window; it has no visibility into
+    // whether that p0_rd actually reached the shared P_SRC bus, because the owner mux
+    // just above steers p0_addr/p0_rd to tri_p0_* whenever tri_busy=1, silently dropping
+    // comp_pipeline's request from the wire. sva_own_rd still latches in that case (it
+    // samples comp_pipeline's LOCAL p0_rd, pre-mux), so that assertion is sound only as
+    // long as tri_busy and pipe_busy never overlap -- comp_pipeline cannot have a fetch
+    // in flight (pipe_busy) while the mux steers the port away from it to TRILIST
+    // (tri_busy). This SVA checks that mutual-exclusion invariant directly, at the one
+    // place both signals are visible together, instead of leaving #110 to depend on it
+    // silently. iverilog immediate assertion (concurrent `assert property` is
+    // unsupported); "FAIL" in the message trips run_sims.sh.
+    always @(posedge clk) if (!rst)
+      assert (!(tri_busy && pipe_busy))
+      else $display("FABRIC-ASSERT FAIL [blitter_top]: tri_busy && pipe_busy both asserted @%0t -> P_SRC owner mux and comp_pipeline's sva_own_rd both assume mutual exclusion", $time);
+`endif
 
     // pipe_busy bookkeeping: raised when pipe_start pulses (S_SETUP hands a blit
     // to the pipeline), lowered on blit_done. pipe_busy_q is a LOCKSTEP DUPLICATE

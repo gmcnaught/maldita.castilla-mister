@@ -37,8 +37,8 @@ CFLAGS    ?= -O2 -Wall
 
 SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface tri_uvfull tri_missdst tri_surfalpha
 
-.PHONY: all vectors clean contract-check
-all: gen_tri_golden gen_system_golden
+.PHONY: all vectors clean contract-check stream-vectors
+all: gen_tri_golden gen_system_golden gen_tri_stream
 
 # Refuse to build a golden generator whose refmodel disagrees with the RTL on
 # the opcodes the vectors encode. Without this the only symptom of a contract
@@ -87,10 +87,36 @@ gen_tri_golden: gen_tri_golden.c blt_tri.c | contract-check
 gen_system_golden: gen_system_golden.c blt_tri.c | contract-check
 	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_system_golden.c
 
+# [Phase 3A Task 5] Stream-replay generator: same ring/vertex packing and golden
+# emission as gen_tri_golden, but the scene comes from a CAPTURED DEVICE draw
+# stream (an MFTRACE text file) instead of a hand-written scenario. Single-source
+# like its sibling (blt_tri.c / blitter_ref.c arrive by #include), so blt_tri.c is
+# a prerequisite but NOT a second file on the cc line.
+gen_tri_stream: gen_tri_stream.c blt_tri.c | contract-check
+	$(CC) $(CFLAGS) -I $(REFMODEL) -o $@ gen_tri_stream.c
+
 vectors: gen_tri_golden gen_system_golden
 	mkdir -p vectors
 	for s in $(SCENARIOS); do ./gen_tri_golden $$s; done
 	./gen_system_golden
 
+# ── stream-replay vectors ────────────────────────────────────────────────────
+# TRACEDIR points at the committed device captures (Task 3). Only stream_quiet_f0
+# is COMMITTED (it is what tb_blitter_trilist_stream.sv loads by default and what
+# run_sims.sh gates on); the other frames are ~700 KiB each and are regenerated on
+# demand:
+#   make -f gen_tri_golden.mk stream-vectors                    # quiet frame 0
+#   ./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 1 stream_quiet_f1
+#   ./gen_tri_stream $(TRACEDIR)/mftrace-arrival.txt 3 stream_arrival_f3
+# then run the tb against one with -DSTREAM_VEC='"stream_quiet_f1"' (see the tb header).
+# Same "sibling working checkout, not a recorded pin" caveat as REFMODEL above:
+# the captures live in the mister-gmloader bundler repo, not in this one. Nothing
+# at TB RUN time needs them (the committed vectors/*.hex are self-contained) — the
+# path is only needed to REGENERATE vectors.
+TRACEDIR := ../../../mister-gmloader/docs/superpowers/findings/data
+stream-vectors: gen_tri_stream
+	mkdir -p vectors
+	./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 0 stream_quiet_f0
+
 clean:
-	rm -f gen_tri_golden gen_system_golden
+	rm -f gen_tri_golden gen_system_golden gen_tri_stream

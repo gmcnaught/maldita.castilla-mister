@@ -17,17 +17,28 @@
 //
 //   wall-clock   = cycles from first pb activity to the LAST pixel retiring, / pixels.
 //     pa and pb run CONCURRENTLY behind the depth-8 payload FIFO, so end-to-end
-//     throughput is max(pa, pb), not pb. pa costs ~8 cyc per RETIRED pixel (7 states
-//     plus ~1 bbox-rejection cycle, since A_PIX re-enters itself for every non-covered
-//     pixel), so wall stays ~8 even once pb drops to 6.
+//     throughput is max(pa, pb), not pb.
+//     [span walk, Phase 3A Task 6] pa USED to cost ~8 cyc per retired pixel: 7 states
+//     plus ~1 bbox-rejection cycle, because A_PIX re-entered itself for every
+//     non-covered bbox column. The walk now derives each row's covered interval
+//     instead of scanning the bbox (A_SEEK/A_PIX/A_ROWY), which deleted that ~1
+//     cycle/pixel and replaced it with ~2.9 cycles per ROW: pa fell to ~7.1 cyc/px.
+//     [pipeline stage 3b, Phase 3A Task 7] The EXPIRY note below has now FIRED. pa's
+//     six mul/addr/issue states became a 6-deep pipeline, so pa dispatches 1 px/cyc
+//     (credit-limited) and costs ~1.1 cyc per retired pixel. pa is no longer the
+//     binding constraint: wall-clock now tracks pb, and the two printed numbers should
+//     agree to ~0.01 cyc/px on a hit-path bench (measured 6.00 / 6.00 on
+//     tb_blitter_trilist_add). A wall figure that drifts ABOVE pb again means either
+//     texel stalls (B_WAIT) or a regression in the dispatcher's credit accounting.
 //
 // Reporting only pb-occupancy would overstate the win as 1.33x; reporting only wall
 // would make a correctly working A2 look like a no-op. The gate is on pb-occupancy —
 // the thing A2 controls — and wall is printed unconditionally so pa's limit cannot hide.
 //
-// EXPIRY: the wall commentary above holds only while pa >= pb. If a later task cuts pa
-// below 6, wall tracks pb again and the two numbers converge. The pb figure itself does
-// not expire — it measures pb occupancy directly, independent of pa.
+// EXPIRY: (FIRED at Task 7 — see above.) The wall commentary held only while pa >= pb;
+// pa is now ~1.1 cyc/px, so wall tracks pb and the two numbers converge. The pb figure
+// itself does not expire — it measures pb occupancy directly, independent of pa. pb's
+// six states are now the whole story for per-pixel throughput.
 //
 // pb states are referenced HIERARCHICALLY (blt.B_IDLE / blt.B_WR3), not as literals.
 // With literals, renumbering pb would make this gate MISCOUNT rather than error — a
