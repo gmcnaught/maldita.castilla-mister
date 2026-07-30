@@ -160,7 +160,7 @@ SKIP="tb_profile"
 # and the `tri_px == tri_ox` clamp -> `== tri_ox+1`) were caught by NONE of the other ten
 # trilist benches — both need a leftward seek, which the captured frames and the synthetic
 # quad barely exercise. Its five non-overlapping triangles (one off-left-CLAMPED, four with
-# vertices on pixel centres and a slope -1 left edge) make each mutation fail: exact_bad=760
+# vertices on pixel centres and slope -1 left edges (T3: -2)) make each mutation fail: exact_bad=760
 # and exact_bad=5 respectively. Non-overlapping is load-bearing — an overlapping triangle
 # would overpaint the dropped pixels and re-hide the hole. ~2 s. See the tb header for the
 # per-triangle derivation and why the M1 margin is inherently only a few pixels.

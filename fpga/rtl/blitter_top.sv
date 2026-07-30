@@ -608,13 +608,16 @@ module blitter_top #(
     // Payload = {ca,cb,cg,cr[8b each]=32, dst_qw[15], dst_lane[2], qtag[24], texlane[2]}
     // = 75 bits. Pointer-with-extra-MSB scheme gives full/empty disambiguation.
     localparam integer TEXFIFO_D  = 8;
-    localparam integer TEXFIFO_AW = 3;      // $clog2(TEXFIFO_D)
+    localparam integer TEXFIFO_AW = $clog2(TEXFIFO_D);
     // [pipeline stage 3b] ax_cred lives HERE, next to the depth it is derived from,
     // rather than up with the other ax_* registers: its width is a function of
     // TEXFIFO_D and the two must never be edited apart (see the issue stage's
     // "THREE THINGS MUST MOVE TOGETHER" note). Keeping them adjacent is the cheapest
     // way to make that impossible to miss -- and Verilog requires it anyway, since
     // $clog2(TEXFIFO_D+1) cannot reference a localparam declared further down.
+    // TEXFIFO_AW itself is now DERIVED (not hand-written) for the same reason ax_cred's
+    // width is derived below: a fixed pointer width is a WIDTH TRAP the moment TEXFIFO_D
+    // changes. Only TEXFIFO_D should ever be edited by hand.
     // ax_cred holds 0..TEXFIFO_D INCLUSIVE, so its width must be $clog2(TEXFIFO_D+1), NOT
     // $clog2(TEXFIFO_D). DERIVED, never hand-written: a fixed [3:0] happens to be right at
     // TEXFIFO_D=8 but becomes a WIDTH TRAP the moment the depth is raised (the obvious next
