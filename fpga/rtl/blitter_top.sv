@@ -447,6 +447,62 @@ module blitter_top #(
     reg         [7:0]  tri_vr2,tri_vg2,tri_vb2,tri_va2;
     reg          tri_setup_start;           // 1-cycle pulse into blt_tri_setup
 
+    // ── [W3 §2b] vertex + setup prefetch engine ───────────────────────────────
+    // Runs CONCURRENTLY with the coverage walk, i.e. only while state==S_TRI_PIX
+    // (plus a DRAIN-only tick in S_TRI_NEXT, see the block itself).
+    // That is the one state in which the main FSM leaves bm_*/mem_* idle: the
+    // walk's texels come from the SDRAM P_SRC port (src_in_sdram is hardwired 1)
+    // and its writes go to comp_fbram, so nothing else drives the DDR3 read
+    // master between S_TRI_SWAIT and S_TRI_NEXT. The prefetch therefore steals no
+    // walk cycle -- it re-times reads that already happened, from BETWEEN
+    // triangles to DURING them.
+    //
+    // BUS EXCLUSIVITY (the invariant this whole block rests on):
+    //   * bm_rd/bm_addr/bm_wr are written ONLY by (a) the block-top defaults,
+    //     (b) arms of the main `case (state)`, and (c) this prefetch block.
+    //   * The S_TRI_PIX and S_TRI_NEXT case arms contain NO bm_* assignment
+    //     (verified by inspection of both arms; the walk's memory traffic is
+    //     p0_* / comp_fbram, not bm_*).
+    //   * This block is gated on state being one of exactly those two.
+    //   Therefore no cycle exists in which both write bm_rd/bm_addr.
+    //   Corollary: the main FSM can never have a read OUTSTANDING here either,
+    //   because a main-FSM read is always awaited in S_RD_WAIT, which only
+    //   leaves on mem_dout_ready. That matters because mem_dout_ready carries no
+    //   tag -- two outstanding reads would be indistinguishable. S_TRI_NEXT
+    //   correspondingly refuses to leave while pv is non-quiescent.
+    //
+    // It has its OWN issue/accept/response handshake rather than borrowing
+    // S_RD_WAIT, which is a main-FSM subroutine. That includes its own reissue
+    // watchdog on the same RW_WD_MAX window: the startup wedge (a lost f2h read
+    // response at core-load bring-up) was exactly a master that never re-issued,
+    // and a second requester without the watchdog would re-introduce it.
+    localparam [2:0] PV_IDLE  = 3'd0,   // nothing in flight
+                     PV_ISSUE = 3'd1,   // drive bm_rd for qword pv_k
+                     PV_WAIT  = 3'd2,   // await the response (with reissue watchdog)
+                     PV_DECV  = 3'd3,   // unpack the 6 qwords into tri_v*
+                     PV_START = 3'd4,   // pulse blt_tri_setup.start; latch the bbox
+                     PV_RUN   = 3'd5,   // setup computing; await ts_valid
+                     PV_HOLD  = 3'd6;   // ts_* hold the NEXT triangle: seed on demand
+    reg  [2:0]   pv;
+    reg  [2:0]   pv_k;                  // which of the 6 vertex qwords
+    // Six 64-bit words read at CONSTANT indices in PV_DECV (pv_qw[0]..pv_qw[5])
+    // and written at the variable index pv_k -- no variable READ address, so this
+    // infers 384 plain flops, not an M10K. That is deliberate and is what we want
+    // here: a `ramstyle` array whose read sits inside an FSM case arm is exactly
+    // the pattern that silently failed M10K inference once already (map.rpt
+    // 276007) and cost 20,480 stray flops plus a 1,735-fanout mux. Same shape as
+    // tri_vqw, which has always been flops.
+    reg  [63:0]  pv_qw [0:5];
+    reg  [31:0]  pv_base;               // qword address of the prefetched vertex 0
+    reg          pv_rd_issued;
+    reg  [21:0]  pv_wd;                 // reissue watchdog (same window as rw_wd)
+    // Pre-registered bbox for the prefetched triangle, for the same reason
+    // S_TRI_SETUP pre-registers it: keep the raw-vertex compare cloud out of the
+    // seed cycle, which was the -4.5 ns worst setup path before it was hoisted.
+    reg  [15:0]  pv_maxx, pv_maxy;
+    reg          pv_bbox_neg;
+    reg          pv_ready;              // PV_HOLD reached: ts_* are the next triangle's
+
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
     reg  [15:0]  tri_ox;                               // bbox-min x (seek's left clamp)
@@ -1233,6 +1289,8 @@ module blitter_top #(
             fb_dma_start<=1'b0; // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
+            // [W3 §2b] the prefetch engine comes out of reset quiescent.
+            pv<=PV_IDLE; pv_rd_issued<=1'b0; pv_wd<=22'd0; pv_ready<=1'b0;
             tri_bbox_neg<=1'b0; sk_dir_set<=1'b0; sk_left<=1'b0;
             ax_v<=6'd0; ax_cred<={AX_CW{1'b0}};   // [pipeline stage 3b]
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
@@ -1282,6 +1340,15 @@ module blitter_top #(
             // executes later in this block, so it wins on the reissue cycle).
             if (state != S_RD_WAIT) rw_wd <= 22'd0;
             else if (rw_wd != RW_WD_MAX) rw_wd <= rw_wd + 22'd1;
+
+            // [W3 §2b] prefetch reissue watchdog, mirroring rw_wd. Reset outside
+            // PV_WAIT; PV_WAIT's own reissue branch clears it too (that NBA runs
+            // later in this block, so it wins on the reissue cycle). The window
+            // is the SAME RW_WD_MAX and must stay > the arbiter's
+            // FLUSH_QUIET_MAX, so a reissue can only fire after the arb has
+            // flushed the dead expectation -- see the S_RD_WAIT comment.
+            if (pv != PV_WAIT) pv_wd <= 22'd0;
+            else if (pv_wd != RW_WD_MAX) pv_wd <= pv_wd + 22'd1;
 
             case (state)
             S_POLL_SUBMIT: begin
@@ -1457,6 +1524,14 @@ module blitter_top #(
                     // c_blend/c_alpha/c_colorkey = blend params.
                     tri_count    <= c_w;
                     tri_idx      <= 16'd0;
+                    // [W3 §2b] a new command's first triangle always takes the
+                    // serial path; the prefetch arms once its walk begins. This
+                    // is belt-and-braces -- a TRILIST can only be decoded from
+                    // S_SETUP, which is reachable only after the previous
+                    // command's S_TRI_NEXT already forced pv to PV_IDLE -- but it
+                    // makes the "pv is IDLE outside a TRILIST walk" invariant
+                    // hold by construction rather than by reachability argument.
+                    pv <= PV_IDLE; pv_rd_issued <= 1'b0; pv_ready <= 1'b0;
                     tri_entry_qw <= `SRC_QW + ({c_dst_y, c_dst_x} >> 3);
                     tri_busy     <= 1'b1;
                     // [app-surface v1] texel source = off-screen APPSURF surface when set,
@@ -1600,11 +1675,27 @@ module blitter_top #(
             // Wait for setup valid; seed bbox + running accumulators at (ox,oy).
             // Skip degenerate, off-left/above (negative bbox-max) or fully-off
             // (min>max) triangles.
-            S_TRI_SWAIT: if (ts_valid) begin
-                // guard against registered bbox-max / bbox-neg (set at S_TRI_SETUP)
-                if (ts_degenerate || tri_bbox_neg || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
+            // [W3 §2b] `pv_ready` is the prefetch path's latched equivalent of the
+            // one-cycle ts_valid pulse: on the prefetched path ts_valid fired
+            // thousands of cycles ago, during the PREVIOUS triangle's walk, but
+            // blt_tri_setup's outputs are all `output reg` and it has been idle
+            // since (no further start), so ts_ox/ts_oy/ts_degenerate/ts_w*_0/
+            // ts_W*_0/ts_d*/ts_area_recip still hold that triangle's results.
+            // The two gate terms are mutually exclusive by construction: pv_ready
+            // is set only on PV_RUN->PV_HOLD, and this state is reached from
+            // S_TRI_SETUP only on the serial path, which is taken only when
+            // pv==PV_IDLE.
+            S_TRI_SWAIT: if (ts_valid || pv_ready) begin
+                // guard against registered bbox-max / bbox-neg (set at S_TRI_SETUP
+                // on the serial path, or copied from pv_maxx/pv_maxy/pv_bbox_neg
+                // by S_TRI_NEXT's fast path -- either way a REGISTER, never the
+                // raw-vertex compare cloud)
+                if (ts_degenerate || tri_bbox_neg || (ts_ox > tri_maxx) || (ts_oy > tri_maxy)) begin
+                    pv_ready <= 1'b0;   // [W3 §2b] consumed (reject path)
                     state<=S_TRI_NEXT;
+                end
                 else begin
+                    pv_ready <= 1'b0;   // [W3 §2b] consumed (seed path)
                     tri_ox <= ts_ox;
                     tri_px <= ts_ox;      tri_py <= ts_oy;
                     row_px <= ts_ox;
@@ -2189,12 +2280,50 @@ module blitter_top #(
             // Triangle done: advance to the next triangle, else finish the command.
             S_TRI_NEXT: begin
                 if (tri_idx + 16'd1 < tri_count) begin
-                    tri_idx <= tri_idx + 16'd1;
-                    state<=S_TRI_VFETCH;
-                end else begin
+                    // [W3 §2b] fast path: the prefetch already fetched this
+                    // triangle's vertices and ran its setup during the previous
+                    // triangle's walk, so ts_* hold its outputs and the bbox is
+                    // pre-registered in pv_*. Seed straight from them.
+                    if (pv == PV_HOLD) begin
+                        tri_idx      <= tri_idx + 16'd1;
+                        tri_maxx     <= pv_maxx;
+                        tri_maxy     <= pv_maxy;
+                        tri_bbox_neg <= pv_bbox_neg;
+                        pv           <= PV_IDLE;
+                        state        <= S_TRI_SWAIT;
+                    end else if (pv == PV_IDLE) begin
+                        // No prefetch ran (first triangle of a command, or the
+                        // previous triangle was rejected in S_TRI_SWAIT and so
+                        // never entered S_TRI_PIX where the prefetch arms): the
+                        // original serial path, unchanged.
+                        tri_idx <= tri_idx + 16'd1;
+                        state   <= S_TRI_VFETCH;
+                    end
+                    // else: a prefetch is mid-flight (PV_ISSUE/WAIT/DECV/START/
+                    // RUN). HOLD here. Leaving now would let the main FSM issue
+                    // bm_rd with a prefetch read still outstanding, and the two
+                    // responses are indistinguishable on mem_dout_ready.
+                    //
+                    // This hold cannot deadlock: the prefetch block below is
+                    // gated on S_TRI_PIX *or S_TRI_NEXT* precisely so it keeps
+                    // ticking here, and none of its non-quiescent states waits on
+                    // `state` -- PV_WAIT waits on the bus (bounded by its reissue
+                    // watchdog), PV_START on ts_ready (high: this triangle's setup
+                    // finished before its walk began), PV_RUN on ts_valid (~54
+                    // cycles). So pv always reaches PV_HOLD and this arm retires.
+                end else if (pv == PV_IDLE || pv == PV_HOLD) begin
+                    // Command done. Same quiescence requirement: never leave the
+                    // TRILIST walk with a prefetch read outstanding. (PV_HOLD is
+                    // accepted as well as PV_IDLE only for symmetry -- the arming
+                    // guard means no prefetch is ever started for a non-existent
+                    // triangle tri_count, so on the last triangle pv is PV_IDLE.)
                     tri_busy <= 1'b0;
-                    state<=S_NEXT_CMD;
+                    pv       <= PV_IDLE;
+                    pv_ready <= 1'b0;
+                    state    <= S_NEXT_CMD;
                 end
+                // else: mid-flight prefetch on the command-done path. Same hold,
+                // same liveness argument.
             end
 
             S_NEXT_CMD: begin cmd_idx<=cmd_idx+1; state<=S_FETCH; end
@@ -2365,6 +2494,95 @@ module blitter_top #(
                 else state <= wr_ret;
             default: state<=S_POLL_SUBMIT;
             endcase
+
+            // ── [W3 §2b] the prefetch engine ──────────────────────────────────
+            // Gated on state==S_TRI_PIX so its bm_* drive can never collide with
+            // the main FSM's: that is the only state in which the case above
+            // leaves bm_rd/bm_addr untouched while a triangle is being walked.
+            // Also ticks in S_TRI_NEXT so an in-flight prefetch can DRAIN -- that
+            // state issues no bm_* of its own either, and S_TRI_NEXT refuses to
+            // leave until pv is quiescent, so the two can never both drive the
+            // master. Placed AFTER the case so its NBAs win over the block-top
+            // `bm_rd<=1'b0` default (and over `tri_setup_start<=1'b0`).
+            if ((state == S_TRI_PIX) || (state == S_TRI_NEXT)) begin
+                case (pv)
+                // Arm only from S_TRI_PIX: a drain-only tick in S_TRI_NEXT must
+                // never START a new prefetch, or S_TRI_NEXT would re-arm itself
+                // the instant it went quiescent and never retire.
+                PV_IDLE: if ((state == S_TRI_PIX) && (tri_idx + 16'd1 < tri_count)) begin
+                    pv_base <= tri_entry_qw + (tri_idx + 16'd1)*16'd6;
+                    pv_k    <= 3'd0;
+                    pv      <= PV_ISSUE;
+                end
+                PV_ISSUE: begin
+                    bm_rd        <= 1'b1;
+                    bm_addr      <= pv_base + {29'd0, pv_k};
+                    pv_rd_issued <= 1'b0;
+                    pv           <= PV_WAIT;
+                end
+                // Byte-for-byte the S_RD_WAIT handshake, on its own registers:
+                // hold bm_rd until the bus accepts (~mem_busy), then await the
+                // response, with the same RW_WD_MAX reissue watchdog.
+                PV_WAIT: begin
+                    if (!pv_rd_issued) begin
+                        bm_rd <= 1'b1;                    // hold the request
+                        if (!mem_busy) pv_rd_issued <= 1'b1;
+                    end else if (mem_dout_ready) begin
+                        pv_qw[pv_k]  <= mem_dout;
+                        pv_rd_issued <= 1'b0;
+                        if (pv_k == 3'd5) pv <= PV_DECV;
+                        else begin pv_k <= pv_k + 3'd1; pv <= PV_ISSUE; end
+                    end else if (pv_wd == RW_WD_MAX) begin
+                        pv_rd_issued <= 1'b0;             // response lost: re-arm
+                        bm_rd        <= 1'b1;
+                        pv_wd        <= 22'd0;
+                        // rd_reissue_cnt is a saturating DIAGNOSTIC only (its sole
+                        // reader is the `dbg` bus, bits [22:15]); nothing uses it
+                        // for control, so the two requesters sharing one counter
+                        // is a deliberate "reissues since reset, either master".
+                        if (~&rd_reissue_cnt) rd_reissue_cnt <= rd_reissue_cnt + 8'd1;
+                    end
+                end
+                // Identical unpack to S_TRI_DECV. Writing tri_v* here is safe: the
+                // CURRENT triangle's setup latched its vertices at P1 on `start`
+                // and the walk reads only tw_*/w*/W*, never tri_v*. The only other
+                // consumer of tri_v* is the combinational tri_maxx_cl/tri_maxy_cl/
+                // tri_bbox_neg_c bbox cloud, which is sampled only at S_TRI_SETUP
+                // (serial path) and at PV_START (this path) -- never during a walk.
+                PV_DECV: begin
+                    tri_vx0<=pv_qw[0][15:0];  tri_vy0<=pv_qw[0][31:16];
+                    tri_vu0<=pv_qw[0][47:32]; tri_vv0<=pv_qw[0][63:48];
+                    tri_vr0<=pv_qw[1][7:0];   tri_vg0<=pv_qw[1][15:8];
+                    tri_vb0<=pv_qw[1][23:16]; tri_va0<=pv_qw[1][31:24];
+                    tri_vx1<=pv_qw[2][15:0];  tri_vy1<=pv_qw[2][31:16];
+                    tri_vu1<=pv_qw[2][47:32]; tri_vv1<=pv_qw[2][63:48];
+                    tri_vr1<=pv_qw[3][7:0];   tri_vg1<=pv_qw[3][15:8];
+                    tri_vb1<=pv_qw[3][23:16]; tri_va1<=pv_qw[3][31:24];
+                    tri_vx2<=pv_qw[4][15:0];  tri_vy2<=pv_qw[4][31:16];
+                    tri_vu2<=pv_qw[4][47:32]; tri_vv2<=pv_qw[4][63:48];
+                    tri_vr2<=pv_qw[5][7:0];   tri_vg2<=pv_qw[5][15:8];
+                    tri_vb2<=pv_qw[5][23:16]; tri_va2<=pv_qw[5][31:24];
+                    pv <= PV_START;
+                end
+                // ts_ready is high here in every expected case (the current
+                // triangle's setup completed before its walk began), but the pulse
+                // is gated on it anyway: blt_tri_setup drops a start it cannot
+                // accept, and a dropped start here would park the walk in
+                // S_TRI_NEXT forever.
+                PV_START: if (ts_ready) begin
+                    tri_setup_start <= 1'b1;
+                    pv_maxx <= tri_maxx_cl; pv_maxy <= tri_maxy_cl;
+                    pv_bbox_neg <= tri_bbox_neg_c;
+                    pv <= PV_RUN;
+                end
+                PV_RUN: if (ts_valid) begin
+                    pv_ready <= 1'b1;
+                    pv       <= PV_HOLD;
+                end
+                PV_HOLD: ;   // ts_* hold the next triangle; S_TRI_NEXT consumes them
+                default: pv <= PV_IDLE;
+                endcase
+            end
         end
     end
 
