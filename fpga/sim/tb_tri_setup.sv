@@ -138,10 +138,12 @@ module tb_tri_setup;
   end endtask
 
   // [W3 §2b] The ready contract: a start pulsed while !ready must be IGNORED (the
-  // module's internal guard already does this), and ready must be low from the
-  // accepted start until the outputs are valid. Task 7 pulses start from a
-  // concurrent sub-FSM, where a silently dropped start stalls the walk forever.
-  task check_ready_contract;
+  // module's internal guard already does this), ready must be low from the
+  // accepted start until the outputs are valid, AND ready must be back high on
+  // the EXACT cycle valid rises. Task 7's prefetch engine pulses the next start
+  // the moment it observes valid; a ready that lagged valid by even one cycle
+  // would silently drop that start and stall the walk forever.
+  task automatic check_ready_contract;
     integer guard;
     begin
       // idle => ready
@@ -167,7 +169,18 @@ module tb_tri_setup;
       if (guard >= 200) begin
         $display("RESULT: FAIL (no valid within 200 cycles)"); $finish;
       end
-      $display("  ready contract OK (valid after %0d cycles)", guard);
+      // Positively assert the property the next task depends on. The while
+      // loop above only ever checked ready==0 BEFORE valid was observed and
+      // exits the instant valid reads 1 — with no intervening @(posedge clk) —
+      // so `ts_ready` read here samples the SAME cycle as the `valid` that
+      // just broke the loop, not the cycle after it. That loop would happily
+      // tolerate a regression that held ready low for one extra cycle past
+      // valid; this check would not.
+      if (ts_ready !== 1'b1) begin
+        $display("RESULT: FAIL (ready not high on the same cycle valid rose -- a consumer that issues the next start as soon as it observes valid would have that start silently dropped)");
+        $finish;
+      end
+      $display("  ready contract OK (valid after %0d cycles, ready high same cycle as valid)", guard);
     end
   endtask
 
@@ -297,6 +310,14 @@ module tb_tri_setup;
       8'd0,8'd0,8'd0,8'd0,
       16'd8,16'd8,
       0,0,1, 1'b1);
+
+    // ---- ready contract on the DEGENERATE path: case 3's triangle is still
+    //      loaded (still in VX0.. above). Unlike case 1 (and case 2), where
+    //      `valid` is driven by the divider finishing, a degenerate triangle's
+    //      `valid` comes from the Stage-3 MAC draining (mac_degen) with the
+    //      divider never started at all -- a distinct RTL path that must
+    //      independently satisfy ready-rises-with-valid.
+    check_ready_contract;
 
     // ---- case 4: envelope worst-case. Near-full-screen triangle (~300x220px:
     //      v0=(10,10), v1=(310,10), v2=(160,230), all well within the 16-bit-
