@@ -329,9 +329,52 @@ module blitter_top #(
     //                   host-late time: it is "poll loop + host not yet submitted",
     //                   not a pure fabric cost. That is deliberate -- it makes
     //                   snap+detect span the ENTIRE C_DONE(N) -> work-seen(N+1)
-    //                   interval with no gap, so the subtraction below is exact.
-    // Then notice - (snap + detect) is the host's own C_DONE observation latency
-    // (poll granularity + DDR visibility), by subtraction with nothing unaccounted.
+    //                   interval with no gap.
+    //
+    // THE IDENTITY IS  notice = snap + detect - pub.  It is NOT
+    // "notice - (snap + detect) = the host's share". Derivation, in mf_seam_stat.h's
+    // own terms (notice = (host + block) - frame; host starts at doorbell N; pub =
+    // barrier return -> doorbell N+1), with t0 = S_WR_DONE(N-1), t2 = doorbell N,
+    // t3 = S_POLL_SUBMIT, t4 = work-seen(N), t5 = S_WR_DONE(N), t6 = the host's
+    // observation of C_DONE(N), and eps = the host's own C_DONE observation latency
+    // (poll granularity + DDR visibility), so t6 = t5 + eps and t2 = t0 + eps + pub:
+    //
+    //     snap + detect = t4 - t0 = (t4 - t2) + (t2 - t0) = (t4 - t2) + eps + pub
+    //     notice        = (t6 - t2) - (t5 - t4)           = (t4 - t2) + eps
+    //  => notice - (snap + detect) = -pub                     (NOT eps)
+    //
+    // eps CANCELS. Not because it is zero, but because it is not exposed twice: the
+    // host spends it INSIDE the snap tail (t2 = t0 + eps + pub), so the fabric eats
+    // it off the FRONT of snap and re-exposes it exactly once, after C_DONE(N).
+    // Measured pub on .62 is 0.00-0.01 ms, so anyone subtracting per the old comment
+    // computes a "host share" of ~0 and concludes the host contributes nothing --
+    // while eps is real and hidden inside snap.
+    //
+    // CHECK THE IDENTITY FIRST, before reading anything into the numbers. It is a
+    // SELF-VALIDATION the instrument can run on its own first device measurement:
+    // MFSEAM already prints notice and pub, MFSUBMIT now prints snap and detect
+    // (averaged over the same BLOCKED-frame population MFSEAM uses). If
+    // notice ?= snap + detect - pub does not hold within the MFSEAM tolerance, the
+    // INSTRUMENT is wrong, not the fabric. The identity is per BLOCKED frame only:
+    // on a host-late frame t2 - t0 > eps + pub, detect absorbs the whole overrun,
+    // and snap + detect - pub over-states notice by all of it.
+    //
+    // WHAT snap IS AND IS NOT. Published snap is a PURE FABRIC interval, t3 - t0.
+    // Only t3 - t2 = snap - eps - pub of it is EXPOSED to notice: for the first
+    // eps + pub of the tail the host is not waiting on the doorbell at all, it is
+    // still observing C_DONE(N-1) and preparing the next submit. So snap OVER-STATES
+    // the dead window's contribution to notice by (eps + pub). Against the PRIOR
+    // SWEEP's numbers (snap ~0.335, eps ~0.237, pub ~0.00) the exposed part would be
+    // ~0.098 ms -- an illustration DERIVED from that sweep, not a value this counter
+    // measures.
+    //
+    // WHAT THE PAIR SETTLES: detect, directly. And the sum (snap - pub), which
+    // equals exposed-tail + eps. WHAT IT DOES NOT SETTLE: the SPLIT of that sum.
+    // (t3 - t2) + eps = snap - pub is one equation in two unknowns; separating the
+    // fabric tail from the host's observation latency needs a host timestamp
+    // referenced to the fabric clock, which this counter does not provide. Do not
+    // quote either half as measured.
+    //
     // Both are PER-FRAME: the pair published with frame N+1's C_DONE is the snap
     // tail that followed frame N and the detect that opened frame N+1 -- the two
     // contiguous intervals that delayed frame N+1's OWN submit. See S_WR_NOTICE.
@@ -1404,6 +1447,19 @@ module blitter_top #(
             // number. Freezing at the first value with bit 19 set (524288 cyc, i.e.
             // 65536 in eighths) is one past the field's range, so the S_WR_NOTICE
             // guard turns it into a pegged 0xFFFF and it stays pegged. 13-input OR.
+            //
+            // OFF BY EXACTLY ONE CYCLE, both intervals, by construction. This tick and
+            // the latch in the case arm below are concurrent NBAs in this same always
+            // block, so both read the SAME pre-edge `run` value. With T = the S_WR_DONE
+            // cycle that arms snap, P = the S_POLL_SUBMIT cycle that latches it and arms
+            // detect, and Q = the S_CHK_NEW cycle that latches detect:
+            //     perf_snap_cyc   = P - T - 1      (true interval P - T)
+            //     perf_detect_cyc = Q - P - 1      (true interval Q - P)
+            // The two still ABUT -- snap closes and detect opens in the same cycle P --
+            // but their SUM is short of Q - T by 2 cycles. That is ~20 ns at 98.4375 MHz
+            // against a 0.565 ms signal, i.e. 4e-5 of it. Stated so nobody has to
+            // rediscover it; not worth a correction term, and correcting it would mean
+            // touching counting logic that is verified as-is.
             if (snap_counting   && !(|snap_run[31:19]))   snap_run   <= snap_run   + 32'd1;
             if (detect_counting && !(|detect_run[31:19])) detect_run <= detect_run + 32'd1;
 
