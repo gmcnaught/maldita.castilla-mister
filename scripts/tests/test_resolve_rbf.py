@@ -86,11 +86,13 @@ class ResolveRbfTest(unittest.TestCase):
     def test_takes_the_newest_of_several_matches(self):
         sha = self.head_sha()
         want = resolve_rbf.fpga_tree(self.dir)
-        # gh lists newest-first; the first match must win.
-        runs = [{"databaseId": 99, "headSha": sha},
-                {"databaseId": 42, "headSha": sha}]
+        # gh lists newest-first; the first match must win regardless of id
+        # magnitude -- the smaller id sits first here on purpose, so a wrong
+        # "largest id wins" implementation cannot pass this test by accident.
+        runs = [{"databaseId": 42, "headSha": sha},
+                {"databaseId": 99, "headSha": sha}]
         self.assertEqual(
-            resolve_rbf.find_run_for_tree(self.dir, want, runs)["databaseId"], 99)
+            resolve_rbf.find_run_for_tree(self.dir, want, runs)["databaseId"], 42)
 
     def test_returns_none_for_an_empty_run_list(self):
         want = resolve_rbf.fpga_tree(self.dir)

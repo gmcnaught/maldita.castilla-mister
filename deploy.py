@@ -134,8 +134,11 @@ RBF_GLOB        = str(REPO / "_Other" / "MalditaCastilla_*.rbf")
 # So the rule is now FAIL-CLOSED: refuse to ship an artifact we cannot prove came
 # from the current HEAD. --force overrides for deliberate odd-one-out deploys
 # (bisecting, A/B-ing an old bitstream), which is exactly when you WANT it explicit.
-RBF_ARTIFACT   = "maldita-rbf"          # CI artifact name (build-rbf.yml)
-RBF_WORKFLOW   = "build-rbf.yml"
+#
+# The artifact/workflow names now live in scripts/lib/resolve_rbf.py, same reason
+# as fpga_tree below: aliased here so deploy.py and release.yml cannot drift.
+RBF_ARTIFACT   = resolve_rbf.RBF_ARTIFACT        # CI artifact name (build-rbf.yml)
+RBF_WORKFLOW   = resolve_rbf.RBF_WORKFLOW
 
 
 def git_head(repo):
@@ -189,12 +192,11 @@ def fetch_rbf_for_head():
                           text=True, capture_output=True).stdout.strip()
     if not full:
         raise SystemExit("FATAL: --fetch-rbf needs a git checkout of this repo")
-    want_tree = fpga_tree(REPO)
-    print(f"-- Resolving CI RBF for {REPO.name} HEAD {sha_short} (fpga/ tree {want_tree[:9]}) --")
     try:
         run_id, built_sha, want_tree = resolve_rbf.resolve_run_id(REPO)
     except resolve_rbf.RbfResolutionError as e:
         raise SystemExit(f"FATAL: {e}")
+    print(f"-- Resolving CI RBF for {REPO.name} HEAD {sha_short} (fpga/ tree {want_tree[:9]}) --")
     if built_sha != full:
         print(f"   (HEAD did not touch fpga/; using the build from {built_sha[:7]}, "
               "whose RTL is identical)")
