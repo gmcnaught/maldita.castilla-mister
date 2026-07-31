@@ -119,12 +119,19 @@ module tb_perf_publish_order;
   // discipline: the host wakes on C_DONE and immediately samples every counter, so a
   // counter published AFTER C_DONE is read one frame stale. Same failure as texwait/tri.
   reg [63:0] t_flags = 64'd0;
+  // [W3 Stage C] the `notice` attribution pair (snap tail | submit detect) publishes to
+  // C_CMDCOUNT.hi and joins the same release discipline. It is the ONE counter the host
+  // reads whose whole purpose is to be paired with the frame whose C_DONE woke it: read
+  // one frame stale it attributes frame N-1's dead window to frame N, which is exactly
+  // the two-frames-mixed error this TB exists to prevent.
+  reg [63:0] t_cmdcnt = 64'd0;
 
   always @(posedge clk) if (wr_accept) begin
     if (wr_idx == (CTRL + `C_DONE))   begin t_done   <= cyc; n_done <= n_done + 32'd1; end
     if (wr_idx == (CTRL + `C_STATUS))  t_status <= cyc;
     if (wr_idx == (CTRL + `C_SRCSEL))  t_srcsel <= cyc;
     if (wr_idx == (CTRL + `C_FLAGS))   t_flags  <= cyc;
+    if (wr_idx == (CTRL + `C_CMDCOUNT)) t_cmdcnt <= cyc;
   end
 
   always @(posedge clk) begin
@@ -159,24 +166,27 @@ module tb_perf_publish_order;
     repeat(200) @(posedge clk);
 
     $display("=== done_seq=%0d submit=%0d (to=%0d) ===", mem[CTRL + `C_DONE][31:0], mem[CTRL][31:0], to);
-    $display("=== publish cycles: C_STATUS=%0d C_SRCSEL=%0d C_FLAGS=%0d C_DONE=%0d (n_done=%0d) ===",
-             t_status, t_srcsel, t_flags, t_done, n_done);
+    $display("=== publish cycles: C_STATUS=%0d C_SRCSEL=%0d C_FLAGS=%0d C_CMDCOUNT=%0d C_DONE=%0d (n_done=%0d) ===",
+             t_status, t_srcsel, t_flags, t_cmdcnt, t_done, n_done);
 
     if (mem[CTRL + `C_DONE][31:0] !== mem[CTRL][31:0]) begin
       $display("RESULT: FAIL (frame never completed, to=%0d)", to);
-    end else if (n_done == 32'd0 || t_status == 64'd0 || t_srcsel == 64'd0 || t_flags == 64'd0) begin
+    end else if (n_done == 32'd0 || t_status == 64'd0 || t_srcsel == 64'd0 || t_flags == 64'd0
+                 || t_cmdcnt == 64'd0) begin
       // Guard against a vacuous pass if the monitor never saw the writes at all.
       // t_flags joins this guard deliberately: without it, a build that never publishes
       // perf_covered_px at all would satisfy "t_done > t_flags" trivially (0) and PASS.
-      $display("RESULT: FAIL (monitor saw no write: n_done=%0d t_status=%0d t_srcsel=%0d t_flags=%0d)",
-               n_done, t_status, t_srcsel, t_flags);
-    end else if (t_done > t_status && t_done > t_srcsel && t_done > t_flags) begin
+      // t_cmdcnt joins it for the same reason.
+      $display("RESULT: FAIL (monitor saw no write: n_done=%0d t_status=%0d t_srcsel=%0d t_flags=%0d t_cmdcnt=%0d)",
+               n_done, t_status, t_srcsel, t_flags, t_cmdcnt);
+    end else if (t_done > t_status && t_done > t_srcsel && t_done > t_flags && t_done > t_cmdcnt) begin
       $display("RESULT: PASS");
     end else begin
       $display("  C_DONE published BEFORE the perf counters it releases:");
       if (t_done <= t_status) $display("    C_DONE(%0d) <= C_STATUS(%0d)  -> texwait read stale", t_done, t_status);
       if (t_done <= t_srcsel) $display("    C_DONE(%0d) <= C_SRCSEL(%0d)  -> tri read stale",     t_done, t_srcsel);
       if (t_done <= t_flags)  $display("    C_DONE(%0d) <= C_FLAGS(%0d)   -> covered_px read stale", t_done, t_flags);
+      if (t_done <= t_cmdcnt) $display("    C_DONE(%0d) <= C_CMDCOUNT(%0d) -> notice attribution read stale", t_done, t_cmdcnt);
       $display("RESULT: FAIL (C_DONE not published last)");
     end
     $finish;

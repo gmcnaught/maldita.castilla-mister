@@ -141,9 +141,10 @@ module blitter_top #(
     // Continuously-driven live state for HW post-mortem: published by the scanout
     // reader into VSYNC_ADDR's HIGH 32 bits (0x3A070004) each frame — the reader
     // stays alive when the blitter wedges, so devmem 0x3A070004 reveals WHERE the
-    // blitter is stuck. dbg[5:0]=state, [22:15]=0, [14:6]=0 (legacy dx/dy retired with
-    // the per-pixel renderer), [23]=rd_issued, [31:24]=stuck-count (cycles-in-state >>
-    // 16, saturates 0xFF = frozen). No effect on the datapath.
+    // blitter is stuck. dbg[5:0]=state, [8:6]=pv (vertex-prefetch sub-FSM, [W3 §2b]),
+    // [14:9]=0 (legacy dx/dy retired with the per-pixel renderer), [22:15]=rd_reissue_cnt,
+    // [23]=rd_issued, [31:24]=stuck-count (cycles-in-state >> 16, saturates 0xFF =
+    // frozen). No effect on the datapath. Full rationale at the `assign dbg` below.
     output wire [31:0]   dbg
 );
     localparam [5:0]
@@ -153,6 +154,12 @@ module blitter_top #(
         S_SETUP=6'd11,      S_NEXT_CMD=6'd19,
         // [FB-in-BRAM] CLEAR routes through comp_pipeline as a full-screen FILL
         S_CLR_FILL=6'd12,   S_CLR_FILL_WAIT=6'd13,
+        // [W3 Stage C] publish the `notice` attribution word to C_CMDCOUNT.hi.
+        // 6'd14 is the LOWEST unused code (14..18 and 26..29 are free; 40/41 are
+        // retired-but-quoted). Nothing is renumbered on purpose: the wedge probe
+        // publishes raw state_at_peak values and past findings name states by
+        // number (23=S_RD_WAIT, 44=S_SNAP_DRAIN, 50=S_TRI_PIX, 56=S_TRI_NEXT).
+        S_WR_NOTICE=6'd14,
         S_FRAME_VCTRL=6'd20, S_WR_DONE=6'd21, S_WR_STATUS=6'd22,
         S_RD_WAIT=6'd23,    S_WR_WAIT=6'd24,
         S_WR_PERF=6'd25,    // [profiling] publish perf_tri_cyc to C_SRCSEL.hi (spare qw7 high)
@@ -305,6 +312,34 @@ module blitter_top #(
     // reads them via devmem at C_DONE+4 / C_STATUS+4. fabric_busy/pipe_busy vs the
     // vsync interval (0x3A070000) tells you whether the A9 or the fabric is the limit.
     reg  [31:0] perf_frame_cyc, perf_pipe_cyc;
+    // ── [W3 Stage C] `notice` attribution ───────────────────────────────────────
+    // notice = (host + block) - frame is one number today with an INFERRED split.
+    // These two counters bracket its fabric half and make the split re-checkable
+    // from any future run:
+    //   perf_snap_cyc   the C_DONE write ISSUED (S_WR_DONE entry, so the S_WR_WAIT
+    //                   bus-accept cycles are included) -> back in S_POLL_SUBMIT.
+    //                   This is the S_SNAP_* WORK->DDR copy tail, during which a
+    //                   doorbell cannot be SEEN at all: S_POLL_SUBMIT is the only
+    //                   state that reads C_SUBMIT. Designed ~0.158 ms; a device
+    //                   sweep put the whole dead window at ~0.335 ms, and whether
+    //                   THIS is that number is the open question the counter answers.
+    //   perf_detect_cyc S_POLL_SUBMIT entered -> S_CHK_NEW takes the new-work branch.
+    //                   The fabric's submit-detect round trip. NOTE it also absorbs
+    //                   any time the fabric spends polling an EMPTY doorbell, i.e.
+    //                   host-late time: it is "poll loop + host not yet submitted",
+    //                   not a pure fabric cost. That is deliberate -- it makes
+    //                   snap+detect span the ENTIRE C_DONE(N) -> work-seen(N+1)
+    //                   interval with no gap, so the subtraction below is exact.
+    // Then notice - (snap + detect) is the host's own C_DONE observation latency
+    // (poll granularity + DDR visibility), by subtraction with nothing unaccounted.
+    // Both are PER-FRAME: the pair published with frame N+1's C_DONE is the snap
+    // tail that followed frame N and the detect that opened frame N+1 -- the two
+    // contiguous intervals that delayed frame N+1's OWN submit. See S_WR_NOTICE.
+    // snap_run/detect_run are the live counters; perf_* are the latched values the
+    // publish reads, so a mid-frame tick can never be sampled half-formed.
+    reg  [31:0] perf_snap_cyc, perf_detect_cyc;
+    reg  [31:0] snap_run, detect_run;
+    reg         snap_counting, detect_counting;
     // [profiling] TRILIST per-state attribution to locate the ~46 cyc/px cost:
     //   perf_tri_cyc     = cycles in any S_TRI_* state (published to C_SRCSEL.hi)
     //   perf_texwait_cyc = cycles blocked in S_TRI_GOTTEX waiting on p0_ok (texel
@@ -356,13 +391,8 @@ module blitter_top #(
             else if (~&dbg_stuck)     dbg_stuck <= dbg_stuck + 24'd1;
         end
     end
-    // [31:24]=stuck>>16 (0xFF=frozen >~167ms), [23]=rd_issued (read accepted, waiting
-    // for data = NOT starved), [5:0]=state. The legacy dx/dy fields are retired with
-    // the per-pixel renderer; comp_pipeline owns per-pixel progress now, so those
-    // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
-    // [startup-wedge fix] bits[22:15] now carry rd_reissue_cnt (reissue watchdog
-    // fires since reset) — 0 in a clean run, >0 means a lost f2h beat was healed.
-    assign dbg = {dbg_stuck[23:16], rd_issued, rd_reissue_cnt, 9'd0, state};
+    // `assign dbg` MOVED to just after the `pv` prefetch-FSM declarations below: it now
+    // carries pv in bits [8:6] and `default_nettype none` forbids forward references.
     // [wedge probe v2] declared/defined AFTER the tri sub-FSM regs (pa/pb/fill_busy/tri_maxx/y),
     // since `default_nettype none` forbids forward references — see the block below ~L590.
 
@@ -502,6 +532,27 @@ module blitter_top #(
     reg  [15:0]  pv_maxx, pv_maxy;
     reg          pv_bbox_neg;
     reg          pv_ready;              // PV_HOLD reached: ts_* are the next triangle's
+
+    // ---- DEBUG: the #34 HW wedge-probe word (no datapath effect) ----------------
+    // Moved down here from the dbg_stuck block above so it can reference `pv`.
+    // [31:24]=stuck>>16 (0xFF=frozen >~167ms), [23]=rd_issued (read accepted, waiting
+    // for data = NOT starved), [5:0]=state. The legacy dx/dy fields are retired with
+    // the per-pixel renderer; comp_pipeline owns per-pixel progress now, so those
+    // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
+    // [startup-wedge fix] bits[22:15] now carry rd_reissue_cnt (reissue watchdog
+    // fires since reset) — 0 in a clean run, >0 means a lost f2h beat was healed.
+    // [W3 §2b] bits[8:6] now carry `pv`, the vertex-prefetch sub-FSM. It drives the
+    // DDR3 read master CONCURRENTLY with the pixel walk, which created a NEW wedge
+    // signature: a dead f2h read during a walk now parks the machine at S_TRI_NEXT
+    // (state 56) with rd_issued=0, because S_TRI_NEXT refuses to leave until pv is
+    // quiescent and the stalled read belongs to pv, not to the main FSM. Under the
+    // pre-prefetch RTL a lost beat ALWAYS showed as S_RD_WAIT (23) with rd_issued=1
+    // — the opposite reading of the same fault. Without pv on the bus a post-mortem
+    // cannot tell "stuck in PV_WAIT on a lost beat" (pv=2) from "stuck in PV_HOLD
+    // waiting on the walk" (pv=6). Existing fields keep their exact bit positions:
+    // external readers and past findings quote them by offset.
+    // Layout: [31:24]stuck [23]rd_issued [22:15]rd_reissue_cnt [14:9]0 [8:6]pv [5:0]state
+    assign dbg = {dbg_stuck[23:16], rd_issued, rd_reissue_cnt, 6'd0, pv, state};
 
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
@@ -1280,6 +1331,14 @@ module blitter_top #(
             rw_wd<=22'd0; rd_reissue_cnt<=8'd0;
             perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;
             perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0; perf_covered_px<=32'd0;
+            // [W3 Stage C] notice attribution comes out of reset disarmed. The FIRST
+            // published pair is therefore (0,0): reset lands directly in S_POLL_SUBMIT
+            // with snap_counting low, so frame 1 has no preceding snap tail to time and
+            // no detect window is opened for it. From frame 2 on both are live. A
+            // leading 0/0 sample is correct, not a dropout.
+            perf_snap_cyc<=32'd0; perf_detect_cyc<=32'd0;
+            snap_run<=32'd0; detect_run<=32'd0;
+            snap_counting<=1'b0; detect_counting<=1'b0;
             throttle_cnt<=8'd0; throttle_cfg<=8'd0;
             ring_sel<=1'b0;                   // [Phase 1 A3] default to ring A
             pipe_start<=1'b0;
@@ -1330,6 +1389,24 @@ module blitter_top #(
                     perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
+            // [W3 Stage C] notice-attribution ticks. OUTSIDE the `!idle` block on
+            // purpose: both intervals live in the window where the fabric is NOT
+            // working on a frame (the snap tail runs with idle still low but the
+            // detect loop runs with idle high), so gating them on !idle would count
+            // the detect interval as zero. Arming/disarming happens in the states
+            // themselves (S_WR_DONE / S_POLL_SUBMIT / S_CHK_NEW); here they only tick.
+            //
+            // The |run[31:19] stop is what makes the published field's saturation
+            // HONEST rather than nominal. A free 32-bit counter wraps after 43.6 s,
+            // and detect_run is reachable there: it ticks for as long as the host
+            // leaves the doorbell unrung (a pause, a level load), not just for a poll
+            // round trip. A wrapped run would then publish a small, plausible-looking
+            // number. Freezing at the first value with bit 19 set (524288 cyc, i.e.
+            // 65536 in eighths) is one past the field's range, so the S_WR_NOTICE
+            // guard turns it into a pegged 0xFFFF and it stays pegged. 13-input OR.
+            if (snap_counting   && !(|snap_run[31:19]))   snap_run   <= snap_run   + 32'd1;
+            if (detect_counting && !(|detect_run[31:19])) detect_run <= detect_run + 32'd1;
+
             // [fill watchdog] count continuous fill-stall cycles; saturate at WD_TIMEOUT.
             if (fill_busy && !p0_ok) begin
                 if (wd_stall != WD_TIMEOUT) wd_stall <= wd_stall + 13'd1;
@@ -1354,6 +1431,19 @@ module blitter_top #(
             S_POLL_SUBMIT: begin
                 idle<=1; bm_rd<=1; bm_addr<=`BLTCTRL_QW+`C_SUBMIT;
                 rd_ret<=S_POLL_DONE; state<=S_RD_WAIT;
+                // [W3 Stage C] close the snap tail on the FIRST cycle of the poll loop
+                // — this is the exact instant a doorbell becomes observable again —
+                // and open the detect interval in the same cycle so the two abut with
+                // no gap. S_POLL_SUBMIT is re-entered on every poll round, so the
+                // snap_counting guard is what makes this latch once per frame; without
+                // it every round would restart detect and the measurement would only
+                // ever show one poll round trip.
+                if (snap_counting) begin
+                    perf_snap_cyc   <= snap_run;
+                    snap_counting   <= 1'b0;
+                    detect_run      <= 32'd0;
+                    detect_counting <= 1'b1;
+                end
             end
             S_POLL_DONE: begin
                 submit_reg<=rd_data[31:0];
@@ -1370,6 +1460,12 @@ module blitter_top #(
                     perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;   // frame start: reset perf
                     perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;   // [profiling] reset per-frame
                     perf_covered_px<=32'd0;                        // [Phase 1 A4] per-frame too
+                    // [W3 Stage C] close the detect interval: this is the cycle the new
+                    // work is SEEN. perf_snap_cyc is deliberately NOT cleared here — it
+                    // already holds the tail that immediately preceded this detect, and
+                    // the two together are what THIS frame's C_DONE will publish.
+                    perf_detect_cyc <= detect_run;
+                    detect_counting <= 1'b0;
                 end
             end
             S_GOT_CMDCNT: begin
@@ -2356,6 +2452,40 @@ module blitter_top #(
             S_WR_COVPX: begin
                 bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_FLAGS;
                 bm_din<={perf_covered_px, 32'd0};
+                wr_ret<=S_WR_NOTICE;   // [W3 Stage C] then the notice pair, then C_DONE
+                state<=S_WR_WAIT;
+            end
+            // [W3 Stage C] Publish the `notice` attribution pair to the spare HIGH 32 of
+            // C_CMDCOUNT. be=0xF0 preserves the host-written command count in the LOW
+            // word: the host writes it as a 32-bit store at qw*8 (raster_backend_mfgpu.cpp
+            // mf_ctrl_wr), so producer and consumer never touch the same bytes — exactly
+            // the split C_FLAGS.hi already ships. C_CMDCOUNT.hi is the last spare high
+            // word: C_FLAGS.hi=covered_px, C_DONE.hi=frame, C_STATUS.hi=texwait,
+            // C_SRCSEL.hi=tri, and control-block qword 8 aliases the ring base.
+            //
+            // FRAME PAIRING (the whole value of the instrument). The host reads this word
+            // the moment it observes C_DONE. perf_snap_cyc was last written when the poll
+            // loop resumed after the PREVIOUS frame; perf_detect_cyc was written in
+            // S_CHK_NEW at the START of THIS frame. Nothing rewrites either between there
+            // and here (snap re-arms only in S_WR_DONE, which is strictly after this
+            // state). So the pair the host reads is the contiguous
+            // C_DONE(N-1) -> work-seen(N) window: precisely the delay that THIS frame's
+            // submit experienced. Sequenced BEFORE S_WR_DONE because C_DONE is the host's
+            // release barrier — anything published after it is read one frame stale, which
+            // for this counter would attribute the wrong frame's dead window. Guarded by
+            // tb_perf_publish_order.
+            //
+            // Units: cycles >> 3, each field saturating at 16'hFFFF = 524280 cyc = 5.33 ms
+            // at 98.4375 MHz. Expected magnitudes are ~0.335 ms snap (~33k cyc, ~4.1k in
+            // eighths) and a small detect, so both sit two orders inside the field; the
+            // saturation exists so a WEDGE (S_SNAP_DRAIN has parked for 18 s before) reads
+            // as a pegged 0xFFFF rather than silently wrapping into a plausible value.
+            // The [31:3] > 0xFFFF test is what makes that true: [18:3] alone would wrap.
+            S_WR_NOTICE: begin
+                bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_CMDCOUNT;
+                bm_din<={ (perf_snap_cyc[31:3]   > 29'h0000FFFF) ? 16'hFFFF : perf_snap_cyc[18:3],
+                          (perf_detect_cyc[31:3] > 29'h0000FFFF) ? 16'hFFFF : perf_detect_cyc[18:3],
+                          32'd0 };
                 wr_ret<=S_WR_DONE;
                 state<=S_WR_WAIT;
             end
@@ -2374,6 +2504,12 @@ module blitter_top #(
                 bm_wr<=1; bm_be<=8'hFF; bm_addr<=`BLTCTRL_QW+`C_DONE;
                 bm_din<={perf_frame_cyc, submit_reg};
                 wr_ret<=S_SNAP_WAIT; state<=S_WR_WAIT;
+                // [W3 Stage C] open the snap tail here, where the C_DONE write is handed
+                // to S_WR_WAIT. It therefore includes the bus-accept cycles for C_DONE
+                // itself, which is the conservative choice: the host cannot see C_DONE
+                // before it is accepted, so this can only OVER-state the dead window,
+                // never hide part of it. Closed on the next S_POLL_SUBMIT.
+                snap_run <= 32'd0; snap_counting <= 1'b1;
             end
             S_WR_STATUS: begin
                 // low32 = OSD mirror bits (bit0=osd_restart_pending, the sticky-latched
