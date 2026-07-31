@@ -63,11 +63,11 @@ build-engine: ## Cross-build the gmloader engine from GMDIR
 
 # ---- RBF (Quartus 17.0 Lite, self-hosted Windows CI runner ONLY) ------------
 # There is deliberately no local build target: pushing a change to fpga/**
-# in MALDITA triggers .github/workflows/build-rbf.yml (~12 min). Fetch +
+# under fpga/ triggers .github/workflows/build-rbf.yml (~12 min). Fetch +
 # deploy the result with `make deploy-rbf` — deploy.py resolves the artifact
 # by fpga/ TREE hash and refuses anything stale.
 
-rbf-status: ## List recent CI RBF builds for MALDITA
+rbf-status: ## List recent CI RBF builds for this repo
 	gh run list --workflow build-rbf.yml -L 5
 
 rbf-watch: ## Watch the latest CI RBF build until it finishes
@@ -89,5 +89,5 @@ deploy: guard-host ## Full deploy to HOST: RBF + engine + content
 deploy-engine: guard-host ## Engine binary + gmloader.json only
 	$(DEPLOY) --engine-only --engine $(ENGINE)
 
-deploy-rbf: guard-host ## Fetch the CI RBF for MALDITA HEAD and deploy it (no content)
+deploy-rbf: guard-host ## Fetch the CI RBF for HEAD and deploy it (no content)
 	$(DEPLOY) --fetch-rbf --no-content
