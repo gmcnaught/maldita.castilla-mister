@@ -1,0 +1,4 @@
+[submodule "external/gmloader-next"]
+	path = external/gmloader-next
+	url = git@github.com:gmcnaught/gmloader-next.git
+	branch = master
