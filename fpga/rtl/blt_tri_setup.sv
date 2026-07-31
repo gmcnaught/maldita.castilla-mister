@@ -89,6 +89,10 @@ module blt_tri_setup #(
     input  wire                clk,
     input  wire                rst,
     input  wire                start,       // pulse to latch verts + compute
+    // [W3 §2b] high exactly when a `start` pulse would be ACCEPTED. Mirrors the
+    // internal guard below one-for-one; published so a concurrent producer cannot
+    // lose a start silently.
+    output wire                ready,
     // raw triangle vertices (screen 12.4 signed), three verts a,b,c
     input  wire signed [15:0]  vx0, vy0, vx1, vy1, vx2, vy2,
     input  wire        [15:0]  vu0, vv0, vu1, vv1, vu2, vv2,   // texel 12.4 unsigned
@@ -282,6 +286,14 @@ module blt_tri_setup #(
     reg  [DIVW-1:0]   step_N, step_Q;
     integer           u;
 
+    // [W3 §2b] `ready` and the start guard below are ONE expression by
+    // construction: this continuous assignment is the single source of truth,
+    // and the guard just consumes it (`start && ready`). Must stay literally
+    // identical to the guard's condition. If a new pipeline stage is added, it
+    // belongs in BOTH (i.e. here, which then flows into the guard) or the
+    // handshake lies.
+    assign ready = !busy && !mac_busy && !e1 && !e1b && !e1c && !g1 && !g2 && !g3 && !g4;
+
     always @(posedge clk) begin
         if (rst) begin
             valid <= 1'b0; degenerate <= 1'b0; busy <= 1'b0;
@@ -301,7 +313,7 @@ module blt_tri_setup #(
             // DIFFERENCES here (no multiply). The bbox-min origin is swap-
             // invariant (the CCW swap only exchanges verts 1<->2), so compute it
             // from the RAW verts now. Carry raw verts+attrs to the P4 swap point.
-            if (start && !busy && !mac_busy && !e1 && !e1b && !e1c && !g1 && !g2 && !g3 && !g4) begin
+            if (start && ready) begin
                 p1_dbx <= vx1 - vx0;   p1_dcy <= vy2 - vy0;   // bx-ax , cy-ay
                 p1_dby <= vy1 - vy0;   p1_dcx <= vx2 - vx0;   // by-ay , cx-ax
 

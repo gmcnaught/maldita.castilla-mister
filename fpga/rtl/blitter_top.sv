@@ -960,6 +960,7 @@ module blitter_top #(
 
     // blt_tri_setup registered outputs (stable from `valid` until the next start)
     wire               ts_valid, ts_degenerate;
+    wire               ts_ready;    // [W3 §2b] a start would be accepted this cycle
     wire        [15:0] ts_ox, ts_oy;
     wire signed [47:0] ts_area, ts_area_recip;
     wire signed [47:0] ts_w0_0, ts_w1_0, ts_w2_0;
@@ -989,7 +990,7 @@ module blitter_top #(
     reg signed [47:0] tw_area_recip;
 
     blt_tri_setup #(.SHIFT(40)) u_tri_setup (
-        .clk(clk), .rst(rst), .start(tri_setup_start),
+        .clk(clk), .rst(rst), .start(tri_setup_start), .ready(ts_ready),
         .vx0(tri_vx0), .vy0(tri_vy0), .vx1(tri_vx1), .vy1(tri_vy1), .vx2(tri_vx2), .vy2(tri_vy2),
         .vu0(tri_vu0), .vv0(tri_vv0), .vu1(tri_vu1), .vv1(tri_vv1), .vu2(tri_vu2), .vv2(tri_vv2),
         .vr0(tri_vr0), .vg0(tri_vg0), .vb0(tri_vb0), .va0(tri_va0),

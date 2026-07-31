@@ -67,6 +67,7 @@ module tb_tri_setup;
   // ---- setup under test (registered; start->valid) ----
   reg  start=0;
   wire valid, degenerate;
+  wire ts_ready;
   wire [15:0] ox, oy;
   wire signed [47:0] area;
   wire        [47:0] area_recip;
@@ -83,7 +84,7 @@ module tb_tri_setup;
     .vr1(VR1),.vg1(VG1),.vb1(VB1),.va1(VA1),
     .vr2(VR2),.vg2(VG2),.vb2(VB2),.va2(VA2),
     .tex_w(TEX_W),.tex_h(TEX_H),
-    .valid(valid),.degenerate(degenerate),.ox(ox),.oy(oy),
+    .valid(valid),.degenerate(degenerate),.ready(ts_ready),.ox(ox),.oy(oy),
     .area(area),.area_recip(area_recip),
     .w0_0(w0_0),.w1_0(w1_0),.w2_0(w2_0),
     .dw0dx(dw0dx),.dw1dx(dw1dx),.dw2dx(dw2dx),
@@ -135,6 +136,40 @@ module tb_tri_setup;
       nsamp = nsamp + 1;
     end
   end endtask
+
+  // [W3 §2b] The ready contract: a start pulsed while !ready must be IGNORED (the
+  // module's internal guard already does this), and ready must be low from the
+  // accepted start until the outputs are valid. Task 7 pulses start from a
+  // concurrent sub-FSM, where a silently dropped start stalls the walk forever.
+  task check_ready_contract;
+    integer guard;
+    begin
+      // idle => ready
+      @(posedge clk);
+      if (ts_ready !== 1'b1) begin
+        $display("RESULT: FAIL (ready low while idle)"); $finish;
+      end
+      // accept a start, then ready must fall and stay low until valid
+      start <= 1'b1; @(posedge clk); start <= 1'b0;
+      @(posedge clk);
+      if (ts_ready !== 1'b0) begin
+        $display("RESULT: FAIL (ready still high one cycle after an accepted start)");
+        $finish;
+      end
+      guard = 0;
+      while (!valid && guard < 200) begin
+        if (ts_ready !== 1'b0) begin
+          $display("RESULT: FAIL (ready rose at cycle %0d before valid)", guard);
+          $finish;
+        end
+        @(posedge clk); guard = guard + 1;
+      end
+      if (guard >= 200) begin
+        $display("RESULT: FAIL (no valid within 200 cycles)"); $finish;
+      end
+      $display("  ready contract OK (valid after %0d cycles)", guard);
+    end
+  endtask
 
   // run one full triangle case: load verts+attrs into the shared regs, pulse
   // start, wait for valid, check degenerate against expectation, and (unless
@@ -232,6 +267,10 @@ module tb_tri_setup;
       8'd80,8'd120,8'd220,8'd100,
       16'd8,16'd8,
       84,92,3, 1'b0);
+
+    // ---- ready contract: reuse case 1's triangle (still loaded in VX0.. above)
+    //      to check that `ready` tracks the start-acceptance guard one-for-one.
+    check_ready_contract;
 
     // ---- case 2: CW winding (signed area<0), so blt_tri_setup's vertex-swap
     //      normalize path runs. v0=(60,60), v1=(60,140), v2=(140,60): going
