@@ -1429,6 +1429,16 @@ the regression test for this rebase."
 - Consumes: `external/gmloader-next` (Task 5).
 - Produces: `make build-engine|deploy-engine|deploy-rbf|rbf-status|rbf-watch` working from the maldita repo root.
 
+**These are copies, not history-preserving moves.** `git mv` cannot cross
+repositories. That is accepted because `mister-gmloader` is archived read-only
+rather than deleted, so every file's history stays readable at its existing
+URLs. The commit in Step 10 **must** record the exact source SHA — capture it
+first:
+
+```bash
+git -C /Users/gmcnaught/MisterFPGA-Projects/mister-gmloader rev-parse HEAD
+```
+
 - [ ] **Step 1: Re-run the basename-collision check before moving anything**
 
 Verified zero collisions on 2026-07-31. Re-check, because a concurrent session
@@ -1695,6 +1705,11 @@ harness, the Makefile, and the LICENSE (this repo had none).
 
 Verified zero basename collisions across the two docs/superpowers trees before
 merging them.
+
+Copied, not git-mv'd: git mv cannot cross repositories, so per-file history
+does not follow. Acceptable because mister-gmloader is archived read-only
+rather than deleted — the full history stays readable at its existing URLs.
+Source: mister-gmloader@<PASTE THE SHA CAPTURED ABOVE>
 
 Makefile: MALDITA collapses to CURDIR, GMDIR defaults to the submodule but
 stays overridable for the worktree flow. deploy.py prefers the submodule and

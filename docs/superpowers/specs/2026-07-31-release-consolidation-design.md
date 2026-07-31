@@ -92,8 +92,12 @@ Placing them there also means `maldita` vendors **zero** binaries, and
 
 ## Migration map
 
-All moves use `git mv` followed by a commit in the destination repo so file
-history survives.
+These are **copies**, not history-preserving moves. `git mv` cannot cross
+repository boundaries, so per-file history does not follow into the destination
+repo. That is acceptable here because `mister-gmloader` is archived read-only
+rather than deleted: every file's full history stays readable at its existing
+URLs. Each migration commit records the exact source SHA so any file can be
+traced back.
 
 **To `gmloader-next`:**
 
@@ -267,7 +271,7 @@ path is never the thing under test.
    commit and confirming it passes; then verify the gate *fires* by running it
    against a deliberately-violating input.
 3. **Submodule + file migration into maldita.** Add `external/gmloader-next`,
-   run the basename-collision check, `git mv` all files per the migration map,
+   run the basename-collision check, copy all files per the migration map,
    update `deploy.py` and `Makefile` paths, extract `resolve_rbf.py`.
 4. **Dry-run parity.** `workflow_dispatch` on the new `release.yml` must produce
    a bundle whose manifest matches `assemble_bundle.sh`'s expected list exactly.
