@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # check_quartus_gates.sh -- production gates for a Quartus build of Maldita.
 #
-# Usage: check_quartus_gates.sh <output_files_dir> <logs_dir>
+# Usage: check_quartus_gates.sh <output_files_dir>
 #
 # Exits 0 only when BOTH gates pass. Fails closed: a missing report is a
 # failure, never a silent pass, because a build that produced no report is
 # exactly the case a naive grep would wave through.
 #
-#   setup timing  worst-case setup slack per clock domain, parsed from
-#                 Maldita.sta.summary. The shipping build carries a known,
-#                 accepted violation on the emu|pll domain (see
-#                 SETUP_BASELINE below); any other domain going negative, or
-#                 emu|pll regressing past the baseline, fails.
+#   setup timing  a slack-baseline check against Maldita.sta.summary, not a
+#                 warning-presence check. Baseline -0.20 ns on the accepted
+#                 domain emu|pll (the real, merged, device-validated
+#                 milestone-a build measured -0.159 ns on that domain, CI run
+#                 30663741590, 2026-07-31); any other domain going negative,
+#                 or emu|pll regressing past the baseline, fails.
 #   276007        an array carrying a `ramstyle` attribute did not infer to M10K.
 #                 When this fires the array becomes thousands of stray flops behind a
 #                 huge mux and timing collapses (see the 2026-07-29 tq_data
@@ -19,8 +20,8 @@
 #                 reviewed, known-benign case listed in M10K_ALLOWLIST below.
 set -uo pipefail
 
-[ $# -eq 2 ] || { echo "usage: $0 <output_files_dir> <logs_dir>" >&2; exit 2; }
-OUT="$1"; LOGS="$2"
+[ $# -eq 1 ] || { echo "usage: $0 <output_files_dir>" >&2; exit 2; }
+OUT="$1"
 
 # Files whose 276007 hit has been reviewed and accepted. Named individually on
 # purpose: a blanket skip would also hide the NEXT regression, which is the

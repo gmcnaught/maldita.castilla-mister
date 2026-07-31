@@ -12,7 +12,7 @@ run_case() {
     local tmp; tmp="$(mktemp -d)"
     mkdir -p "$tmp/output_files" "$tmp/logs"
     "$@" "$tmp"
-    bash "$GATE" "$tmp/output_files" "$tmp/logs" >"$tmp/out" 2>&1
+    bash "$GATE" "$tmp/output_files" >"$tmp/out" 2>&1
     local got=$?
     if [ "$got" = "$want" ]; then
         echo "PASS  $name (exit $got)"; PASS=$((PASS+1))
@@ -104,12 +104,16 @@ fixture_setup_other_domain_negative_plus_baseline_emu() {
 
 fixture_setup_hold_negative_only() {
     fixture_clean "$1"
-    # Only a Hold record is negative; all Setup records are clean. The
-    # setup gate must ignore Hold entirely and pass.
+    # Only a Hold record is negative, and it lands on FPGA_CLK1_50 -- a
+    # domain that is NOT accepted for a negative Setup slack (only emu|pll
+    # is). That domain's own Setup record stays positive. This isolates the
+    # property: if Hold rows ever leaked into the Setup decision, Rule 2
+    # (only emu|pll may be negative) would trip on FPGA_CLK1_50 and the case
+    # would fail. Today, with Hold correctly ignored, it must pass.
     {
         sta_setup "emu|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk" "-0.159" "-0.287"
         sta_setup "FPGA_CLK1_50" "8.364"
-        sta_hold "emu|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk" "-0.050" "-0.010"
+        sta_hold "FPGA_CLK1_50" "-0.001" "-0.010"
     } > "$1/output_files/Maldita.sta.summary"
 }
 
