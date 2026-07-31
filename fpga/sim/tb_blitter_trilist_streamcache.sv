@@ -42,12 +42,21 @@
 // stream_heavy_f0 [Phase 4 Stage B] is ALSO a committed tag (see
 // tb_blitter_trilist_stream.sv's header for its full provenance: mftrace-heavy-b.txt
 // frame index 0 == device f=1890, the first frame of the measured f=1890..1960
-// cov_px=213358 plateau, the Phase 4 Stage B gate anchor). It can be run through
-// the real sdram_fb_cache + mt48 texel path this bench co-simulates the same way:
+// cov_px=213358 plateau, the Phase 4 Stage B gate anchor). Device fabric frame
+// for this scene was 18.02 ms pre-W2 and is 16.68 ms post-W2 ("W2" = an
+// engine-side deferred-clear elision, not an RTL or triangle-stream change) --
+// calibrate against the post-W2 16.68 ms figure. No re-capture was needed for
+// W2: MFTRACE never records fills/clears, and a device A/B proved `tri`,
+// `dpath`, `texwait` and `cov_px` bit-identical pre- vs post-W2, so the same
+// committed .hex pair backs both figures. It can be run through the real
+// sdram_fb_cache + mt48 texel path this bench co-simulates the same way:
 //   STREAM_VEC=stream_heavy_f0 ./run_sims.sh --tier=nightly tb_blitter_trilist_streamcache
 // (this bench is NIGHTLY_ONLY, so --tier=nightly is required). Same HONESTY NOTE
 // as the sibling header: the vector's one synthesized full-screen clear is not a
-// like-for-like model of the device's ~3 real clears per frame.
+// like-for-like model of the device's ~3 real clears per frame (that gap is
+// also why the sim's `nontri` bucket, 0.786 ms, sits below the device's
+// post-W2 `ovhd` of 0.97 ms -- a 0.184 ms difference explained by clear count,
+// not RTL).
 `define STREAM_REALCACHE
 `define STREAM_TB_NAME tb_blitter_trilist_streamcache
 `include "tb_blitter_trilist_stream.sv"

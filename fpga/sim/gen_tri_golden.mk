@@ -142,6 +142,15 @@ stream-vectors: gen_tri_stream
 # is not a like-for-like model of the device's clear cost — one synthesized
 # clear here vs ~3 on hardware. That gap is for a later calibration task,
 # not this one.
+#
+# PROVENANCE: this committed vector was captured PRE-W2 (before the engine-side
+# deferred-clear elision landed). That capture is still valid post-W2 without
+# regeneration: W2 only removes redundant full-screen clears, MFTRACE never
+# recorded clears in the first place (only triangle groups, per the HONESTY
+# NOTE above), and a device A/B on the same scene proved `tri`, `dpath`,
+# `texwait` and `cov_px` bit-identical pre- vs post-W2. Device fabric frame for
+# this scene is 18.02 ms pre-W2 / 16.68 ms post-W2 — see the tb headers for the
+# full comparison; calibrate against 16.68 ms going forward.
 stream-vectors-heavy: gen_tri_stream
 	mkdir -p vectors
 	./gen_tri_stream $(TRACEDIR)/mftrace-heavy-b.txt 0 stream_heavy_f0
