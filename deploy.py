@@ -89,6 +89,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts" / "lib"))
+import resolve_rbf
+
 HOST = "192.168.20.81"
 USER = "root"
 REPO = Path(__file__).resolve().parent            # maldita.castilla-mister
@@ -150,17 +153,10 @@ def sidecar_for(rbf):
     return Path(str(rbf) + ".provenance.json")
 
 
-def fpga_tree(repo, rev="HEAD"):
-    """git tree hash of fpga/ at `rev` — the identity of the BITSTREAM SOURCE.
-
-    Deliberately NOT the commit sha. A commit that only touches CI, docs or deploy
-    tooling leaves the bitstream perfectly valid, and gating on commit equality would
-    refuse those builds spuriously — which trains everyone to pass --force by reflex
-    and kills the gate. The tree hash changes if and only if fpga/ actually changed.
-    """
-    r = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{rev}:fpga"],
-                       text=True, capture_output=True)
-    return r.stdout.strip() if r.returncode == 0 else None
+# The tree-hash rule now lives in scripts/lib/resolve_rbf.py so deploy.py and
+# .github/workflows/release.yml cannot drift. Kept as an alias because
+# check_rbf_provenance() and the sidecar writer both call it.
+fpga_tree = resolve_rbf.fpga_tree
 
 
 def last_code_commit_time(repo, exclude=("docs", "*.md")):
@@ -195,26 +191,10 @@ def fetch_rbf_for_head():
         raise SystemExit("FATAL: --fetch-rbf needs a git checkout of this repo")
     want_tree = fpga_tree(REPO)
     print(f"-- Resolving CI RBF for {REPO.name} HEAD {sha_short} (fpga/ tree {want_tree[:9]}) --")
-    r = subprocess.run(
-        ["gh", "run", "list", "--workflow", RBF_WORKFLOW, "--limit", "60",
-         "--json", "databaseId,headSha,status,conclusion"],
-        text=True, capture_output=True)
-    if r.returncode != 0:
-        raise SystemExit(f"FATAL: gh run list failed — is gh installed/authed?\n{r.stderr}")
-    ok = [x for x in json.loads(r.stdout or "[]")
-          if x.get("status") == "completed" and x.get("conclusion") == "success"]
-    # Match on the fpga/ TREE, not the sha: build-rbf.yml only triggers on fpga/**, so a
-    # CI- or docs-only HEAD legitimately has no run of its own while the bitstream from
-    # the last RTL commit is still exactly right. gh lists newest-first, so the first
-    # tree match is the freshest build of this RTL.
-    runs = [x for x in ok if fpga_tree(REPO, x["headSha"]) == want_tree]
-    if not runs:
-        raise SystemExit(
-            f"FATAL: no successful {RBF_WORKFLOW} run whose fpga/ tree matches HEAD's "
-            f"({want_tree[:9]}).\n"
-            "       Push the RTL and let CI build it, or pass --rbf <file> --force.")
-    run_id = runs[0]["databaseId"]
-    built_sha = runs[0]["headSha"]
+    try:
+        run_id, built_sha, want_tree = resolve_rbf.resolve_run_id(REPO)
+    except resolve_rbf.RbfResolutionError as e:
+        raise SystemExit(f"FATAL: {e}")
     if built_sha != full:
         print(f"   (HEAD did not touch fpga/; using the build from {built_sha[:7]}, "
               "whose RTL is identical)")
