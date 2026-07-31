@@ -30,6 +30,9 @@ jobs:
   resolve-rbf:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       run_id: ${{ steps.resolve.outputs.run_id }}
       fpga_tree: ${{ steps.resolve.outputs.fpga_tree }}
@@ -132,6 +135,12 @@ jobs:
             VERSION="dryrun-${GITHUB_RUN_NUMBER}"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          RBF_COUNT=$(ls dist/rbf/MalditaCastilla_*.rbf | wc -l)
+          if [ "$RBF_COUNT" -ne 1 ]; then
+            echo "::error::expected exactly one RBF match for dist/rbf/MalditaCastilla_*.rbf, found $RBF_COUNT" >&2
+            ls -la dist/rbf/ >&2 || true
+            exit 1
+          fi
           RBF=$(ls dist/rbf/MalditaCastilla_*.rbf)
           bash scripts/release/assemble_bundle.sh "$RBF" dist/engine/gmloader dist/out "$VERSION"
 
@@ -154,7 +163,7 @@ jobs:
           cat dist/notes.md
 
       - name: Publish the GitHub Release (tag only)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
