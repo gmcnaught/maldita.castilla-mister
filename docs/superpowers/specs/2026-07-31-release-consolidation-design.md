@@ -37,17 +37,31 @@ Consequence: today, every RBF artifact `build-rbf.yml` publishes is ungated. Any
 design that reuses those artifacts for a release must move the gates into
 `build-rbf.yml` first, or it will ship an unverified bitstream.
 
-### Finding 2 — two divergent engine build paths
+### Finding 2 — the two engine build paths differ in toolchain, not in flags
 
-| path | command | output |
-|---|---|---|
-| dev (`make build-engine`) | cached arm64-host cross image, `Makefile.gmloader ARCH=arm-linux-gnueabihf MISTER_BUILD=1 MISTER_NATIVE_VIDEO=1` | `build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf` |
-| CI (`release.yml`) | `arm32v7/debian:bullseye-slim` under QEMU, `build_mister_arm.sh` | `games/gmloader/gmloader` |
+| path | container | make invocation | output |
+|---|---|---|---|
+| dev (`make build-engine`) | cached arm64-host cross image (`Dockerfile.gmloader-build`) | `MISTER_BUILD=1 MISTER_NATIVE_VIDEO=1`, two-path `LLVM_INC` | `build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf` |
+| CI (`build_mister_arm.sh`) | `arm32v7/debian:bullseye-slim` under QEMU | `MISTER_BUILD=1`, `LLVM_FILE` + single-path `LLVM_INC` | same path, then **stripped** and copied to `games/gmloader/gmloader` |
 
-The device is validated with the first binary; the release would ship the
-second. This is the same class of trap already recorded for geometry changes —
-`MISTER_WIDTH` comes from `-D` flags, so a matching md5 can still be a
-mixed-geometry binary.
+Both run the same `Makefile.gmloader`. `MISTER_BUILD=1` alone sets
+`-DMISTER_NATIVE_VIDEO=1 -DMISTER_WIDTH=288 -DMISTER_HEIGHT=216` and pulls in
+`MISTER_SRCS` (`Makefile.gmloader:149-155`), so the dev path's extra
+`MISTER_NATIVE_VIDEO=1` is a redundant no-op, not a difference. Geometry and
+feature defines are therefore identical across the two paths.
+
+The real differences are the toolchain container, the `LLVM_INC` value, and the
+strip step.
+
+The mixed-geometry trap recorded for 2026-07-27 — where a flag-only change left
+stale `.o` files and linked translation units that disagreed about geometry — is
+a **local incremental-build** hazard. CI builds from a clean checkout with no
+`build/` directory, so it cannot occur there.
+
+Consequence: this does not block the release, and no geometry assertion is
+warranted. What is warranted is a cheap positive check that the MiSTer sources
+were actually linked in, since a silent `MISTER_BUILD` regression would produce
+a plausible-looking binary with no fabric path at all.
 
 ## End state
 
@@ -199,17 +213,24 @@ a `ramstyle` array's read must never be nested in an FSM case arm.
 ### Engine build parity
 
 The release keeps `build_mister_arm.sh`, because it is clean, reproducible, and
-depends on no cached host toolchain image.
+depends on no cached host toolchain image. Per Finding 2 the compile flags
+already match the device-validated build, so no geometry assertion is needed.
 
-`assemble_bundle.sh` gains an assertion that the shipped binary carries the
-device-validated build configuration — `MISTER_BUILD=1`,
-`MISTER_NATIVE_VIDEO=1`, and the 288×216 geometry constants. The check reads
-these from the binary rather than trusting the build command, so a
-mixed-geometry binary fails assembly instead of shipping.
+`build_mister_arm.sh` gains one check, run **before** the strip step, that the
+MiSTer sources were actually linked in:
 
-If the two build paths cannot be shown to produce an equivalent binary, that is
-a blocking finding to report, not something to paper over: the design's
-correctness depends on the released engine matching the validated one.
+```
+${ARCH}-nm build/${ARCH}/gmloader/gmloadernext.armhf \
+  | grep -q ' T NativeVideoWriter_WriteFrame'
+```
+
+`NativeVideoWriter_WriteFrame` is a non-static C symbol in
+`gmloader/mister/native_video_writer.c`, which is compiled only when
+`MISTER_BUILD=1`. Its absence means the fabric video path is missing entirely.
+`mf_frame_end` is deliberately *not* used for this check — it is `static` in
+`raster_backend_mfgpu.cpp` and never reaches the symbol table.
+
+The check must run before `${ARCH}-strip`, which removes the symbol.
 
 ## Path updates
 
@@ -236,9 +257,11 @@ engine freshness vs `gmloader-next` HEAD, sha1-verified scp) are unchanged.
 Ordered so that each step is independently verifiable and the working release
 path is never the thing under test.
 
-1. **Mesa → gmloader-next.** Move the 5 `.so` + README, commit, push. Bump the
-   `external/gmloader-next` pin in `mister-gmloader` so the existing workflow
-   still resolves them — this step must not break the current release path.
+1. **gmloader-next changes.** Move the 5 Mesa `.so` + README in; add the
+   `NativeVideoWriter_WriteFrame` link check to `build_mister_arm.sh` before the
+   strip step. Commit, push. Bump the `external/gmloader-next` pin in
+   `mister-gmloader` so the existing workflow still resolves them — this step
+   must not break the current release path.
 2. **Gates into `build-rbf.yml`.** Add the gate step to both jobs with the
    `ddr_blitter_arb.sv` allowlist. Verify by running `build-rbf.yml` on a real
    commit and confirming it passes; then verify the gate *fires* by running it
