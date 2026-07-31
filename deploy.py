@@ -106,9 +106,15 @@ CORENAME    = "Maldita Castilla"
 HANDLER_DIR = f"/media/fat/games/{CORENAME}"
 
 # ── Source paths (sibling repos). Override any with the matching CLI flag. ──────
-ENGINE_DEFAULT  = SIBLINGS / "gmloader-next/build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
+# Prefer the submodule so a fresh clone is self-sufficient; fall back to a
+# sibling checkout so the per-workstream worktree flow keeps working.
+_SUBMODULE_GM = REPO / "external/gmloader-next"
+_SIBLING_GM   = SIBLINGS / "gmloader-next"
+GMNEXT = _SUBMODULE_GM if (_SUBMODULE_GM / "Makefile.gmloader").is_file() else _SIBLING_GM
+
+ENGINE_DEFAULT  = GMNEXT / "build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
 WRAPPER_DEFAULT = REPO / "build/mister-wrapper-hps/MiSTer_Maldita"
-JSON_DEFAULT    = SIBLINGS / "gmloader-next/games/gmloader/gmloader.json"
+JSON_DEFAULT    = GMNEXT / "games/gmloader/gmloader.json"
 PORTMASTER      = SIBLINGS / "PortMaster-New/ports/maldita.castilla/maldita.castilla"
 APK_DEFAULT     = PORTMASTER / "malditacastilla.apk"
 DROID_DEFAULT   = PORTMASTER / "gamedata/game.droid"
@@ -274,7 +280,7 @@ def check_engine_freshness(engine, force):
     older than the merge that added native audio, so an --engine deploy would have
     silently shipped an engine WITHOUT the feature being tested.
     """
-    src = SIBLINGS / "gmloader-next"
+    src = GMNEXT
     sha, _ = git_head(src)
     ctime = last_code_commit_time(src)   # ignore docs-only commits — see the helper
     mtime = int(Path(engine).stat().st_mtime)

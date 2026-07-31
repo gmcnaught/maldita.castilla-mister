@@ -17,8 +17,8 @@ dd if=/dev/zero of="$TMP/MalditaCastilla_test.rbf" bs=1024 count=1200 2>/dev/nul
 # worth maintaining.
 ENGINE="$REPO/external/gmloader-next/games/gmloader/gmloader"
 if [ ! -f "$ENGINE" ]; then
-    echo "SKIP: no engine at $ENGINE (run build_mister_arm.sh first)"
-    exit 0
+    echo "SKIP: no engine at $ENGINE (run build_mister_arm.sh first) -- NOT VERIFIED, exiting non-zero so a CI runner checking only the exit code cannot report green"
+    exit 1
 fi
 
 bash "$ASSEMBLE" \

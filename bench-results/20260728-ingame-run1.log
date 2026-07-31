@@ -1,0 +1,1604 @@
+maldita handler: CORENAME='Maldita Castilla' BLITTER=2 RASTER=mfgpu BENCH_ENV=sourced(/media/fat/games/gmloader/bench.env)
+save_dir: reusing existing /s -> /media/fat/games/gmloader/saves
+Loading images...
+Loading 'libyoyo.so'...
+Loading 'libopenal.so'...
+Loading 'libstdc++.so'...
+DBG: so_load_module done
+Symbol "ExecuteIt_flags" not found.
+Symbol "MemoryManager__Free_2" not found.
+Symbol "g_nInstanceVariables" not found.
+Symbol "Variable_GetBuiltIn_Direct" not found.
+Symbol "Variable_SetBuiltIn_Direct" not found.
+Symbol "Code_Variable_Find_Slot_From_Name" not found.
+Symbol "YYCreateString" not found.
+Symbol "_RefThing__dec" not found.
+Symbol "surface_depth_disable" not found.
+Failed to perform hook for symbol "_Z11ShowMessagePKc"!
+Failed to perform hook for symbol "_ZN12DummyConsole6OutputEPKcz"!
+Failed to perform hook for symbol "alBufferMarkNeedsFreed"!
+Failed to perform hook for symbol "_Z22alBufferMarkNeedsFreedj"!
+Failed to perform hook for symbol "_Z17alBufferDebugNamejPKc"!
+DBG: patch_libyoyo done
+Failed to perform hook for symbol "_Z23RegisterAndroidKeyEventiiii"!
+Failed to perform hook for symbol "_Z14GamePadRestartv"!
+Texture compression hack NOT ENABLED!!!
+DBG: all patches done
+DBG: before NewStringUTF apk_path
+DBG: before NewStringUTF save_dir
+DBG: before NewStringUTF pkg_dir
+DBG: after NewStringUTF calls
+DBG: entering MISTER_NATIVE_VIDEO block
+DBG: set EGL_PLATFORM=surfaceless, LIBGL_DRIVERS_PATH=./mesa
+DBG: preloaded mesa/libdrm.so.2 ok
+DBG: preloaded mesa/libglapi.so.0 ok
+DBG: preloaded mesa/libEGL.so.1 ok
+DBG: dlopen libGLES_sw.so at ./libGLES_sw.so
+Loaded bundled GLES library: ./libGLES_sw.so
+DBG: SDL_VIDEODRIVER=dummy for MISTER_NATIVE_VIDEO
+SDL audio driver: dummy
+NativeAudioWriter: ring 65536 bytes @ 0x3A0D0000, wr=0x3A000030, rd=0x3A000038
+MisterAudio: pump pinned to core 1, main to core 0
+MisterAudio: native audio active (48000 Hz stereo S16)
+Loaded 471 controller mapping(s) from gamecontrollerdb.txt
+DBG: EGL syms: GetDisplay=0xb6a1a359 Init=0xb6a1f8a1 Choose=0xb6a1f09d
+DBG: eglGetProcAddress=0xb6a1af2d QueryDevices=0xb6a1a139 GetPlatformDisplay=0xb6a1a7f5
+DBG: EGL_PLATFORM_DEVICE: 1 device(s)
+DBG: eglGetPlatformDisplayEXT(DEVICE_0) = 0x31fa208
+EGL headless context created: 1.5, pbuffer 288x216
+DBG resolve NULL: eglSetBlobCacheFuncsANDROID
+DBG resolve NULL: eglCreateNativeClientBufferANDROID
+DBG resolve NULL: eglGetCompositorTimingSupportedANDROID
+DBG resolve NULL: eglGetCompositorTimingANDROID
+DBG resolve NULL: eglGetNextFrameIdANDROID
+DBG resolve NULL: eglGetFrameTimestampSupportedANDROID
+DBG resolve NULL: eglGetFrameTimestampsANDROID
+DBG resolve NULL: eglGetNativeClientBufferANDROID
+DBG resolve NULL: eglDupNativeFenceFDANDROID
+DBG resolve NULL: eglPresentationTimeANDROID
+DBG resolve NULL: eglQuerySurfacePointerANGLE
+DBG resolve NULL: eglGetMscRateANGLE
+DBG resolve NULL: eglClientSignalSyncEXT
+DBG resolve NULL: eglCompositorSetContextListEXT
+DBG resolve NULL: eglCompositorSetContextAttributesEXT
+DBG resolve NULL: eglCompositorSetWindowListEXT
+DBG resolve NULL: eglCompositorSetWindowAttributesEXT
+DBG resolve NULL: eglCompositorBindTexWindowEXT
+DBG resolve NULL: eglCompositorSetSizeEXT
+DBG resolve NULL: eglCompositorSwapPolicyEXT
+DBG resolve NULL: eglQueryDeviceAttribEXT
+DBG resolve NULL: eglQueryDeviceStringEXT
+DBG resolve NULL: eglQueryDevicesEXT
+DBG resolve NULL: eglQueryDisplayAttribEXT
+DBG resolve NULL: eglQueryDeviceBinaryEXT
+DBG resolve NULL: eglQueryDmaBufFormatsEXT
+DBG resolve NULL: eglQueryDmaBufModifiersEXT
+DBG resolve NULL: eglGetOutputLayersEXT
+DBG resolve NULL: eglGetOutputPortsEXT
+DBG resolve NULL: eglOutputLayerAttribEXT
+DBG resolve NULL: eglQueryOutputLayerAttribEXT
+DBG resolve NULL: eglQueryOutputLayerStringEXT
+DBG resolve NULL: eglOutputPortAttribEXT
+DBG resolve NULL: eglQueryOutputPortAttribEXT
+DBG resolve NULL: eglQueryOutputPortStringEXT
+DBG resolve NULL: eglGetPlatformDisplayEXT
+DBG resolve NULL: eglCreatePlatformWindowSurfaceEXT
+DBG resolve NULL: eglCreatePlatformPixmapSurfaceEXT
+DBG resolve NULL: eglStreamConsumerOutputEXT
+DBG resolve NULL: eglQuerySupportedCompressionRatesEXT
+DBG resolve NULL: eglSwapBuffersWithDamageEXT
+DBG resolve NULL: eglUnsignalSyncEXT
+DBG resolve NULL: eglCreatePixmapSurfaceHI
+DBG resolve NULL: eglCreateSync64KHR
+DBG resolve NULL: eglDebugMessageControlKHR
+DBG resolve NULL: eglQueryDebugKHR
+DBG resolve NULL: eglLabelObjectKHR
+DBG resolve NULL: eglQueryDisplayAttribKHR
+DBG resolve NULL: eglCreateSyncKHR
+DBG resolve NULL: eglDestroySyncKHR
+DBG resolve NULL: eglClientWaitSyncKHR
+DBG resolve NULL: eglGetSyncAttribKHR
+DBG resolve NULL: eglCreateImageKHR
+DBG resolve NULL: eglDestroyImageKHR
+DBG resolve NULL: eglLockSurfaceKHR
+DBG resolve NULL: eglUnlockSurfaceKHR
+DBG resolve NULL: eglQuerySurface64KHR
+DBG resolve NULL: eglSetDamageRegionKHR
+DBG resolve NULL: eglSignalSyncKHR
+DBG resolve NULL: eglCreateStreamKHR
+DBG resolve NULL: eglDestroyStreamKHR
+DBG resolve NULL: eglStreamAttribKHR
+DBG resolve NULL: eglQueryStreamKHR
+DBG resolve NULL: eglQueryStreamu64KHR
+DBG resolve NULL: eglCreateStreamAttribKHR
+DBG resolve NULL: eglSetStreamAttribKHR
+DBG resolve NULL: eglQueryStreamAttribKHR
+DBG resolve NULL: eglStreamConsumerAcquireAttribKHR
+DBG resolve NULL: eglStreamConsumerReleaseAttribKHR
+DBG resolve NULL: eglStreamConsumerGLTextureExternalKHR
+DBG resolve NULL: eglStreamConsumerAcquireKHR
+DBG resolve NULL: eglStreamConsumerReleaseKHR
+DBG resolve NULL: eglGetStreamFileDescriptorKHR
+DBG resolve NULL: eglCreateStreamFromFileDescriptorKHR
+DBG resolve NULL: eglQueryStreamTimeKHR
+DBG resolve NULL: eglCreateStreamProducerSurfaceKHR
+DBG resolve NULL: eglSwapBuffersWithDamageKHR
+DBG resolve NULL: eglWaitSyncKHR
+DBG resolve NULL: eglCreateDRMImageMESA
+DBG resolve NULL: eglExportDRMImageMESA
+DBG resolve NULL: eglExportDMABUFImageQueryMESA
+DBG resolve NULL: eglExportDMABUFImageMESA
+DBG resolve NULL: eglGetDisplayDriverConfig
+DBG resolve NULL: eglGetDisplayDriverName
+DBG resolve NULL: eglSwapBuffersRegionNOK
+DBG resolve NULL: eglSwapBuffersRegion2NOK
+DBG resolve NULL: eglQueryNativeDisplayNV
+DBG resolve NULL: eglQueryNativeWindowNV
+DBG resolve NULL: eglQueryNativePixmapNV
+DBG resolve NULL: eglPostSubBufferNV
+DBG resolve NULL: eglStreamImageConsumerConnectNV
+DBG resolve NULL: eglQueryStreamConsumerEventNV
+DBG resolve NULL: eglStreamAcquireImageNV
+DBG resolve NULL: eglStreamReleaseImageNV
+DBG resolve NULL: eglStreamConsumerGLTextureExternalAttribsNV
+DBG resolve NULL: eglStreamFlushNV
+DBG resolve NULL: eglQueryDisplayAttribNV
+DBG resolve NULL: eglSetStreamMetadataNV
+DBG resolve NULL: eglQueryStreamMetadataNV
+DBG resolve NULL: eglResetStreamNV
+DBG resolve NULL: eglCreateStreamSyncNV
+DBG resolve NULL: eglCreateFenceSyncNV
+DBG resolve NULL: eglDestroySyncNV
+DBG resolve NULL: eglFenceNV
+DBG resolve NULL: eglClientWaitSyncNV
+DBG resolve NULL: eglSignalSyncNV
+DBG resolve NULL: eglGetSyncAttribNV
+DBG resolve NULL: eglGetSystemTimeFrequencyNV
+DBG resolve NULL: eglGetSystemTimeNV
+DBG resolve NULL: eglBindWaylandDisplayWL
+DBG resolve NULL: eglUnbindWaylandDisplayWL
+DBG resolve NULL: eglQueryWaylandBufferWL
+DBG resolve NULL: eglCreateWaylandBufferFromImageWL
+DBG resolve NULL: glRenderbufferStorageMultisampleAdvancedAMD
+DBG resolve NULL: glNamedRenderbufferStorageMultisampleAdvancedAMD
+DBG resolve NULL: glGetPerfMonitorGroupsAMD
+DBG resolve NULL: glGetPerfMonitorCountersAMD
+DBG resolve NULL: glGetPerfMonitorGroupStringAMD
+DBG resolve NULL: glGetPerfMonitorCounterStringAMD
+DBG resolve NULL: glGetPerfMonitorCounterInfoAMD
+DBG resolve NULL: glGenPerfMonitorsAMD
+DBG resolve NULL: glDeletePerfMonitorsAMD
+DBG resolve NULL: glSelectPerfMonitorCountersAMD
+DBG resolve NULL: glBeginPerfMonitorAMD
+DBG resolve NULL: glEndPerfMonitorAMD
+DBG resolve NULL: glGetPerfMonitorCounterDataAMD
+DBG resolve NULL: glBlitFramebufferANGLE
+DBG resolve NULL: glRenderbufferStorageMultisampleANGLE
+DBG resolve NULL: glDrawArraysInstancedANGLE
+DBG resolve NULL: glDrawElementsInstancedANGLE
+DBG resolve NULL: glVertexAttribDivisorANGLE
+DBG resolve NULL: glGetTranslatedShaderSourceANGLE
+DBG resolve NULL: glCopyTextureLevelsAPPLE
+DBG resolve NULL: glRenderbufferStorageMultisampleAPPLE
+DBG resolve NULL: glResolveMultisampleFramebufferAPPLE
+DBG resolve NULL: glFenceSyncAPPLE
+DBG resolve NULL: glIsSyncAPPLE
+DBG resolve NULL: glDeleteSyncAPPLE
+DBG resolve NULL: glClientWaitSyncAPPLE
+DBG resolve NULL: glWaitSyncAPPLE
+DBG resolve NULL: glGetInteger64vAPPLE
+DBG resolve NULL: glGetSyncivAPPLE
+DBG resolve NULL: glEGLImageTargetTexStorageEXT
+DBG resolve NULL: glEGLImageTargetTextureStorageEXT
+DBG resolve NULL: glDrawArraysInstancedBaseInstanceEXT
+DBG resolve NULL: glDrawElementsInstancedBaseInstanceEXT
+DBG resolve NULL: glDrawElementsInstancedBaseVertexBaseInstanceEXT
+DBG resolve NULL: glBindFragDataLocationIndexedEXT
+DBG resolve NULL: glBindFragDataLocationEXT
+DBG resolve NULL: glGetProgramResourceLocationIndexEXT
+DBG resolve NULL: glGetFragDataIndexEXT
+DBG resolve NULL: glBlendEquationEXT
+DBG resolve NULL: glBufferStorageEXT
+DBG resolve NULL: glClearTexImageEXT
+DBG resolve NULL: glClearTexSubImageEXT
+DBG resolve NULL: glClipControlEXT
+DBG resolve NULL: glCopyImageSubDataEXT
+DBG resolve NULL: glLabelObjectEXT
+DBG resolve NULL: glGetObjectLabelEXT
+DBG resolve NULL: glInsertEventMarkerEXT
+DBG resolve NULL: glPushGroupMarkerEXT
+DBG resolve NULL: glPopGroupMarkerEXT
+DBG resolve NULL: glDiscardFramebufferEXT
+DBG resolve NULL: glGenQueriesEXT
+DBG resolve NULL: glDeleteQueriesEXT
+DBG resolve NULL: glIsQueryEXT
+DBG resolve NULL: glBeginQueryEXT
+DBG resolve NULL: glEndQueryEXT
+DBG resolve NULL: glQueryCounterEXT
+DBG resolve NULL: glGetQueryivEXT
+DBG resolve NULL: glGetQueryObjectivEXT
+DBG resolve NULL: glGetQueryObjectuivEXT
+DBG resolve NULL: glGetQueryObjecti64vEXT
+DBG resolve NULL: glGetQueryObjectui64vEXT
+DBG resolve NULL: glGetInteger64vEXT
+DBG resolve NULL: glDrawBuffersEXT
+DBG resolve NULL: glEnableiEXT
+DBG resolve NULL: glDisableiEXT
+DBG resolve NULL: glBlendEquationiEXT
+DBG resolve NULL: glBlendEquationSeparateiEXT
+DBG resolve NULL: glBlendFunciEXT
+DBG resolve NULL: glBlendFuncSeparateiEXT
+DBG resolve NULL: glColorMaskiEXT
+DBG resolve NULL: glIsEnablediEXT
+DBG resolve NULL: glDrawElementsBaseVertexEXT
+DBG resolve NULL: glDrawRangeElementsBaseVertexEXT
+DBG resolve NULL: glDrawElementsInstancedBaseVertexEXT
+DBG resolve NULL: glMultiDrawElementsBaseVertexEXT
+DBG resolve NULL: glDrawArraysInstancedEXT
+DBG resolve NULL: glDrawElementsInstancedEXT
+DBG resolve NULL: glDrawTransformFeedbackEXT
+DBG resolve NULL: glDrawTransformFeedbackInstancedEXT
+DBG resolve NULL: glBufferStorageExternalEXT
+DBG resolve NULL: glNamedBufferStorageExternalEXT
+DBG resolve NULL: glGetFragmentShadingRatesEXT
+DBG resolve NULL: glShadingRateEXT
+DBG resolve NULL: glShadingRateCombinerOpsEXT
+DBG resolve NULL: glFramebufferShadingRateEXT
+DBG resolve NULL: glBlitFramebufferLayersEXT
+DBG resolve NULL: glBlitFramebufferLayerEXT
+DBG resolve NULL: glFramebufferTextureEXT
+DBG resolve NULL: glDrawArraysInstancedEXT
+DBG resolve NULL: glDrawElementsInstancedEXT
+DBG resolve NULL: glVertexAttribDivisorEXT
+DBG resolve NULL: glMapBufferRangeEXT
+DBG resolve NULL: glFlushMappedBufferRangeEXT
+DBG resolve NULL: glGetUnsignedBytevEXT
+DBG resolve NULL: glGetUnsignedBytei_vEXT
+DBG resolve NULL: glDeleteMemoryObjectsEXT
+DBG resolve NULL: glIsMemoryObjectEXT
+DBG resolve NULL: glCreateMemoryObjectsEXT
+DBG resolve NULL: glMemoryObjectParameterivEXT
+DBG resolve NULL: glGetMemoryObjectParameterivEXT
+DBG resolve NULL: glTexStorageMem2DEXT
+DBG resolve NULL: glTexStorageMem2DMultisampleEXT
+DBG resolve NULL: glTexStorageMem3DEXT
+DBG resolve NULL: glTexStorageMem3DMultisampleEXT
+DBG resolve NULL: glBufferStorageMemEXT
+DBG resolve NULL: glTextureStorageMem2DEXT
+DBG resolve NULL: glTextureStorageMem2DMultisampleEXT
+DBG resolve NULL: glTextureStorageMem3DEXT
+DBG resolve NULL: glTextureStorageMem3DMultisampleEXT
+DBG resolve NULL: glNamedBufferStorageMemEXT
+DBG resolve NULL: glTexStorageMem1DEXT
+DBG resolve NULL: glTextureStorageMem1DEXT
+DBG resolve NULL: glImportMemoryFdEXT
+DBG resolve NULL: glImportMemoryWin32HandleEXT
+DBG resolve NULL: glImportMemoryWin32NameEXT
+DBG resolve NULL: glMultiDrawArraysEXT
+DBG resolve NULL: glMultiDrawElementsEXT
+DBG resolve NULL: glMultiDrawArraysIndirectEXT
+DBG resolve NULL: glMultiDrawElementsIndirectEXT
+DBG resolve NULL: glRenderbufferStorageMultisampleEXT
+DBG resolve NULL: glFramebufferTexture2DMultisampleEXT
+DBG resolve NULL: glReadBufferIndexedEXT
+DBG resolve NULL: glDrawBuffersIndexedEXT
+DBG resolve NULL: glGetIntegeri_vEXT
+DBG resolve NULL: glGenQueriesEXT
+DBG resolve NULL: glDeleteQueriesEXT
+DBG resolve NULL: glIsQueryEXT
+DBG resolve NULL: glBeginQueryEXT
+DBG resolve NULL: glEndQueryEXT
+DBG resolve NULL: glGetQueryivEXT
+DBG resolve NULL: glGetQueryObjectuivEXT
+DBG resolve NULL: glPolygonOffsetClampEXT
+DBG resolve NULL: glPrimitiveBoundingBoxEXT
+DBG resolve NULL: glRasterSamplesEXT
+DBG resolve NULL: glGetGraphicsResetStatusEXT
+DBG resolve NULL: glReadnPixelsEXT
+DBG resolve NULL: glGetnUniformfvEXT
+DBG resolve NULL: glGetnUniformivEXT
+DBG resolve NULL: glGetUnsignedBytevEXT
+DBG resolve NULL: glGetUnsignedBytei_vEXT
+DBG resolve NULL: glGenSemaphoresEXT
+DBG resolve NULL: glDeleteSemaphoresEXT
+DBG resolve NULL: glIsSemaphoreEXT
+DBG resolve NULL: glSemaphoreParameterui64vEXT
+DBG resolve NULL: glGetSemaphoreParameterui64vEXT
+DBG resolve NULL: glWaitSemaphoreEXT
+DBG resolve NULL: glSignalSemaphoreEXT
+DBG resolve NULL: glImportSemaphoreFdEXT
+DBG resolve NULL: glImportSemaphoreWin32HandleEXT
+DBG resolve NULL: glImportSemaphoreWin32NameEXT
+DBG resolve NULL: glUseShaderProgramEXT
+DBG resolve NULL: glActiveProgramEXT
+DBG resolve NULL: glCreateShaderProgramEXT
+DBG resolve NULL: glActiveShaderProgramEXT
+DBG resolve NULL: glBindProgramPipelineEXT
+DBG resolve NULL: glCreateShaderProgramvEXT
+DBG resolve NULL: glDeleteProgramPipelinesEXT
+DBG resolve NULL: glGenProgramPipelinesEXT
+DBG resolve NULL: glGetProgramPipelineInfoLogEXT
+DBG resolve NULL: glGetProgramPipelineivEXT
+DBG resolve NULL: glIsProgramPipelineEXT
+DBG resolve NULL: glProgramParameteriEXT
+DBG resolve NULL: glProgramUniform1fEXT
+DBG resolve NULL: glProgramUniform1fvEXT
+DBG resolve NULL: glProgramUniform1iEXT
+DBG resolve NULL: glProgramUniform1ivEXT
+DBG resolve NULL: glProgramUniform2fEXT
+DBG resolve NULL: glProgramUniform2fvEXT
+DBG resolve NULL: glProgramUniform2iEXT
+DBG resolve NULL: glProgramUniform2ivEXT
+DBG resolve NULL: glProgramUniform3fEXT
+DBG resolve NULL: glProgramUniform3fvEXT
+DBG resolve NULL: glProgramUniform3iEXT
+DBG resolve NULL: glProgramUniform3ivEXT
+DBG resolve NULL: glProgramUniform4fEXT
+DBG resolve NULL: glProgramUniform4fvEXT
+DBG resolve NULL: glProgramUniform4iEXT
+DBG resolve NULL: glProgramUniform4ivEXT
+DBG resolve NULL: glProgramUniformMatrix2fvEXT
+DBG resolve NULL: glProgramUniformMatrix3fvEXT
+DBG resolve NULL: glProgramUniformMatrix4fvEXT
+DBG resolve NULL: glUseProgramStagesEXT
+DBG resolve NULL: glValidateProgramPipelineEXT
+DBG resolve NULL: glProgramUniform1uiEXT
+DBG resolve NULL: glProgramUniform2uiEXT
+DBG resolve NULL: glProgramUniform3uiEXT
+DBG resolve NULL: glProgramUniform4uiEXT
+DBG resolve NULL: glProgramUniform1uivEXT
+DBG resolve NULL: glProgramUniform2uivEXT
+DBG resolve NULL: glProgramUniform3uivEXT
+DBG resolve NULL: glProgramUniform4uivEXT
+DBG resolve NULL: glProgramUniformMatrix2x3fvEXT
+DBG resolve NULL: glProgramUniformMatrix3x2fvEXT
+DBG resolve NULL: glProgramUniformMatrix2x4fvEXT
+DBG resolve NULL: glProgramUniformMatrix4x2fvEXT
+DBG resolve NULL: glProgramUniformMatrix3x4fvEXT
+DBG resolve NULL: glProgramUniformMatrix4x3fvEXT
+DBG resolve NULL: glFramebufferFetchBarrierEXT
+DBG resolve NULL: glFramebufferPixelLocalStorageSizeEXT
+DBG resolve NULL: glGetFramebufferPixelLocalStorageSizeEXT
+DBG resolve NULL: glClearPixelLocalStorageuiEXT
+DBG resolve NULL: glTexPageCommitmentEXT
+DBG resolve NULL: glPatchParameteriEXT
+DBG resolve NULL: glTexParameterIivEXT
+DBG resolve NULL: glTexParameterIuivEXT
+DBG resolve NULL: glGetTexParameterIivEXT
+DBG resolve NULL: glGetTexParameterIuivEXT
+DBG resolve NULL: glSamplerParameterIivEXT
+DBG resolve NULL: glSamplerParameterIuivEXT
+DBG resolve NULL: glGetSamplerParameterIivEXT
+DBG resolve NULL: glGetSamplerParameterIuivEXT
+DBG resolve NULL: glTexBufferEXT
+DBG resolve NULL: glTexBufferRangeEXT
+DBG resolve NULL: glTexStorage1DEXT
+DBG resolve NULL: glTexStorage2DEXT
+DBG resolve NULL: glTexStorage3DEXT
+DBG resolve NULL: glTextureStorage1DEXT
+DBG resolve NULL: glTextureStorage2DEXT
+DBG resolve NULL: glTextureStorage3DEXT
+DBG resolve NULL: glTexStorageAttribs2DEXT
+DBG resolve NULL: glTexStorageAttribs3DEXT
+DBG resolve NULL: glTextureViewEXT
+DBG resolve NULL: glAcquireKeyedMutexWin32EXT
+DBG resolve NULL: glReleaseKeyedMutexWin32EXT
+DBG resolve NULL: glWindowRectanglesEXT
+DBG resolve NULL: glGetTextureHandleIMG
+DBG resolve NULL: glGetTextureSamplerHandleIMG
+DBG resolve NULL: glUniformHandleui64IMG
+DBG resolve NULL: glUniformHandleui64vIMG
+DBG resolve NULL: glProgramUniformHandleui64IMG
+DBG resolve NULL: glProgramUniformHandleui64vIMG
+DBG resolve NULL: glFramebufferTexture2DDownsampleIMG
+DBG resolve NULL: glFramebufferTextureLayerDownsampleIMG
+DBG resolve NULL: glRenderbufferStorageMultisampleIMG
+DBG resolve NULL: glFramebufferTexture2DMultisampleIMG
+DBG resolve NULL: glApplyFramebufferAttachmentCMAAINTEL
+DBG resolve NULL: glBeginPerfQueryINTEL
+DBG resolve NULL: glCreatePerfQueryINTEL
+DBG resolve NULL: glDeletePerfQueryINTEL
+DBG resolve NULL: glEndPerfQueryINTEL
+DBG resolve NULL: glGetFirstPerfQueryIdINTEL
+DBG resolve NULL: glGetNextPerfQueryIdINTEL
+DBG resolve NULL: glGetPerfCounterInfoINTEL
+DBG resolve NULL: glGetPerfQueryDataINTEL
+DBG resolve NULL: glGetPerfQueryIdByNameINTEL
+DBG resolve NULL: glGetPerfQueryInfoINTEL
+DBG resolve NULL: glBlendBarrierKHR
+DBG resolve NULL: glDebugMessageControlKHR
+DBG resolve NULL: glDebugMessageInsertKHR
+DBG resolve NULL: glDebugMessageCallbackKHR
+DBG resolve NULL: glGetDebugMessageLogKHR
+DBG resolve NULL: glPushDebugGroupKHR
+DBG resolve NULL: glPopDebugGroupKHR
+DBG resolve NULL: glObjectLabelKHR
+DBG resolve NULL: glGetObjectLabelKHR
+DBG resolve NULL: glObjectPtrLabelKHR
+DBG resolve NULL: glGetObjectPtrLabelKHR
+DBG resolve NULL: glGetPointervKHR
+DBG resolve NULL: glMaxShaderCompilerThreadsKHR
+DBG resolve NULL: glGetGraphicsResetStatusKHR
+DBG resolve NULL: glReadnPixelsKHR
+DBG resolve NULL: glGetnUniformfvKHR
+DBG resolve NULL: glGetnUniformivKHR
+DBG resolve NULL: glGetnUniformuivKHR
+DBG resolve NULL: glFramebufferParameteriMESA
+DBG resolve NULL: glGetFramebufferParameterivMESA
+DBG resolve NULL: glGetTextureHandleNV
+DBG resolve NULL: glGetTextureSamplerHandleNV
+DBG resolve NULL: glMakeTextureHandleResidentNV
+DBG resolve NULL: glMakeTextureHandleNonResidentNV
+DBG resolve NULL: glGetImageHandleNV
+DBG resolve NULL: glMakeImageHandleResidentNV
+DBG resolve NULL: glMakeImageHandleNonResidentNV
+DBG resolve NULL: glUniformHandleui64NV
+DBG resolve NULL: glUniformHandleui64vNV
+DBG resolve NULL: glProgramUniformHandleui64NV
+DBG resolve NULL: glProgramUniformHandleui64vNV
+DBG resolve NULL: glIsTextureHandleResidentNV
+DBG resolve NULL: glIsImageHandleResidentNV
+DBG resolve NULL: glBlendParameteriNV
+DBG resolve NULL: glBlendBarrierNV
+DBG resolve NULL: glViewportPositionWScaleNV
+DBG resolve NULL: glBeginConditionalRenderNV
+DBG resolve NULL: glEndConditionalRenderNV
+DBG resolve NULL: glSubpixelPrecisionBiasNV
+DBG resolve NULL: glConservativeRasterParameteriNV
+DBG resolve NULL: glCopyBufferSubDataNV
+DBG resolve NULL: glCoverageMaskNV
+DBG resolve NULL: glCoverageOperationNV
+DBG resolve NULL: glDrawBuffersNV
+DBG resolve NULL: glDrawArraysInstancedNV
+DBG resolve NULL: glDrawElementsInstancedNV
+DBG resolve NULL: glDrawVkImageNV
+DBG resolve NULL: glGetVkProcAddrNV
+DBG resolve NULL: glWaitVkSemaphoreNV
+DBG resolve NULL: glSignalVkSemaphoreNV
+DBG resolve NULL: glSignalVkFenceNV
+DBG resolve NULL: glDeleteFencesNV
+DBG resolve NULL: glGenFencesNV
+DBG resolve NULL: glIsFenceNV
+DBG resolve NULL: glTestFenceNV
+DBG resolve NULL: glGetFenceivNV
+DBG resolve NULL: glFinishFenceNV
+DBG resolve NULL: glSetFenceNV
+DBG resolve NULL: glFragmentCoverageColorNV
+DBG resolve NULL: glBlitFramebufferNV
+DBG resolve NULL: glRasterSamplesEXT
+DBG resolve NULL: glCoverageModulationTableNV
+DBG resolve NULL: glGetCoverageModulationTableNV
+DBG resolve NULL: glCoverageModulationNV
+DBG resolve NULL: glRenderbufferStorageMultisampleNV
+DBG resolve NULL: glUniform1i64NV
+DBG resolve NULL: glUniform2i64NV
+DBG resolve NULL: glUniform3i64NV
+DBG resolve NULL: glUniform4i64NV
+DBG resolve NULL: glUniform1i64vNV
+DBG resolve NULL: glUniform2i64vNV
+DBG resolve NULL: glUniform3i64vNV
+DBG resolve NULL: glUniform4i64vNV
+DBG resolve NULL: glUniform1ui64NV
+DBG resolve NULL: glUniform2ui64NV
+DBG resolve NULL: glUniform3ui64NV
+DBG resolve NULL: glUniform4ui64NV
+DBG resolve NULL: glUniform1ui64vNV
+DBG resolve NULL: glUniform2ui64vNV
+DBG resolve NULL: glUniform3ui64vNV
+DBG resolve NULL: glUniform4ui64vNV
+DBG resolve NULL: glGetUniformi64vNV
+DBG resolve NULL: glProgramUniform1i64NV
+DBG resolve NULL: glProgramUniform2i64NV
+DBG resolve NULL: glProgramUniform3i64NV
+DBG resolve NULL: glProgramUniform4i64NV
+DBG resolve NULL: glProgramUniform1i64vNV
+DBG resolve NULL: glProgramUniform2i64vNV
+DBG resolve NULL: glProgramUniform3i64vNV
+DBG resolve NULL: glProgramUniform4i64vNV
+DBG resolve NULL: glProgramUniform1ui64NV
+DBG resolve NULL: glProgramUniform2ui64NV
+DBG resolve NULL: glProgramUniform3ui64NV
+DBG resolve NULL: glProgramUniform4ui64NV
+DBG resolve NULL: glProgramUniform1ui64vNV
+DBG resolve NULL: glProgramUniform2ui64vNV
+DBG resolve NULL: glProgramUniform3ui64vNV
+DBG resolve NULL: glProgramUniform4ui64vNV
+DBG resolve NULL: glVertexAttribDivisorNV
+DBG resolve NULL: glGetInternalformatSampleivNV
+DBG resolve NULL: glGetMemoryObjectDetachedResourcesuivNV
+DBG resolve NULL: glResetMemoryObjectParameterNV
+DBG resolve NULL: glTexAttachMemoryNV
+DBG resolve NULL: glBufferAttachMemoryNV
+DBG resolve NULL: glTextureAttachMemoryNV
+DBG resolve NULL: glNamedBufferAttachMemoryNV
+DBG resolve NULL: glBufferPageCommitmentMemNV
+DBG resolve NULL: glTexPageCommitmentMemNV
+DBG resolve NULL: glNamedBufferPageCommitmentMemNV
+DBG resolve NULL: glTexturePageCommitmentMemNV
+DBG resolve NULL: glDrawMeshTasksNV
+DBG resolve NULL: glDrawMeshTasksIndirectNV
+DBG resolve NULL: glMultiDrawMeshTasksIndirectNV
+DBG resolve NULL: glMultiDrawMeshTasksIndirectCountNV
+DBG resolve NULL: glUniformMatrix2x3fvNV
+DBG resolve NULL: glUniformMatrix3x2fvNV
+DBG resolve NULL: glUniformMatrix2x4fvNV
+DBG resolve NULL: glUniformMatrix4x2fvNV
+DBG resolve NULL: glUniformMatrix3x4fvNV
+DBG resolve NULL: glUniformMatrix4x3fvNV
+DBG resolve NULL: glGenPathsNV
+DBG resolve NULL: glDeletePathsNV
+DBG resolve NULL: glIsPathNV
+DBG resolve NULL: glPathCommandsNV
+DBG resolve NULL: glPathCoordsNV
+DBG resolve NULL: glPathSubCommandsNV
+DBG resolve NULL: glPathSubCoordsNV
+DBG resolve NULL: glPathStringNV
+DBG resolve NULL: glPathGlyphsNV
+DBG resolve NULL: glPathGlyphRangeNV
+DBG resolve NULL: glWeightPathsNV
+DBG resolve NULL: glCopyPathNV
+DBG resolve NULL: glInterpolatePathsNV
+DBG resolve NULL: glTransformPathNV
+DBG resolve NULL: glPathParameterivNV
+DBG resolve NULL: glPathParameteriNV
+DBG resolve NULL: glPathParameterfvNV
+DBG resolve NULL: glPathParameterfNV
+DBG resolve NULL: glPathDashArrayNV
+DBG resolve NULL: glPathStencilFuncNV
+DBG resolve NULL: glPathStencilDepthOffsetNV
+DBG resolve NULL: glStencilFillPathNV
+DBG resolve NULL: glStencilStrokePathNV
+DBG resolve NULL: glStencilFillPathInstancedNV
+DBG resolve NULL: glStencilStrokePathInstancedNV
+DBG resolve NULL: glPathCoverDepthFuncNV
+DBG resolve NULL: glCoverFillPathNV
+DBG resolve NULL: glCoverStrokePathNV
+DBG resolve NULL: glCoverFillPathInstancedNV
+DBG resolve NULL: glCoverStrokePathInstancedNV
+DBG resolve NULL: glGetPathParameterivNV
+DBG resolve NULL: glGetPathParameterfvNV
+DBG resolve NULL: glGetPathCommandsNV
+DBG resolve NULL: glGetPathCoordsNV
+DBG resolve NULL: glGetPathDashArrayNV
+DBG resolve NULL: glGetPathMetricsNV
+DBG resolve NULL: glGetPathMetricRangeNV
+DBG resolve NULL: glGetPathSpacingNV
+DBG resolve NULL: glIsPointInFillPathNV
+DBG resolve NULL: glIsPointInStrokePathNV
+DBG resolve NULL: glGetPathLengthNV
+DBG resolve NULL: glPointAlongPathNV
+DBG resolve NULL: glMatrixLoad3x2fNV
+DBG resolve NULL: glMatrixLoad3x3fNV
+DBG resolve NULL: glMatrixLoadTranspose3x3fNV
+DBG resolve NULL: glMatrixMult3x2fNV
+DBG resolve NULL: glMatrixMult3x3fNV
+DBG resolve NULL: glMatrixMultTranspose3x3fNV
+DBG resolve NULL: glStencilThenCoverFillPathNV
+DBG resolve NULL: glStencilThenCoverStrokePathNV
+DBG resolve NULL: glStencilThenCoverFillPathInstancedNV
+DBG resolve NULL: glStencilThenCoverStrokePathInstancedNV
+DBG resolve NULL: glPathGlyphIndexRangeNV
+DBG resolve NULL: glPathGlyphIndexArrayNV
+DBG resolve NULL: glPathMemoryGlyphIndexArrayNV
+DBG resolve NULL: glProgramPathFragmentInputGenNV
+DBG resolve NULL: glGetProgramResourcefvNV
+DBG resolve NULL: glPathColorGenNV
+DBG resolve NULL: glPathTexGenNV
+DBG resolve NULL: glPathFogGenNV
+DBG resolve NULL: glGetPathColorGenivNV
+DBG resolve NULL: glGetPathColorGenfvNV
+DBG resolve NULL: glGetPathTexGenivNV
+DBG resolve NULL: glGetPathTexGenfvNV
+DBG resolve NULL: glMatrixFrustumEXT
+DBG resolve NULL: glMatrixLoadIdentityEXT
+DBG resolve NULL: glMatrixLoadTransposefEXT
+DBG resolve NULL: glMatrixLoadTransposedEXT
+DBG resolve NULL: glMatrixLoadfEXT
+DBG resolve NULL: glMatrixLoaddEXT
+DBG resolve NULL: glMatrixMultTransposefEXT
+DBG resolve NULL: glMatrixMultTransposedEXT
+DBG resolve NULL: glMatrixMultfEXT
+DBG resolve NULL: glMatrixMultdEXT
+DBG resolve NULL: glMatrixOrthoEXT
+DBG resolve NULL: glMatrixPopEXT
+DBG resolve NULL: glMatrixPushEXT
+DBG resolve NULL: glMatrixRotatefEXT
+DBG resolve NULL: glMatrixRotatedEXT
+DBG resolve NULL: glMatrixScalefEXT
+DBG resolve NULL: glMatrixScaledEXT
+DBG resolve NULL: glMatrixTranslatefEXT
+DBG resolve NULL: glMatrixTranslatedEXT
+DBG resolve NULL: glPolygonModeNV
+DBG resolve NULL: glReadBufferNV
+DBG resolve NULL: glFramebufferSampleLocationsfvNV
+DBG resolve NULL: glNamedFramebufferSampleLocationsfvNV
+DBG resolve NULL: glResolveDepthValuesNV
+DBG resolve NULL: glScissorExclusiveNV
+DBG resolve NULL: glScissorExclusiveArrayvNV
+DBG resolve NULL: glBindShadingRateImageNV
+DBG resolve NULL: glGetShadingRateImagePaletteNV
+DBG resolve NULL: glGetShadingRateSampleLocationivNV
+DBG resolve NULL: glShadingRateImageBarrierNV
+DBG resolve NULL: glShadingRateImagePaletteNV
+DBG resolve NULL: glShadingRateSampleOrderNV
+DBG resolve NULL: glShadingRateSampleOrderCustomNV
+DBG resolve NULL: glCreateSemaphoresNV
+DBG resolve NULL: glSemaphoreParameterivNV
+DBG resolve NULL: glGetSemaphoreParameterivNV
+DBG resolve NULL: glViewportArrayvNV
+DBG resolve NULL: glViewportIndexedfNV
+DBG resolve NULL: glViewportIndexedfvNV
+DBG resolve NULL: glScissorArrayvNV
+DBG resolve NULL: glScissorIndexedNV
+DBG resolve NULL: glScissorIndexedvNV
+DBG resolve NULL: glDepthRangeArrayfvNV
+DBG resolve NULL: glDepthRangeIndexedfNV
+DBG resolve NULL: glGetFloati_vNV
+DBG resolve NULL: glEnableiNV
+DBG resolve NULL: glDisableiNV
+DBG resolve NULL: glIsEnablediNV
+DBG resolve NULL: glViewportSwizzleNV
+DBG resolve NULL: glEGLImageTargetTexture2DOES
+DBG resolve NULL: glEGLImageTargetRenderbufferStorageOES
+DBG resolve NULL: glCopyImageSubDataOES
+DBG resolve NULL: glEnableiOES
+DBG resolve NULL: glDisableiOES
+DBG resolve NULL: glBlendEquationiOES
+DBG resolve NULL: glBlendEquationSeparateiOES
+DBG resolve NULL: glBlendFunciOES
+DBG resolve NULL: glBlendFuncSeparateiOES
+DBG resolve NULL: glColorMaskiOES
+DBG resolve NULL: glIsEnablediOES
+DBG resolve NULL: glDrawElementsBaseVertexOES
+DBG resolve NULL: glDrawRangeElementsBaseVertexOES
+DBG resolve NULL: glDrawElementsInstancedBaseVertexOES
+DBG resolve NULL: glMultiDrawElementsBaseVertexEXT
+DBG resolve NULL: glFramebufferTextureOES
+DBG resolve NULL: glGetProgramBinaryOES
+DBG resolve NULL: glProgramBinaryOES
+DBG resolve NULL: glMapBufferOES
+DBG resolve NULL: glUnmapBufferOES
+DBG resolve NULL: glGetBufferPointervOES
+DBG resolve NULL: glPrimitiveBoundingBoxOES
+DBG resolve NULL: glMinSampleShadingOES
+DBG resolve NULL: glPatchParameteriOES
+DBG resolve NULL: glTexImage3DOES
+DBG resolve NULL: glTexSubImage3DOES
+DBG resolve NULL: glCopyTexSubImage3DOES
+DBG resolve NULL: glCompressedTexImage3DOES
+DBG resolve NULL: glCompressedTexSubImage3DOES
+DBG resolve NULL: glFramebufferTexture3DOES
+DBG resolve NULL: glTexParameterIivOES
+DBG resolve NULL: glTexParameterIuivOES
+DBG resolve NULL: glGetTexParameterIivOES
+DBG resolve NULL: glGetTexParameterIuivOES
+DBG resolve NULL: glSamplerParameterIivOES
+DBG resolve NULL: glSamplerParameterIuivOES
+DBG resolve NULL: glGetSamplerParameterIivOES
+DBG resolve NULL: glGetSamplerParameterIuivOES
+DBG resolve NULL: glTexBufferOES
+DBG resolve NULL: glTexBufferRangeOES
+DBG resolve NULL: glTexStorage3DMultisampleOES
+DBG resolve NULL: glTextureViewOES
+DBG resolve NULL: glBindVertexArrayOES
+DBG resolve NULL: glDeleteVertexArraysOES
+DBG resolve NULL: glGenVertexArraysOES
+DBG resolve NULL: glIsVertexArrayOES
+DBG resolve NULL: glViewportArrayvOES
+DBG resolve NULL: glViewportIndexedfOES
+DBG resolve NULL: glViewportIndexedfvOES
+DBG resolve NULL: glScissorArrayvOES
+DBG resolve NULL: glScissorIndexedOES
+DBG resolve NULL: glScissorIndexedvOES
+DBG resolve NULL: glDepthRangeArrayfvOES
+DBG resolve NULL: glDepthRangeIndexedfOES
+DBG resolve NULL: glGetFloati_vOES
+DBG resolve NULL: glEnableiOES
+DBG resolve NULL: glDisableiOES
+DBG resolve NULL: glIsEnablediOES
+DBG resolve NULL: glFramebufferTextureMultiviewOVR
+DBG resolve NULL: glFramebufferTextureMultisampleMultiviewOVR
+DBG resolve NULL: glAlphaFuncQCOM
+DBG resolve NULL: glGetDriverControlsQCOM
+DBG resolve NULL: glGetDriverControlStringQCOM
+DBG resolve NULL: glEnableDriverControlQCOM
+DBG resolve NULL: glDisableDriverControlQCOM
+DBG resolve NULL: glExtGetTexturesQCOM
+DBG resolve NULL: glExtGetBuffersQCOM
+DBG resolve NULL: glExtGetRenderbuffersQCOM
+DBG resolve NULL: glExtGetFramebuffersQCOM
+DBG resolve NULL: glExtGetTexLevelParameterivQCOM
+DBG resolve NULL: glExtTexObjectStateOverrideiQCOM
+DBG resolve NULL: glExtGetTexSubImageQCOM
+DBG resolve NULL: glExtGetBufferPointervQCOM
+DBG resolve NULL: glExtGetShadersQCOM
+DBG resolve NULL: glExtGetProgramsQCOM
+DBG resolve NULL: glExtIsProgramBinaryQCOM
+DBG resolve NULL: glExtGetProgramBinarySourceQCOM
+DBG resolve NULL: glExtrapolateTex2DQCOM
+DBG resolve NULL: glFramebufferFoveationConfigQCOM
+DBG resolve NULL: glFramebufferFoveationParametersQCOM
+DBG resolve NULL: glTexEstimateMotionQCOM
+DBG resolve NULL: glTexEstimateMotionRegionsQCOM
+DBG resolve NULL: glFramebufferFetchBarrierQCOM
+DBG resolve NULL: glShadingRateQCOM
+DBG resolve NULL: glTextureFoveationParametersQCOM
+DBG resolve NULL: glStartTilingQCOM
+DBG resolve NULL: glEndTilingQCOM
+
+***************************************
+*   YoYo Games Android Runner V0.1    *
+***************************************	 
+Importing GL
+... attemping to import GL2
+dlsym: no thunk for GL func 'glDiscardFramebufferEXT', returning stub
+Finished importing GL
+Class RunnerJNILib does not have static method OpenURL.
+Class RunnerJNILib does not have static method SendHighScore.
+Class RunnerJNILib does not have static method SendAchievement.
+Class RunnerJNILib does not have static method IncrementAchievement.
+Class RunnerJNILib does not have static method OpenAchievements.
+Class RunnerJNILib does not have static method OpenLeaderboards.
+Class RunnerJNILib does not have static method AchievementLoadFriends.
+Class RunnerJNILib does not have static method AchievementLoadLeaderboard.
+Class RunnerJNILib does not have static method CallExtensionFunction.
+Class RunnerJNILib does not have static method AchievementLoadPic.
+Class RunnerJNILib does not have static method AchievementShow.
+Class RunnerJNILib does not have static method AchievementEvent.
+Class RunnerJNILib does not have static method AchievementGetInfo.
+Class RunnerJNILib does not have static method AchievementLogin.
+Class RunnerJNILib does not have static method AchievementLoginStatus.
+Class RunnerJNILib does not have static method AchievementLogout.
+Class RunnerJNILib does not have static method EnableAds.
+Class RunnerJNILib does not have static method MoveAds.
+Class RunnerJNILib does not have static method AdsSetup.
+Class RunnerJNILib does not have static method AdsRewardCallback.
+Class RunnerJNILib does not have static method AdsEngagementLaunch.
+Class RunnerJNILib does not have static method PocketChangeDisplayShop.
+Class RunnerJNILib does not have static method PocketChangeDisplayReward.
+Class RunnerJNILib does not have static method PlayHavenUpdateNotificationBadge.
+Class RunnerJNILib does not have static method PlayHavenHideNotificationBadge.
+Class RunnerJNILib does not have static method PlayHavenAddNotificationBadge.
+Class RunnerJNILib does not have static method PlayHavenPositionNotificationBadge.
+Class RunnerJNILib does not have static method AdsEngagementActive.
+Class RunnerJNILib does not have static method AdsEngagementAvailable.
+Class RunnerJNILib does not have static method AdsInterstitialDisplay.
+Class RunnerJNILib does not have static method AdsInterstitialAvailable.
+Class RunnerJNILib does not have static method DisableAds.
+Class RunnerJNILib does not have static method AdsEvent.
+Class RunnerJNILib does not have static method AdsEventPreload.
+Class RunnerJNILib does not have static method AdsDisplayWidth.
+Class RunnerJNILib does not have static method AdsDisplayHeight.
+Class RunnerJNILib does not have static method LeaveRating.
+Class RunnerJNILib does not have static method EnableInAppBilling.
+Class RunnerJNILib does not have static method RestoreInAppPurchases.
+Class RunnerJNILib does not have static method AcquireInAppPurchase.
+Class RunnerJNILib does not have static method ConsumeInAppPurchase.
+Class RunnerJNILib does not have static method GetInAppPurchaseDetail.
+Class RunnerJNILib does not have static method FacebookInit.
+Class RunnerJNILib does not have static method FacebookLogin.
+Class RunnerJNILib does not have static method FacebookAccessToken.
+Class RunnerJNILib does not have static method FacebookUserId.
+Class RunnerJNILib does not have static method FacebookGraphRequest.
+Class RunnerJNILib does not have static method FacebookDialog.
+Class RunnerJNILib does not have static method FacebookInviteDialog.
+Class RunnerJNILib does not have static method FacebookLogout.
+Class RunnerJNILib does not have static method FacebookLoginStatus.
+Class RunnerJNILib does not have static method FacebookCheckPermission.
+Class RunnerJNILib does not have static method FacebookRequestPermissions.
+Class RunnerJNILib does not have static method HttpGet.
+Class RunnerJNILib does not have static method HttpPost.
+Class RunnerJNILib does not have static method HttpRequest.
+Class RunnerJNILib does not have static method PlayMP3.
+Class RunnerJNILib does not have static method StopMP3.
+Class RunnerJNILib does not have static method PauseMP3.
+Class RunnerJNILib does not have static method ResumeMP3.
+Class RunnerJNILib does not have static method SetMP3Volume.
+Class RunnerJNILib does not have static method PlayingMP3.
+Class RunnerJNILib does not have static method ShowMessage.
+Class RunnerJNILib does not have static method InputString.
+Class RunnerJNILib does not have static method ShowQuestion.
+Class RunnerJNILib does not have static method ShowMessageAsync.
+Class RunnerJNILib does not have static method InputStringAsync.
+Class RunnerJNILib does not have static method ShowQuestionAsync.
+Class RunnerJNILib does not have static method ShowLogin.
+Class RunnerJNILib does not have static method RestrictOrientation.
+Class RunnerJNILib does not have static method isNetworkConnected.
+Class RunnerJNILib does not have static method powersaveEnable.
+Class RunnerJNILib does not have static method analyticsEvent.
+Class RunnerJNILib does not have static method analyticsEventExt.
+Class RunnerJNILib does not have static method cloudStringSave.
+Class RunnerJNILib does not have static method cloudSynchronise.
+Class RunnerJNILib does not have static method DumpUsedMemory.
+Class RunnerJNILib does not have static method UsingGL2.
+Class RunnerJNILib does not have static method PushLocalNotification.
+Class RunnerJNILib does not have static method PushGetLocalNotification.
+Class RunnerJNILib does not have static method PushCancelLocalNotification.
+Class RunnerJNILib does not have static method GetUDID.
+Loading APK /media/fat/games/gmloader/mygame.apkJust before strdup
+CommandLine: -game game.droid
+MemoryManager allocated: 57824
+Finished Init
+
+***************************************
+*     YoYo Games Runner v1.4(1567)[r36800]    *
+***************************************	 
+RunnerLoadGame: game.droid
+_FileExists fail in zip - assets/game.droid
+RunnerLoadGame() - /s/game.droid
+Checking if INIFile /s/options.ini Exists
+/s/options.ini file contents: [Linux]
+DisplayName="Maldita Castilla"
+
+OpenAL_Setup_FileExists fail in zip - /s/game.yydebug
+Reading File /s/game.droid
+Loaded File /s/game.droid(49439338)
+IFF wad found
+Get Resolution
+Get Header Information
+InitGMLFunctions
+HighScore..Game..Math..Graphic..Action..File..Resource..Interaction..3D..Particle..Misc..DS..Sound..Physics..Gamepad..GAMEPAD: 2 axis values (last) at 0x37b2aa0
+Class RunnerJNILib does not have static method GamepadsCount.
+Class RunnerJNILib does not have static method GamepadConnected.
+Class RunnerJNILib does not have static method GamepadDescription.
+Class RunnerJNILib does not have static method GamepadButtonValues.
+Class RunnerJNILib does not have static method GamepadGMLMapping.
+Buffers..Networking..Shaders..InitPushFunctions...YoYo..Fini
+Code_Load()
+VARI_Load()
+ID_STRG
+Create Window
+Init Graphics
+GR_D3D_Init()
+OpenGL: version string OpenGL ES 3.2 Mesa 21.3.9
+OpenGL: vendor string Mesa/X.org
+OpenGL GLSL: version string OpenGL ES GLSL ES 3.20
+OpenGL: 24bit depth supported
+OpenGL: packed 24bit depth/8bit stencil supported
+OpenGL: seperate 8bit stencil supported
+Check TextureID
+finished!!
+Texture #1 16,16
+Texture #2 16,16
+Check TextureID
+finished!!
+Background_InitTextures()
+Sprite_InitTextures()
+Font_InitTextures()
+IO Init
+Process Messages
+Splash!
+Start Frame
+Part Create Textures
+Debug Init Remote Interface
+VM Init
+Create Score Form
+Create Load Form
+Create Error Form
+Do The Work
+LoadGameData()
+initialise everything!
+Process Chunk: GEN8   416
+Process Chunk: OPTN   88
+Process Chunk: EXTN   4
+Process Chunk: SOND   4124
+Audio_Load()
+Process Chunk: AGRP   4
+AudioGroup_Load()
+Process Chunk: SPRT   348884
+Process Chunk: BGND   1468
+Process Chunk: PATH   5164
+Process Chunk: SCPT   100
+Process Chunk: SHDR   4
+Process Chunk: FONT   516
+Process Chunk: TMLN   4
+Process Chunk: OBJT   200796
+Process Chunk: ROOM   653876
+Process Chunk: DAFL   0
+Process Chunk: TPAG   61052
+Process Chunk: CODE   269656
+Process Chunk: VARI   2868
+Process Chunk: FUNC   1212
+Process Chunk: STRG   122172
+Process Chunk: TXTR   2159808
+Process Chunk: AUDO   45606938
+Audio_WAVs()
+PrepareGame()
+Extension_Prepare() 
+Code_Constant_Prepare() 
+Script_Prepare() 
+TimeLine_Prepare() 
+Object_Prepare() 
+Preparing 435 objects:
+	Objects 0: bsc_player
+	Objects 1: obj_player
+	Objects 2: obj_player_victory
+	Objects 3: obj_player_dead
+	Objects 4: obj_player_start
+	Objects 5: obj_player_start_carriage
+	Objects 6: obj_player_start_cloud
+	Objects 7: obj_player_start_friends
+	Objects 8: obj_player_start_tombs
+	Objects 9: obj_player_start_seal
+	Objects 10: obj_player_start_seal_closed
+	Objects 11: obj_player_start_trumpet
+	Objects 12: obj_player_start_rumbling
+	Objects 13: obj_player_start_final_love
+	Objects 14: obj_player_perfect_end
+	Objects 15: bsc_weapon
+	Objects 16: obj_weapon_sword
+	Objects 17: obj_weapon_knife
+	Objects 18: obj_weapon_axe
+	Objects 19: obj_weapon_sickle
+	Objects 20: obj_weapon_balls
+	Objects 21: obj_weapon_bomb
+	Objects 22: obj_protection_fall
+	Objects 23: obj_weapon_fairy
+	Objects 24: obj_weapon_fairy_running
+	Objects 25: obj_weapon_fairy_bullet
+	Objects 26: obj_control
+	Objects 27: obj_music
+	Objects 28: obj_pause
+	Objects 29: obj_pause_menu
+	Objects 30: obj_old_tv
+	Objects 31: obj_parallax_scrolling
+	Objects 32: obj_check
+	Objects 33: obj_fade_in
+	Objects 34: obj_fade_out
+	Objects 35: obj_go
+	Objects 36: obj_go_down
+	Objects 37: obj_message
+	Objects 38: obj_boss_health
+	Objects 39: obj_desintegrator
+	Objects 40: obj_title_screen
+	Objects 41: obj_game_over
+	Objects 42: obj_continue
+	Objects 43: obj_map
+	Objects 44: obj_title_spark
+	Objects 45: obj_pointer
+	Objects 46: obj_region
+	Objects 47: obj_skipper
+	Objects 48: obj_wall
+	Objects 49: obj_wall_32_16
+	Objects 50: obj_secret_wall
+	Objects 51: obj_wall_128x32
+	Objects 52: obj_wall_32x128
+	Objects 53: obj_platform
+	Objects 54: obj_platform_16
+	Objects 55: obj_platform_64
+	Objects 56: obj_wall_diagonal_down
+	Objects 57: obj_wall_diagonal_up
+	Objects 58: obj_wall_ramp_down
+	Objects 59: obj_wall_ramp_up
+	Objects 60: obj_wall_diagonal_high_up
+	Objects 61: obj_wall_diagonal_high_down
+	Objects 62: obj_stop
+	Objects 63: obj_stop_16
+	Objects 64: obj_background_hider
+	Objects 65: obj_background_loader
+	Objects 66: obj_screen_shake
+	Objects 67: obj_ladder
+	Objects 68: obj_magic_platform
+	Objects 69: bsc_enemy
+	Objects 70: obj_snake_bird
+	Objects 71: obj_snake
+	Objects 72: obj_snake_enter
+	Objects 73: obj_crow_eating
+	Objects 74: obj_crow
+	Objects 75: obj_flying_head_enter
+	Objects 76: obj_flying_head
+	Objects 77: obj_flying_head_row_01
+	Objects 78: obj_flying_head_row_02
+	Objects 79: obj_flying_head_row_03
+	Objects 80: obj_flying_head_row_04
+	Objects 81: obj_worm_enter
+	Objects 82: obj_worm
+	Objects 83: obj_owl
+	Objects 84: obj_owl_with_chest
+	Objects 85: obj_bat_generator
+	Objects 86: obj_fire_skull
+	Objects 87: obj_fly
+	Objects 88: obj_firefly
+	Objects 89: obj_firefly_small
+	Objects 90: obj_plant
+	Objects 91: obj_plant_flower
+	Objects 92: obj_bubble
+	Objects 93: obj_cauldron_bubble
+	Objects 94: obj_small_demon
+	Objects 95: obj_small_demon_enter
+	Objects 96: obj_zombie
+	Objects 97: obj_zombie_half
+	Objects 98: obj_zombie_buried
+	Objects 99: obj_decapitated
+	Objects 100: obj_decapitated_waiting
+	Objects 101: obj_knife_armor
+	Objects 102: obj_sword_armor
+	Objects 103: obj_sword_armor_fall
+	Objects 104: obj_zombie_archer
+	Objects 105: obj_egg_generator
+	Objects 106: obj_egg
+	Objects 107: obj_egg_hurt
+	Objects 108: obj_harpy
+	Objects 109: obj_colacho_enter
+	Objects 110: obj_colacho
+	Objects 111: obj_colacho_generator
+	Objects 112: obj_skeleton
+	Objects 113: obj_skeleton_hurt
+	Objects 114: obj_water_ghost_rising
+	Objects 115: obj_water_ghost_rising_back
+	Objects 116: obj_water_ghost_fall
+	Objects 117: obj_water_ghost
+	Objects 118: obj_water_ghost_drops
+	Objects 119: obj_siren_chat
+	Objects 120: obj_siren
+	Objects 121: obj_mandragore
+	Objects 122: obj_mandragore_die
+	Objects 123: obj_malismo
+	Objects 124: obj_skeleton_library
+	Objects 125: obj_skeleton_library_hurt
+	Objects 126: obj_lizard_cross
+	Objects 127: obj_lizard_cross_die
+	Objects 128: obj_lizard_cross_destroyed
+	Objects 129: obj_butcher
+	Objects 130: obj_cuegle
+	Objects 131: obj_dragon
+	Objects 132: obj_tower_face
+	Objects 133: obj_tower_face_die
+	Objects 134: obj_forest_face
+	Objects 135: obj_forest_face_enter
+	Objects 136: obj_fire_snake
+	Objects 137: obj_fire_snake_body
+	Objects 138: obj_fly_nest
+	Objects 139: obj_fly_nest_hurt
+	Objects 140: obj_golem_pillar
+	Objects 141: obj_golem_pillar_destroyed
+	Objects 142: obj_ojancano
+	Objects 143: obj_cauldron_creature
+	Objects 144: obj_cauldron
+	Objects 145: obj_cauldron_fall
+	Objects 146: obj_blood_dragon_enter
+	Objects 147: obj_blood_dragon
+	Objects 148: obj_demon
+	Objects 149: obj_gold_hand
+	Objects 150: bsc_boss
+	Objects 151: obj_unheaded_knight
+	Objects 152: obj_unheaded_knight_boss
+	Objects 153: obj_unheaded_knight_boss_corpse
+	Objects 154: obj_unheaded_knight_sword
+	Objects 155: obj_fire_ground_bullet
+	Objects 156: obj_insolent
+	Objects 157: obj_insolent_body
+	Objects 158: obj_insolent_sight
+	Objects 159: obj_insolent_sight_body
+	Objects 160: obj_insolent_fly
+	Objects 161: obj_vomit
+	Objects 162: obj_vomit_ground
+	Objects 163: obj_hell_insolent
+	Objects 164: obj_hell_insolent_body
+	Objects 165: obj_hell_insolent_enter
+	Objects 166: obj_vulture
+	Objects 167: obj_vulture_die
+	Objects 168: obj_vulture_sight
+	Objects 169: obj_nuberu
+	Objects 170: obj_nuberu_enter
+	Objects 171: obj_nuberu_die
+	Objects 172: obj_wind_bullet
+	Objects 173: obj_thunder_seed
+	Objects 174: obj_thunder_bullet
+	Objects 175: obj_cloud
+	Objects 176: obj_cloud_background_1
+	Objects 177: obj_cloud_background_2
+	Objects 178: obj_cloud_descent
+	Objects 179: obj_manticore
+	Objects 180: obj_manticore_die
+	Objects 181: obj_hell_manticore
+	Objects 182: obj_hell_manticore_enter
+	Objects 183: obj_quixote
+	Objects 184: obj_quixote_die
+	Objects 185: obj_fire_ball
+	Objects 186: obj_paper_bullet
+	Objects 187: obj_quixote_axe
+	Objects 188: obj_turtle
+	Objects 189: obj_turtle_die
+	Objects 190: obj_turtle_bullet
+	Objects 191: obj_torch_demon_boss
+	Objects 192: obj_torch_demon_boss_chat
+	Objects 193: obj_torch_demon_die
+	Objects 194: obj_torch_demon
+	Objects 195: obj_torch_demon_chat
+	Objects 196: obj_torch_demon_defeated
+	Objects 197: obj_ghost_rush
+	Objects 198: obj_big_ghost
+	Objects 199: obj_flying_head_boss
+	Objects 200: obj_ghost_flame
+	Objects 201: obj_ghost_bullet_01
+	Objects 202: obj_ghost_bullet_02
+	Objects 203: obj_champion_B_boss_enter
+	Objects 204: obj_champion_B_boss
+	Objects 205: obj_champion_C_boss_enter
+	Objects 206: obj_champion_C_boss
+	Objects 207: obj_champion_B_axe_bullet
+	Objects 208: obj_champion_clear
+	Objects 209: obj_witch_snakes
+	Objects 210: obj_witch_enter
+	Objects 211: obj_witch
+	Objects 212: obj_witch_hurt
+	Objects 213: obj_witch_transformation
+	Objects 214: obj_snake_witch
+	Objects 215: obj_snake_witch_corpse
+	Objects 216: obj_witch_dress
+	Objects 217: obj_death_armor
+	Objects 218: obj_death_armor_die
+	Objects 219: obj_death_armor_parts
+	Objects 220: obj_death_armor_bleeding
+	Objects 221: obj_demon_court
+	Objects 222: obj_demon_court_background
+	Objects 223: obj_luzfarel_background
+	Objects 224: obj_luzfarel
+	Objects 225: obj_luzfarel_wings
+	Objects 226: obj_luzfarel_die
+	Objects 227: obj_luzfarel_wide_attack
+	Objects 228: obj_luzfarel_heart
+	Objects 229: obj_luzfarel_heart_die
+	Objects 230: obj_luzfarel_heart_libertaion
+	Objects 231: obj_heart_attack
+	Objects 232: obj_liberated_soul
+	Objects 233: bsc_bullet
+	Objects 234: obj_fire_bullet
+	Objects 235: obj_fire_bullet_aimed
+	Objects 236: obj_fire_bullet_killer
+	Objects 237: obj_fireball_bullet
+	Objects 238: obj_circle_bullet_forest
+	Objects 239: obj_circle_bullet_tower
+	Objects 240: obj_axe_bullet
+	Objects 241: obj_bouncer_bullet
+	Objects 242: obj_fire_line
+	Objects 243: obj_owl_cauldron
+	Objects 244: obj_knife_bullet
+	Objects 245: obj_bone
+	Objects 246: obj_enemy_sword
+	Objects 247: obj_arrow
+	Objects 248: obj_basto
+	Objects 249: obj_seed_bullet
+	Objects 250: bsc_trap
+	Objects 251: obj_barrel_bouncing
+	Objects 252: obj_barrel_rolling
+	Objects 253: obj_barrel_broken
+	Objects 254: obj_swamp_ball
+	Objects 255: obj_swamp_ball_bouncing
+	Objects 256: obj_spear
+	Objects 257: obj_spike_poster
+	Objects 258: obj_cave_spikes
+	Objects 259: obj_cave_spikes_blood
+	Objects 260: obj_cave_spikes_small
+	Objects 261: obj_branches
+	Objects 262: obj_cave_water
+	Objects 263: obj_forest_water
+	Objects 264: obj_deadly_ground
+	Objects 265: obj_swamp_water
+	Objects 266: obj_blood_water
+	Objects 267: obj_fire_rain
+	Objects 268: obj_grillon_door
+	Objects 269: obj_grillon
+	Objects 270: obj_bonus_timer
+	Objects 271: obj_zombie_back
+	Objects 272: obj_snake_bird_back
+	Objects 273: obj_decapitated_back
+	Objects 274: obj_harpy_back
+	Objects 275: obj_sword_armor_back
+	Objects 276: obj_fire_skull_back
+	Objects 277: obj_malismo_back
+	Objects 278: obj_mandragore_back
+	Objects 279: obj_small_demon_back
+	Objects 280: bsc_effect
+	Objects 281: obj_blood_hit
+	Objects 282: obj_hit
+	Objects 283: obj_weapon_hit
+	Objects 284: obj_blood_cut
+	Objects 285: obj_blood_explosion
+	Objects 286: obj_stone_hit
+	Objects 287: obj_stone_explosion
+	Objects 288: obj_fire_explosion
+	Objects 289: obj_fire_hit
+	Objects 290: obj_ghost_hit
+	Objects 291: obj_stone_fragment
+	Objects 292: obj_wood_fragment
+	Objects 293: obj_corpse
+	Objects 294: obj_die_burning
+	Objects 295: obj_die_ghosting
+	Objects 296: obj_die_bleeding
+	Objects 297: obj_points
+	Objects 298: obj_heart
+	Objects 299: bsc_item
+	Objects 300: obj_chest
+	Objects 301: obj_chest_open
+	Objects 302: obj_secret_item
+	Objects 303: obj_buried_item
+	Objects 304: obj_fairy_chest
+	Objects 305: obj_coin
+	Objects 306: obj_coin_bag
+	Objects 307: obj_small_cup
+	Objects 308: obj_inkwell
+	Objects 309: obj_ring
+	Objects 310: obj_cup
+	Objects 311: obj_rosario
+	Objects 312: obj_1up
+	Objects 313: obj_meat
+	Objects 314: obj_meat_big
+	Objects 315: obj_amadis
+	Objects 316: obj_scroll
+	Objects 317: obj_time
+	Objects 318: obj_gamusino
+	Objects 319: obj_sword_dame
+	Objects 320: obj_potion
+	Objects 321: obj_boots
+	Objects 322: obj_magic_sphere
+	Objects 323: obj_protection
+	Objects 324: obj_fairy_item
+	Objects 325: obj_key
+	Objects 326: obj_blood_gem
+	Objects 327: obj_cross
+	Objects 328: obj_cross_spark
+	Objects 329: obj_item_weapon
+	Objects 330: bsc_surrounding
+	Objects 331: obj_intro
+	Objects 332: obj_king_intro
+	Objects 333: obj_king_champions
+	Objects 334: obj_bad_ending_king
+	Objects 335: obj_bad_ending_player
+	Objects 336: obj_bad_ending_demon
+	Objects 337: obj_good_ending_king
+	Objects 338: obj_good_ending_player
+	Objects 339: obj_player_credits
+	Objects 340: obj_blood_gem_seal
+	Objects 341: obj_blood_gem_sealed
+	Objects 342: obj_hell_gate_eyes
+	Objects 343: obj_hell_gate
+	Objects 344: obj_pact_with_death
+	Objects 345: obj_pact_with_dead_end
+	Objects 346: obj_witch_lover_ghost
+	Objects 347: obj_witch_ghost
+	Objects 348: obj_floating_soul
+	Objects 349: obj_heart_seal
+	Objects 350: obj_player_eating
+	Objects 351: obj_king_eating
+	Objects 352: obj_guess_eating
+	Objects 353: obj_guess_fairy
+	Objects 354: obj_sculptor
+	Objects 355: obj_troubadour
+	Objects 356: obj_sculpture_focus
+	Objects 357: obj_merits
+	Objects 358: obj_the_end_good
+	Objects 359: obj_the_end_bad
+	Objects 360: obj_storm
+	Objects 361: obj_storm_light
+	Objects 362: obj_storm_light_generator
+	Objects 363: obj_house_door
+	Objects 364: obj_house_window
+	Objects 365: obj_door
+	Objects 366: obj_door_closing
+	Objects 367: obj_head_finder
+	Objects 368: obj_head_finder_head
+	Objects 369: obj_town_fountain
+	Objects 370: obj_chain_lamp
+	Objects 371: obj_chain_lamp_platform
+	Objects 372: obj_winery_movement
+	Objects 373: obj_carriage
+	Objects 374: obj_carriage_continue
+	Objects 375: obj_road_rock
+	Objects 376: obj_champion_A
+	Objects 377: obj_champion_A_dead
+	Objects 378: obj_champion_B
+	Objects 379: obj_champion_C
+	Objects 380: obj_enemy_generator
+	Objects 381: obj_flying_platform
+	Objects 382: obj_molino_center
+	Objects 383: obj_molino
+	Objects 384: obj_molino_broken
+	Objects 385: obj_foreground_trees
+	Objects 386: obj_alcazar_gate
+	Objects 387: obj_prison_door
+	Objects 388: obj_back_door
+	Objects 389: obj_bed
+	Objects 390: obj_candle
+	Objects 391: obj_mechanism
+	Objects 392: object266
+	Objects 393: obj_twisted_tower
+	Objects 394: obj_tower_elevator
+	Objects 395: obj_burning_library
+	Objects 396: obj_library_door
+	Objects 397: obj_ashes
+	Objects 398: obj_burning_foreground
+	Objects 399: obj_burning_background
+	Objects 400: obj_book_pile
+	Objects 401: obj_turtle_platform
+	Objects 402: obj_backbone_fall
+	Objects 403: obj_backbone_up_fall
+	Objects 404: obj_skeleton_secret
+	Objects 405: obj_skeleton_secret_switch
+	Objects 406: obj_torch_off
+	Objects 407: obj_cave_darkness
+	Objects 408: obj_ceil_trap
+	Objects 409: obj_stone_door
+	Objects 410: obj_go_with_delay
+	Objects 411: obj_mist
+	Objects 412: obj_little_house
+	Objects 413: obj_little_tower
+	Objects 414: obj_bck_forest
+	Objects 415: obj_forest_door
+	Objects 416: obj_tree_door
+	Objects 417: obj_tree_back_door
+	Objects 418: obj_san_martin
+	Objects 419: obj_ceil_candle
+	Objects 420: obj_ground_candle
+	Objects 421: obj_cauldron_ground
+	Objects 422: obj_cauldron_ground_melt
+	Objects 423: obj_boat
+	Objects 424: obj_boat_skeleton
+	Objects 425: obj_trumpet_skeleton
+	Objects 426: obj_moving_cadaver
+	Objects 427: obj_glass_background
+	Objects 428: obj_flag_castile
+	Objects 429: obj_cathedral_door
+	Objects 430: obj_ground_door
+	Objects 431: obj_broken_floor
+	Objects 432: obj_broken_floor_fall
+	Objects 433: obj_dinner_cup
+	Objects 434: obj_dinner_dish
+Room_Prepare() 
+Sound_Prepare() 
+LOG[yoyo]: AL lib: (EE) alc_opensl_init: Using AudioTrack
+AL lib: (EE) alc_opensl_init: Using AudioTrackInitGraphics() 
+Finished PrepareGame() 
+- PrepareGame done.
+Run_Start
+StartGame()
+MisterAudio: track 1 open (22050 Hz, 2 ch, push)
+Unable to find file in zip - assets/config.ini
+Unable to find file in zip - assets/config.ini
+Unable to find file in zip - assets/hiscore.ini
+StartGame() - DONE
+Total memory used = 52624092(0x400b35e4) bytes
+**********************************.
+Entering main loop.
+**********************************.
+Finished BeginToEnd, default frame buffer is: 0
+BLITTER enabled (level 2, own=1, render 288x216 -> DDR 288x216, tex=RGBA8888, opaque=1, cull=1)
+Controller 'Xbox 360 Controller' assigned to player 0.
+JOYSRC transport=shm
+Texture #3 2048,2048
+BLIT hooks fired: useprog=1 vap=3 envap=3 bindbuf=0 bufdata=0 getuloc=0 unimat=1 | shadow buffers=0 mats=5
+BLIT draw#1 arrays rt=FBO tex=5(2048x2048 val=1) blend=ALPHA decoded=12/12 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#2 arrays rt=DEF tex=4(512x256 val=1) blend=NONE decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+MFVTX prev[0] xy=0.00,216.00 uv=0.0000,0.0000 rgba=1.000,1.000,1.000,1.000 | cur[0] xy=0.00,216.00 uv=0.0000,0.0000 rgba=1.000,1.000,1.000,1.000
+MFVTX prev[1] xy=288.00,216.00 uv=0.5625,0.0000 rgba=1.000,1.000,1.000,1.000 | cur[1] xy=288.00,216.00 uv=0.5625,0.0000 rgba=1.000,1.000,1.000,1.000
+MFVTX prev[2] xy=288.00,0.00 uv=0.5625,0.8438 rgba=1.000,1.000,1.000,1.000 | cur[2] xy=288.00,0.00 uv=0.5625,0.8438 rgba=1.000,1.000,1.000,1.000
+MFVTX prev[3] xy=288.00,0.00 uv=0.5625,0.8438 rgba=1.000,1.000,1.000,1.000 | cur[3] xy=288.00,0.00 uv=0.5625,0.8438 rgba=1.000,1.000,1.000,1.000
+MFVTX prev[4] xy=0.00,0.00 uv=0.0000,0.8438 rgba=1.000,1.000,1.000,1.000 | cur[4] xy=0.00,0.00 uv=0.0000,0.8438 rgba=1.000,1.000,1.000,1.000
+MFVTX prev[5] xy=0.00,216.00 uv=0.0000,0.0000 rgba=1.000,1.000,1.000,1.000 | cur[5] xy=0.00,216.00 uv=0.0000,0.0000 rgba=1.000,1.000,1.000,1.000
+BLIT draw#3 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#4 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+Texture #3 2048,2048
+BLIT draw#5 arrays rt=DEF tex=6(2048x2048 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#6 arrays rt=FBO tex=5(2048x2048 val=1) blend=ALPHA decoded=12/12 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#7 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#8 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#9 arrays rt=DEF tex=6(2048x2048 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#10 arrays rt=FBO tex=5(2048x2048 val=1) blend=ALPHA decoded=12/12 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#11 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#12 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#13 arrays rt=DEF tex=6(2048x2048 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#14 arrays rt=FBO tex=5(2048x2048 val=1) blend=ALPHA decoded=12/12 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#15 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#16 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#17 arrays rt=DEF tex=6(2048x2048 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#18 arrays rt=FBO tex=5(2048x2048 val=1) blend=ALPHA decoded=12/12 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#19 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#20 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#21 arrays rt=DEF tex=6(2048x2048 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#22 arrays rt=FBO tex=5(2048x2048 val=1) blend=ALPHA decoded=12/12 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#23 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLIT draw#24 arrays rt=DEF tex=4(512x256 val=1) blend=ALPHA decoded=6/6 rast=1 cull=- screen=[0,0..288,216]
+BLITPROF f=30 draws=4 tris=8 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=3.1 ms
+MFSUBMIT n=30 wait_ms[avg=20.08] fabric_ms[frame=19.58 tri=13.84 texwait=2.12 dpath=11.73 ovhd=5.73] cov_px_est=155520 overdraw=2.50 cyc_px=7.4 spin_avg=11986 to=0
+BLITPROF f=60 draws=4 tris=8 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.1 ms
+MFSUBMIT n=60 wait_ms[avg=14.39] fabric_ms[frame=12.94 tri=10.94 texwait=1.44 dpath=9.49 ovhd=2.00] cov_px_est=124416 overdraw=2.00 cyc_px=7.5 spin_avg=10005 to=0
+Texture #3 1024,2048
+BLITPROF f=90 draws=5 tris=18 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.2 ms
+MFSUBMIT n=90 wait_ms[avg=13.92] fabric_ms[frame=12.96 tri=10.95 texwait=1.44 dpath=9.50 ovhd=2.01] cov_px_est=124507 overdraw=2.00 cyc_px=7.5 spin_avg=8512 to=0
+BLITPROF f=120 draws=5 tris=18 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.9 ms
+MFSUBMIT n=120 wait_ms[avg=13.56] fabric_ms[frame=12.98 tri=10.97 texwait=1.45 dpath=9.52 ovhd=2.02] cov_px_est=124664 overdraw=2.00 cyc_px=7.5 spin_avg=8227 to=0
+BLITPROF f=150 draws=5 tris=28 culled=0 | raster=0.7 clear=0.1 texup=0.0 present=0.0 logic=7.2 ms
+MFSUBMIT n=150 wait_ms[avg=14.60] fabric_ms[frame=13.02 tri=10.99 texwait=1.45 dpath=9.54 ovhd=2.03] cov_px_est=124840 overdraw=2.01 cyc_px=7.5 spin_avg=9039 to=0
+BLITPROF f=180 draws=5 tris=28 culled=0 | raster=0.2 clear=0.0 texup=0.0 present=0.0 logic=2.8 ms
+MFSUBMIT n=180 wait_ms[avg=14.09] fabric_ms[frame=13.03 tri=11.00 texwait=1.45 dpath=9.55 ovhd=2.03] cov_px_est=124904 overdraw=2.01 cyc_px=7.5 spin_avg=8338 to=0
+BLITPROF f=210 draws=4 tris=10 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.1 ms
+MFSUBMIT n=210 wait_ms[avg=14.75] fabric_ms[frame=13.78 tri=11.58 texwait=1.59 dpath=9.98 ovhd=2.21] cov_px_est=131076 overdraw=2.11 cyc_px=7.5 spin_avg=8830 to=0
+BLITPROF f=240 draws=4 tris=10 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.1 ms
+MFSUBMIT n=240 wait_ms[avg=18.84] fabric_ms[frame=18.81 tri=16.81 texwait=2.89 dpath=13.92 ovhd=2.00] cov_px_est=186624 overdraw=3.00 cyc_px=7.3 spin_avg=11609 to=0
+BLITPROF f=270 draws=4 tris=10 culled=0 | raster=0.1 clear=0.1 texup=0.0 present=0.0 logic=1.9 ms
+MFSUBMIT n=270 wait_ms[avg=18.88] fabric_ms[frame=18.81 tri=16.81 texwait=2.89 dpath=13.92 ovhd=2.00] cov_px_est=186624 overdraw=3.00 cyc_px=7.3 spin_avg=11161 to=0
+BLITPROF f=300 draws=4 tris=10 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.8 ms
+MFDUP frames=300 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=600
+MFSUBMIT n=300 wait_ms[avg=18.87] fabric_ms[frame=18.81 tri=16.81 texwait=2.89 dpath=13.92 ovhd=2.00] cov_px_est=186624 overdraw=3.00 cyc_px=7.3 spin_avg=11600 to=0
+BLITPROF f=330 draws=4 tris=10 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.9 ms
+MFSUBMIT n=330 wait_ms[avg=18.94] fabric_ms[frame=18.81 tri=16.80 texwait=2.89 dpath=13.92 ovhd=2.00] cov_px_est=186624 overdraw=3.00 cyc_px=7.3 spin_avg=11432 to=0
+BLITPROF f=360 draws=4 tris=10 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.3 ms
+MFSUBMIT n=360 wait_ms[avg=18.90] fabric_ms[frame=18.81 tri=16.80 texwait=2.89 dpath=13.92 ovhd=2.00] cov_px_est=186624 overdraw=3.00 cyc_px=7.3 spin_avg=11720 to=0
+BLITPROF f=390 draws=4 tris=8 culled=0 | raster=0.0 clear=0.0 texup=0.0 present=0.0 logic=1.2 ms
+MFSUBMIT n=390 wait_ms[avg=18.29] fabric_ms[frame=18.03 tri=16.02 texwait=2.69 dpath=13.33 ovhd=2.00] cov_px_est=178330 overdraw=2.87 cyc_px=7.4 spin_avg=11307 to=0
+BLITPROF f=420 draws=4 tris=8 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=3.8 ms
+MFSUBMIT n=420 wait_ms[avg=14.14] fabric_ms[frame=12.94 tri=10.94 texwait=1.44 dpath=9.49 ovhd=2.00] cov_px_est=124416 overdraw=2.00 cyc_px=7.5 spin_avg=9432 to=0
+BLITPROF f=450 draws=4 tris=8 culled=0 | raster=0.1 clear=0.3 texup=0.0 present=0.0 logic=1.9 ms
+MFSUBMIT n=450 wait_ms[avg=13.97] fabric_ms[frame=12.94 tri=10.94 texwait=1.44 dpath=9.49 ovhd=2.00] cov_px_est=124416 overdraw=2.00 cyc_px=7.5 spin_avg=8142 to=0
+BLITPROF f=480 draws=4 tris=8 culled=0 | raster=0.0 clear=0.0 texup=0.0 present=0.0 logic=1.1 ms
+MFSUBMIT n=480 wait_ms[avg=13.96] fabric_ms[frame=12.94 tri=10.94 texwait=1.44 dpath=9.49 ovhd=2.00] cov_px_est=124416 overdraw=2.00 cyc_px=7.5 spin_avg=8741 to=0
+BLITPROF f=510 draws=8 tris=252 culled=0 | raster=1.6 clear=0.0 texup=0.0 present=0.0 logic=2.9 ms
+MFSUBMIT n=510 wait_ms[avg=16.05] fabric_ms[frame=15.00 tri=12.55 texwait=1.85 dpath=10.70 ovhd=2.45] cov_px_est=139090 overdraw=2.24 cyc_px=7.6 spin_avg=9389 to=0
+BLITPROF f=540 draws=8 tris=250 culled=0 | raster=3.8 clear=0.0 texup=0.0 present=0.0 logic=2.3 ms
+MFSUBMIT n=540 wait_ms[avg=19.25] fabric_ms[frame=19.23 tri=16.90 texwait=2.95 dpath=13.94 ovhd=2.34] cov_px_est=173062 overdraw=2.78 cyc_px=7.9 spin_avg=11505 to=0
+BLITPROF f=570 draws=8 tris=250 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.4 ms
+MFSUBMIT n=570 wait_ms[avg=17.22] fabric_ms[frame=17.08 tri=14.74 texwait=2.42 dpath=12.32 ovhd=2.33] cov_px_est=150252 overdraw=2.42 cyc_px=8.1 spin_avg=10404 to=0
+BLITPROF f=600 draws=4 tris=8 culled=0 | raster=0.0 clear=0.0 texup=0.0 present=0.0 logic=1.2 ms
+MFDUP frames=600 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=1200
+MFSUBMIT n=600 wait_ms[avg=17.50] fabric_ms[frame=16.89 tri=14.71 texwait=1.81 dpath=12.90 ovhd=2.18] cov_px_est=157594 overdraw=2.53 cyc_px=8.1 spin_avg=10542 to=0
+BLITPROF f=630 draws=4 tris=8 culled=0 | raster=0.1 clear=0.1 texup=0.0 present=0.0 logic=3.0 ms
+MFSUBMIT n=630 wait_ms[avg=14.40] fabric_ms[frame=13.58 tri=11.58 texwait=1.04 dpath=10.54 ovhd=2.00] cov_px_est=124416 overdraw=2.00 cyc_px=8.3 spin_avg=8293 to=0
+BLITPROF f=660 draws=5 tris=10 culled=0 | raster=0.1 clear=0.0 texup=0.0 present=0.0 logic=1.9 ms
+MFSUBMIT n=660 wait_ms[avg=14.43] fabric_ms[frame=13.08 tri=11.06 texwait=1.42 dpath=9.64 ovhd=2.01] cov_px_est=125097 overdraw=2.01 cyc_px=7.6 spin_avg=8302 to=0
+BLITPROF f=690 draws=7 tris=128 culled=0 | raster=2.5 clear=0.1 texup=0.0 present=0.0 logic=5.9 ms
+MFSUBMIT n=690 wait_ms[avg=14.30] fabric_ms[frame=13.77 tri=11.31 texwait=1.53 dpath=9.78 ovhd=2.46] cov_px_est=127555 overdraw=2.05 cyc_px=7.5 spin_avg=8331 to=0
+BLITPROF f=720 draws=7 tris=146 culled=0 | raster=1.0 clear=0.0 texup=0.0 present=0.0 logic=2.8 ms
+MFSUBMIT n=720 wait_ms[avg=14.48] fabric_ms[frame=13.87 tri=11.34 texwait=1.52 dpath=9.82 ovhd=2.53] cov_px_est=127306 overdraw=2.05 cyc_px=7.6 spin_avg=9182 to=0
+BLITPROF f=750 draws=7 tris=148 culled=0 | raster=0.6 clear=0.0 texup=0.0 present=0.0 logic=1.7 ms
+MFSUBMIT n=750 wait_ms[avg=14.43] fabric_ms[frame=13.55 tri=11.37 texwait=1.52 dpath=9.84 ovhd=2.19] cov_px_est=127490 overdraw=2.05 cyc_px=7.6 spin_avg=8290 to=0
+BLITPROF f=780 draws=8 tris=130 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=2.6 ms
+MFSUBMIT n=780 wait_ms[avg=14.86] fabric_ms[frame=13.71 tri=11.54 texwait=1.57 dpath=9.97 ovhd=2.17] cov_px_est=129371 overdraw=2.08 cyc_px=7.6 spin_avg=9500 to=0
+BLITPROF f=810 draws=8 tris=132 culled=0 | raster=0.6 clear=0.0 texup=0.0 present=0.0 logic=1.6 ms
+MFSUBMIT n=810 wait_ms[avg=19.47] fabric_ms[frame=19.38 tri=17.21 texwait=2.96 dpath=14.24 ovhd=2.17] cov_px_est=189496 overdraw=3.05 cyc_px=7.4 spin_avg=11523 to=0
+BLITPROF f=840 draws=7 tris=130 culled=0 | raster=0.8 clear=0.0 texup=0.0 present=0.0 logic=2.8 ms
+MFSUBMIT n=840 wait_ms[avg=19.53] fabric_ms[frame=19.37 tri=17.20 texwait=2.96 dpath=14.24 ovhd=2.17] cov_px_est=189462 overdraw=3.05 cyc_px=7.4 spin_avg=11624 to=0
+BLITPROF f=870 draws=9 tris=200 culled=0 | raster=1.4 clear=0.1 texup=0.0 present=0.0 logic=3.0 ms
+MFSUBMIT n=870 wait_ms[avg=20.75] fabric_ms[frame=20.69 tri=18.25 texwait=3.15 dpath=15.10 ovhd=2.44] cov_px_est=200741 overdraw=3.23 cyc_px=7.4 spin_avg=11953 to=0
+BLITPROF f=900 draws=8 tris=198 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=1.7 ms
+MFDUP frames=900 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=1800
+MFSUBMIT n=900 wait_ms[avg=16.38] fabric_ms[frame=16.24 tri=13.98 texwait=2.03 dpath=11.95 ovhd=2.26] cov_px_est=155609 overdraw=2.50 cyc_px=7.6 spin_avg=9355 to=0
+BLITPROF f=930 draws=8 tris=198 culled=0 | raster=1.0 clear=0.0 texup=0.0 present=0.0 logic=1.7 ms
+MFSUBMIT n=930 wait_ms[avg=15.86] fabric_ms[frame=15.86 tri=13.59 texwait=1.94 dpath=11.65 ovhd=2.27] cov_px_est=151462 overdraw=2.43 cyc_px=7.6 spin_avg=9411 to=0
+BLITPROF f=960 draws=8 tris=198 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=1.7 ms
+MFSUBMIT n=960 wait_ms[avg=16.11] fabric_ms[frame=15.85 tri=13.59 texwait=1.93 dpath=11.65 ovhd=2.27] cov_px_est=151462 overdraw=2.43 cyc_px=7.6 spin_avg=9764 to=0
+BLITPROF f=990 draws=8 tris=198 culled=0 | raster=1.3 clear=0.1 texup=0.0 present=0.0 logic=2.8 ms
+MFSUBMIT n=990 wait_ms[avg=15.95] fabric_ms[frame=15.85 tri=13.59 texwait=1.94 dpath=11.65 ovhd=2.26] cov_px_est=151462 overdraw=2.43 cyc_px=7.6 spin_avg=9576 to=0
+BLITPROF f=1020 draws=13 tris=270 culled=0 | raster=1.2 clear=0.0 texup=0.0 present=0.0 logic=2.1 ms
+MFSUBMIT n=1020 wait_ms[avg=16.23] fabric_ms[frame=16.15 tri=13.80 texwait=1.98 dpath=11.82 ovhd=2.35] cov_px_est=153018 overdraw=2.46 cyc_px=7.6 spin_avg=9743 to=0
+BLITPROF f=1050 draws=13 tris=270 culled=0 | raster=1.9 clear=0.1 texup=0.0 present=0.0 logic=3.7 ms
+MFSUBMIT n=1050 wait_ms[avg=16.42] fabric_ms[frame=16.21 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.36] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=9809 to=0
+BLITPROF f=1080 draws=13 tris=270 culled=0 | raster=1.6 clear=0.0 texup=0.0 present=0.0 logic=2.5 ms
+MFSUBMIT n=1080 wait_ms[avg=16.29] fabric_ms[frame=16.20 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.36] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=10043 to=0
+BLITPROF f=1110 draws=13 tris=270 culled=0 | raster=2.0 clear=0.0 texup=0.0 present=0.0 logic=3.3 ms
+MFSUBMIT n=1110 wait_ms[avg=16.26] fabric_ms[frame=16.20 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.36] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=9571 to=0
+BLITPROF f=1140 draws=13 tris=270 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=2.0 ms
+MFSUBMIT n=1140 wait_ms[avg=16.27] fabric_ms[frame=16.20 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.36] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=9665 to=0
+BLITPROF f=1170 draws=13 tris=270 culled=0 | raster=2.0 clear=0.0 texup=0.0 present=0.0 logic=3.6 ms
+MFSUBMIT n=1170 wait_ms[avg=16.22] fabric_ms[frame=16.21 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.37] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=9268 to=0
+BLITPROF f=1200 draws=13 tris=270 culled=0 | raster=1.9 clear=0.1 texup=0.0 present=0.0 logic=3.2 ms
+MFDUP frames=1200 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=2400
+MFSUBMIT n=1200 wait_ms[avg=16.22] fabric_ms[frame=16.20 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.36] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=9786 to=0
+BLITPROF f=1230 draws=13 tris=270 culled=0 | raster=1.2 clear=0.0 texup=0.0 present=0.0 logic=2.0 ms
+MFSUBMIT n=1230 wait_ms[avg=16.31] fabric_ms[frame=16.20 tri=13.84 texwait=1.99 dpath=11.85 ovhd=2.36] cov_px_est=153323 overdraw=2.46 cyc_px=7.6 spin_avg=9792 to=0
+BLITPROF f=1260 draws=8 tris=198 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.7 ms
+MFSUBMIT n=1260 wait_ms[avg=16.08] fabric_ms[frame=15.96 tri=13.66 texwait=1.95 dpath=11.71 ovhd=2.29] cov_px_est=152079 overdraw=2.44 cyc_px=7.6 spin_avg=9273 to=0
+BLITPROF f=1290 draws=9 tris=280 culled=0 | raster=1.2 clear=0.0 texup=0.0 present=0.0 logic=2.0 ms
+MFSUBMIT n=1290 wait_ms[avg=16.16] fabric_ms[frame=16.15 tri=13.80 texwait=1.97 dpath=11.83 ovhd=2.35] cov_px_est=153117 overdraw=2.46 cyc_px=7.6 spin_avg=9689 to=0
+BLITPROF f=1320 draws=9 tris=280 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=2.0 ms
+MFSUBMIT n=1320 wait_ms[avg=16.35] fabric_ms[frame=16.26 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.38] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9029 to=0
+BLITPROF f=1350 draws=9 tris=280 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.2 ms
+MFSUBMIT n=1350 wait_ms[avg=16.29] fabric_ms[frame=16.26 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.38] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9668 to=0
+BLITPROF f=1380 draws=9 tris=280 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.2 ms
+MFSUBMIT n=1380 wait_ms[avg=16.29] fabric_ms[frame=16.25 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.37] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9912 to=0
+BLITPROF f=1410 draws=9 tris=280 culled=0 | raster=1.2 clear=0.0 texup=0.0 present=0.0 logic=2.0 ms
+MFSUBMIT n=1410 wait_ms[avg=16.29] fabric_ms[frame=16.26 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.38] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9706 to=0
+BLITPROF f=1440 draws=9 tris=280 culled=0 | raster=1.9 clear=0.0 texup=0.0 present=0.0 logic=2.8 ms
+MFSUBMIT n=1440 wait_ms[avg=16.32] fabric_ms[frame=16.25 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.38] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9538 to=0
+BLITPROF f=1470 draws=9 tris=280 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.3 ms
+MFSUBMIT n=1470 wait_ms[avg=16.38] fabric_ms[frame=16.25 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.38] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=10057 to=0
+BLITPROF f=1500 draws=9 tris=280 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=2.4 ms
+MFDUP frames=1500 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=3000
+MFSUBMIT n=1500 wait_ms[avg=16.31] fabric_ms[frame=16.25 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.37] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9874 to=0
+BLITPROF f=1530 draws=9 tris=280 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=4.3 ms
+MFSUBMIT n=1530 wait_ms[avg=16.33] fabric_ms[frame=16.25 tri=13.88 texwait=1.99 dpath=11.89 ovhd=2.37] cov_px_est=153659 overdraw=2.47 cyc_px=7.6 spin_avg=9531 to=0
+BLITPROF f=1560 draws=9 tris=280 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=1.9 ms
+MFSUBMIT n=1560 wait_ms[avg=16.24] fabric_ms[frame=16.21 tri=13.85 texwait=1.98 dpath=11.87 ovhd=2.36] cov_px_est=153456 overdraw=2.47 cyc_px=7.6 spin_avg=9875 to=0
+BLITPROF f=1590 draws=8 tris=198 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.7 ms
+MFSUBMIT n=1590 wait_ms[avg=16.00] fabric_ms[frame=15.87 tri=13.60 texwait=1.94 dpath=11.66 ovhd=2.27] cov_px_est=151605 overdraw=2.44 cyc_px=7.6 spin_avg=9354 to=0
+BLITPROF f=1620 draws=11 tris=220 culled=0 | raster=1.6 clear=0.0 texup=0.0 present=0.0 logic=3.0 ms
+MFSUBMIT n=1620 wait_ms[avg=16.12] fabric_ms[frame=15.95 tri=13.65 texwait=1.96 dpath=11.69 ovhd=2.30] cov_px_est=151849 overdraw=2.44 cyc_px=7.6 spin_avg=9862 to=0
+BLITPROF f=1650 draws=11 tris=220 culled=0 | raster=1.6 clear=0.0 texup=0.0 present=0.0 logic=2.5 ms
+MFSUBMIT n=1650 wait_ms[avg=15.93] fabric_ms[frame=15.96 tri=13.67 texwait=1.96 dpath=11.70 ovhd=2.29] cov_px_est=151946 overdraw=2.44 cyc_px=7.6 spin_avg=9819 to=0
+BLITPROF f=1680 draws=11 tris=220 culled=0 | raster=1.0 clear=0.0 texup=0.0 present=0.0 logic=1.8 ms
+MFSUBMIT n=1680 wait_ms[avg=16.01] fabric_ms[frame=15.96 tri=13.67 texwait=1.96 dpath=11.70 ovhd=2.29] cov_px_est=151946 overdraw=2.44 cyc_px=7.6 spin_avg=10014 to=0
+BLITPROF f=1710 draws=7 tris=198 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=1.8 ms
+MFSUBMIT n=1710 wait_ms[avg=15.95] fabric_ms[frame=15.91 tri=13.62 texwait=1.95 dpath=11.67 ovhd=2.29] cov_px_est=151564 overdraw=2.44 cyc_px=7.6 spin_avg=9498 to=0
+BLITPROF f=1740 draws=7 tris=198 culled=0 | raster=1.7 clear=0.0 texup=0.0 present=0.0 logic=2.8 ms
+MFSUBMIT n=1740 wait_ms[avg=15.92] fabric_ms[frame=15.82 tri=13.56 texwait=1.93 dpath=11.63 ovhd=2.26] cov_px_est=151150 overdraw=2.43 cyc_px=7.6 spin_avg=9851 to=0
+BLITPROF f=1770 draws=7 tris=198 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=1.6 ms
+MFSUBMIT n=1770 wait_ms[avg=15.95] fabric_ms[frame=15.82 tri=13.56 texwait=1.93 dpath=11.63 ovhd=2.26] cov_px_est=151150 overdraw=2.43 cyc_px=7.6 spin_avg=9729 to=0
+BLITPROF f=1800 draws=8 tris=200 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.7 ms
+MFDUP frames=1800 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=3600
+MFSUBMIT n=1800 wait_ms[avg=18.84] fabric_ms[frame=18.76 tri=16.49 texwait=2.65 dpath=13.84 ovhd=2.27] cov_px_est=182254 overdraw=2.93 cyc_px=7.5 spin_avg=10986 to=0
+BLITPROF f=1830 draws=8 tris=200 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=1.8 ms
+MFSUBMIT n=1830 wait_ms[avg=21.76] fabric_ms[frame=21.70 tri=19.43 texwait=3.37 dpath=16.05 ovhd=2.27] cov_px_est=213358 overdraw=3.43 cyc_px=7.4 spin_avg=12637 to=0
+BLITPROF f=1860 draws=8 tris=200 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=2.7 ms
+MFSUBMIT n=1860 wait_ms[avg=21.71] fabric_ms[frame=21.69 tri=19.43 texwait=3.37 dpath=16.05 ovhd=2.27] cov_px_est=213358 overdraw=3.43 cyc_px=7.4 spin_avg=12123 to=0
+BLITPROF f=1890 draws=11 tris=128 culled=0 | raster=1.1 clear=0.0 texup=0.0 present=0.0 logic=3.1 ms
+MFSUBMIT n=1890 wait_ms[avg=13.76] fabric_ms[frame=13.72 tri=11.46 texwait=1.59 dpath=9.88 ovhd=2.25] cov_px_est=128405 overdraw=2.06 cyc_px=7.6 spin_avg=8504 to=0
+BLITPROF f=1920 draws=11 tris=130 culled=0 | raster=1.1 clear=0.1 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=1920 wait_ms[avg=11.23] fabric_ms[frame=9.93 tri=7.72 texwait=0.68 dpath=7.04 ovhd=2.21] cov_px_est=88633 overdraw=1.42 cyc_px=7.8 spin_avg=6311 to=0
+BLITPROF f=1950 draws=12 tris=174 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=6.8 ms
+MFSUBMIT n=1950 wait_ms[avg=11.49] fabric_ms[frame=10.79 tri=8.47 texwait=0.88 dpath=7.59 ovhd=2.31] cov_px_est=96249 overdraw=1.55 cyc_px=7.8 spin_avg=6787 to=0
+BLITPROF f=1980 draws=12 tris=174 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=4.2 ms
+MFSUBMIT n=1980 wait_ms[avg=11.78] fabric_ms[frame=10.86 tri=8.62 texwait=0.91 dpath=7.71 ovhd=2.23] cov_px_est=97660 overdraw=1.57 cyc_px=7.8 spin_avg=6814 to=0
+BLITPROF f=2010 draws=12 tris=174 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=2.0 ms
+MFSUBMIT n=2010 wait_ms[avg=11.34] fabric_ms[frame=10.86 tri=8.63 texwait=0.91 dpath=7.71 ovhd=2.23] cov_px_est=97660 overdraw=1.57 cyc_px=7.8 spin_avg=6781 to=0
+BLITPROF f=2040 draws=12 tris=174 culled=0 | raster=1.4 clear=0.0 texup=0.0 present=0.0 logic=3.2 ms
+MFSUBMIT n=2040 wait_ms[avg=11.36] fabric_ms[frame=10.86 tri=8.63 texwait=0.91 dpath=7.71 ovhd=2.23] cov_px_est=97660 overdraw=1.57 cyc_px=7.8 spin_avg=7036 to=0
+BLITPROF f=2070 draws=12 tris=174 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=2.7 ms
+MFSUBMIT n=2070 wait_ms[avg=11.84] fabric_ms[frame=10.85 tri=8.62 texwait=0.91 dpath=7.71 ovhd=2.23] cov_px_est=97660 overdraw=1.57 cyc_px=7.8 spin_avg=6997 to=0
+BLITPROF f=2100 draws=12 tris=174 culled=0 | raster=1.5 clear=0.0 texup=0.0 present=0.0 logic=3.4 ms
+MFDUP frames=2100 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=4200
+MFSUBMIT n=2100 wait_ms[avg=11.65] fabric_ms[frame=10.85 tri=8.62 texwait=0.91 dpath=7.71 ovhd=2.23] cov_px_est=97660 overdraw=1.57 cyc_px=7.8 spin_avg=6759 to=0
+BLITPROF f=2130 draws=12 tris=174 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=2.5 ms
+MFSUBMIT n=2130 wait_ms[avg=11.51] fabric_ms[frame=10.86 tri=8.62 texwait=0.91 dpath=7.71 ovhd=2.24] cov_px_est=97660 overdraw=1.57 cyc_px=7.8 spin_avg=5409 to=0
+BLITPROF f=2160 draws=12 tris=176 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=3.5 ms
+MFSUBMIT n=2160 wait_ms[avg=13.18] fabric_ms[frame=12.42 tri=10.19 texwait=1.30 dpath=8.89 ovhd=2.23] cov_px_est=114249 overdraw=1.84 cyc_px=7.7 spin_avg=7073 to=0
+BLITPROF f=2190 draws=13 tris=176 culled=0 | raster=0.9 clear=0.0 texup=0.0 present=0.0 logic=2.3 ms
+MFSUBMIT n=2190 wait_ms[avg=16.78] fabric_ms[frame=16.73 tri=14.49 texwait=2.35 dpath=12.14 ovhd=2.24] cov_px_est=159868 overdraw=2.57 cyc_px=7.5 spin_avg=9350 to=0
+BLITPROF f=2220 draws=13 tris=176 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=3.4 ms
+MFSUBMIT n=2220 wait_ms[avg=16.79] fabric_ms[frame=16.73 tri=14.49 texwait=2.35 dpath=12.14 ovhd=2.24] cov_px_est=159868 overdraw=2.57 cyc_px=7.5 spin_avg=9195 to=0
+BLITPROF f=2250 draws=16 tris=228 culled=0 | raster=1.9 clear=0.0 texup=0.0 present=0.0 logic=5.7 ms
+MFSUBMIT n=2250 wait_ms[avg=23.60] fabric_ms[frame=23.60 tri=20.94 texwait=4.27 dpath=16.67 ovhd=2.66] cov_px_est=214048 overdraw=3.44 cyc_px=7.7 spin_avg=13838 to=0
+BLITPROF f=2280 draws=14 tris=228 culled=0 | raster=1.8 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2280 wait_ms[avg=22.01] fabric_ms[frame=21.87 tri=19.56 texwait=4.06 dpath=15.50 ovhd=2.31] cov_px_est=193571 overdraw=3.11 cyc_px=7.9 spin_avg=12463 to=0
+BLITPROF f=2310 draws=14 tris=228 culled=0 | raster=1.8 clear=0.0 texup=0.0 present=0.0 logic=6.8 ms
+MFSUBMIT n=2310 wait_ms[avg=22.06] fabric_ms[frame=22.02 tri=19.71 texwait=4.09 dpath=15.63 ovhd=2.31] cov_px_est=195313 overdraw=3.14 cyc_px=7.9 spin_avg=12325 to=0
+BLITPROF f=2340 draws=14 tris=228 culled=0 | raster=1.1 clear=0.0 texup=0.0 present=0.0 logic=2.5 ms
+MFSUBMIT n=2340 wait_ms[avg=22.31] fabric_ms[frame=22.03 tri=19.72 texwait=4.09 dpath=15.63 ovhd=2.31] cov_px_est=194902 overdraw=3.13 cyc_px=7.9 spin_avg=12484 to=0
+BLITPROF f=2370 draws=14 tris=228 culled=0 | raster=1.8 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2370 wait_ms[avg=22.76] fabric_ms[frame=21.88 tri=19.57 texwait=4.06 dpath=15.51 ovhd=2.31] cov_px_est=192095 overdraw=3.09 cyc_px=8.0 spin_avg=11591 to=0
+BLITPROF f=2400 draws=14 tris=252 culled=0 | raster=2.9 clear=0.0 texup=0.0 present=0.0 logic=8.2 ms
+MFDUP frames=2400 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=4800
+MFSUBMIT n=2400 wait_ms[avg=27.47] fabric_ms[frame=27.12 tri=24.68 texwait=5.47 dpath=19.21 ovhd=2.44] cov_px_est=233304 overdraw=3.75 cyc_px=8.1 spin_avg=16226 to=0
+BLITPROF f=2430 draws=12 tris=240 culled=0 | raster=4.5 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2430 wait_ms[avg=28.98] fabric_ms[frame=28.87 tri=26.53 texwait=5.66 dpath=20.87 ovhd=2.33] cov_px_est=246165 overdraw=3.96 cyc_px=8.3 spin_avg=16014 to=0
+BLITPROF f=2460 draws=12 tris=240 culled=0 | raster=1.3 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2460 wait_ms[avg=29.04] fabric_ms[frame=29.00 tri=26.68 texwait=5.31 dpath=21.36 ovhd=2.32] cov_px_est=245346 overdraw=3.94 cyc_px=8.6 spin_avg=16575 to=0
+BLITPROF f=2490 draws=12 tris=216 culled=0 | raster=1.8 clear=0.1 texup=0.0 present=0.0 logic=4.2 ms
+MFSUBMIT n=2490 wait_ms[avg=25.21] fabric_ms[frame=25.17 tri=22.86 texwait=4.59 dpath=18.27 ovhd=2.31] cov_px_est=216132 overdraw=3.47 cyc_px=8.3 spin_avg=14796 to=0
+BLITPROF f=2520 draws=12 tris=216 culled=0 | raster=1.7 clear=0.0 texup=0.0 present=0.0 logic=4.3 ms
+MFSUBMIT n=2520 wait_ms[avg=20.89] fabric_ms[frame=20.78 tri=18.49 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=10741 to=0
+BLITPROF f=2550 draws=12 tris=216 culled=0 | raster=1.7 clear=0.1 texup=0.0 present=0.0 logic=4.0 ms
+MFSUBMIT n=2550 wait_ms[avg=20.80] fabric_ms[frame=20.78 tri=18.49 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=11661 to=0
+BLITPROF f=2580 draws=12 tris=216 culled=0 | raster=1.7 clear=0.0 texup=0.0 present=0.0 logic=4.2 ms
+MFSUBMIT n=2580 wait_ms[avg=20.81] fabric_ms[frame=20.78 tri=18.49 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=11059 to=0
+BLITPROF f=2610 draws=12 tris=216 culled=0 | raster=1.6 clear=0.0 texup=0.0 present=0.0 logic=12.4 ms
+MFSUBMIT n=2610 wait_ms[avg=20.81] fabric_ms[frame=20.78 tri=18.49 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=12070 to=0
+BLITPROF f=2640 draws=12 tris=216 culled=0 | raster=1.7 clear=0.0 texup=0.0 present=0.0 logic=4.2 ms
+MFSUBMIT n=2640 wait_ms[avg=20.80] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=11640 to=0
+BLITPROF f=2670 draws=12 tris=216 culled=0 | raster=1.1 clear=0.0 texup=0.0 present=0.0 logic=2.5 ms
+MFSUBMIT n=2670 wait_ms[avg=20.86] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=11228 to=0
+BLITPROF f=2700 draws=12 tris=216 culled=0 | raster=1.1 clear=0.0 texup=0.0 present=0.0 logic=2.6 ms
+MFDUP frames=2700 dup_draws_elided=0 (+0 since last) crt_ghost_stripped=5400
+MFSUBMIT n=2700 wait_ms[avg=20.80] fabric_ms[frame=20.78 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=11875 to=0
+BLITPROF f=2730 draws=12 tris=216 culled=0 | raster=2.2 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2730 wait_ms[avg=20.80] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=12006 to=0
+BLITPROF f=2760 draws=12 tris=216 culled=0 | raster=3.4 clear=0.0 texup=0.0 present=0.0 logic=7.2 ms
+MFSUBMIT n=2760 wait_ms[avg=20.93] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=12196 to=0
+BLITPROF f=2790 draws=12 tris=216 culled=0 | raster=1.7 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2790 wait_ms[avg=20.79] fabric_ms[frame=20.78 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=12347 to=0
+BLITPROF f=2820 draws=12 tris=216 culled=0 | raster=1.1 clear=0.0 texup=0.0 present=0.0 logic=4.9 ms
+MFSUBMIT n=2820 wait_ms[avg=20.83] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=12032 to=0
+BLITPROF f=2850 draws=12 tris=216 culled=0 | raster=1.6 clear=0.0 texup=0.0 present=0.0 logic=4.1 ms
+MFSUBMIT n=2850 wait_ms[avg=20.97] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=11648 to=0
+BLITPROF f=2880 draws=12 tris=216 culled=0 | raster=1.1 clear=0.0 texup=0.0 present=0.0 logic=2.6 ms
+MFSUBMIT n=2880 wait_ms[avg=20.90] fabric_ms[frame=20.79 tri=18.50 texwait=3.77 dpath=14.72 ovhd=2.29] cov_px_est=182661 overdraw=2.94 cyc_px=7.9 spin_avg=12332 to=0
+BLITPROF f=2910 draws=12 tris=216 culled=0 | raster=7.2 clear=0.1 texup=0.0 present=0.0 logic=10.7 ms
