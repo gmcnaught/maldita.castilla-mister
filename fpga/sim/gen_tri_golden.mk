@@ -37,7 +37,7 @@ CFLAGS    ?= -O2 -Wall
 
 SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface tri_uvfull tri_missdst tri_surfalpha
 
-.PHONY: all vectors clean contract-check stream-vectors
+.PHONY: all vectors clean contract-check stream-vectors stream-vectors-heavy
 all: gen_tri_golden gen_system_golden gen_tri_stream
 
 # Refuse to build a golden generator whose refmodel disagrees with the RTL on
@@ -117,6 +117,34 @@ TRACEDIR := ../../../mister-gmloader/docs/superpowers/findings/data
 stream-vectors: gen_tri_stream
 	mkdir -p vectors
 	./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 0 stream_quiet_f0
+
+# [Phase 4 Stage B] The heavy scene is the gate anchor (cov_px ~213,358, device
+# frame 18.02 ms pre-W2). Committed like stream_quiet_f0 because run_sims.sh
+# gates on it; regenerate with this target if the capture is ever re-taken.
+#
+# The input trace (mftrace-heavy-b.txt) is NOT recorded under the default
+# TRACEDIR above — it lives wherever Task 2/5's capture was taken and is
+# passed explicitly on the command line, e.g.:
+#   make -f gen_tri_golden.mk stream-vectors-heavy \
+#     TRACEDIR=/path/to/the/capture/dir
+# Frame index 0 (gen_tri_stream's --frame arg) selects the FIRST distinct
+# f= value in file order, which for this capture is device frame f=1890 —
+# the first frame of the f=1890..1960 gate-anchor plateau (all measured at
+# cov_px=213358; confirmed with scripts/mftrace_analyze.py
+# --expect-covered 213358, not from any engine console log — a live
+# MFSUBMIT log line for the same n=1890 is known to disagree with the
+# trace's own f=1890 outside the plateau).
+#
+# HONESTY NOTE: MFTRACE only records triangle groups (MFTRACE G / MFTRACE
+# V); it has no fill/clear commands. gen_tri_stream.c therefore synthesizes
+# exactly ONE full-screen clear itself via the control-block path. The real
+# device issues roughly THREE full-extent clears per frame, so this vector
+# is not a like-for-like model of the device's clear cost — one synthesized
+# clear here vs ~3 on hardware. That gap is for a later calibration task,
+# not this one.
+stream-vectors-heavy: gen_tri_stream
+	mkdir -p vectors
+	./gen_tri_stream $(TRACEDIR)/mftrace-heavy-b.txt 0 stream_heavy_f0
 
 clean:
 	rm -f gen_tri_golden gen_system_golden gen_tri_stream

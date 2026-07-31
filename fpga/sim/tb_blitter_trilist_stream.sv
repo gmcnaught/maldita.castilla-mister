@@ -135,6 +135,25 @@
 //   iverilog -g2012 -DSTREAM_VEC='"stream_quiet_f1"' -o /tmp/s.vvp \
 //     -I ../rtl -I ../rtl/jtframe -I ../sys -I . -y ../rtl -y ../rtl/jtframe \
 //     -y ../sys -y . -Y .sv -Y .v *_stub.sv tb_blitter_trilist_stream.sv && vvp /tmp/s.vvp
+// or, to gate an already-committed alternate tag without hand-invoking
+// iverilog:  STREAM_VEC=stream_quiet_f1 ./run_sims.sh tb_blitter_trilist_stream
+// (run_sims.sh's STREAM_VEC env var turns into the same -DSTREAM_VEC define).
+//
+// stream_heavy_f0 [Phase 4 Stage B] is a SECOND COMMITTED tag (gen_tri_golden.mk's
+// stream-vectors-heavy target), gating alongside stream_quiet_f0 for the same
+// reason stream_quiet_f0 is committed: run_sims.sh needs it available with no
+// external capture on disk. Source: mftrace-heavy-b.txt frame index 0, which is
+// device frame f=1890 -- the first frame of a measured f=1890..1960 PLATEAU, all
+// at cov_px=213358 (scripts/mftrace_analyze.py --expect-covered 213358, NOT a
+// console-log frame number -- a live MFSUBMIT n=1890 line is known to disagree
+// with the trace's own f=1890 outside the plateau). This is the Phase 4 Stage B
+// gate-anchor scene (device fabric frame ~18.02 ms pre-W2, vs stream_quiet_f0's
+// ~16.20 ms). Run it with: STREAM_VEC=stream_heavy_f0 ./run_sims.sh tb_blitter_trilist_stream
+// HONESTY NOTE: MFTRACE records only triangle groups; it has no fill/clear
+// commands, so gen_tri_stream.c synthesizes exactly ONE full-screen clear via
+// the control-block path for this vector. The real device issues roughly THREE
+// full-extent clears per frame, so this is not a like-for-like model of the
+// device's clear cost -- calibrating that gap is a later task, not this one.
 //
 // ── TEXTURE-CONTENT CAVEAT ──────────────────────────────────────────────────
 // The capture carries texture geometry but no texel data; gen_tri_stream.c fills
