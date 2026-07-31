@@ -113,20 +113,45 @@ vectors: gen_tri_golden gen_system_golden
 # the captures live in the mister-gmloader bundler repo, not in this one. Nothing
 # at TB RUN time needs them (the committed vectors/*.hex are self-contained) — the
 # path is only needed to REGENERATE vectors.
+#
+# ⚠ EXTRA_DEFINES (run_sims.sh's -DSTREAM_VEC pass-through) is applied to EVERY
+# testbench compile in a run_sims.sh invocation, not layered on top of the
+# default vector. Running `STREAM_VEC=stream_heavy_f0 ./run_sims.sh` SUBSTITUTES
+# stream_heavy_f0 for stream_quiet_f0 in tb_blitter_trilist_stream — it does not
+# add heavy-vector coverage alongside the quiet run. A green suite from that
+# invocation means the heavy vector was tested INSTEAD OF the quiet one, not in
+# addition to it; the two vectors are never both exercised by a single run.
 TRACEDIR := ../../../mister-gmloader/docs/superpowers/findings/data
 stream-vectors: gen_tri_stream
 	mkdir -p vectors
 	./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 0 stream_quiet_f0
 
 # [Phase 4 Stage B] The heavy scene is the gate anchor (cov_px ~213,358, device
-# frame 18.02 ms pre-W2). Committed like stream_quiet_f0 because run_sims.sh
-# gates on it; regenerate with this target if the capture is ever re-taken.
+# frame 18.02 ms pre-W2). Committed for REPRODUCIBILITY and for on-demand replay
+# via STREAM_VEC=stream_heavy_f0 (see the STREAM_VEC usage note above, including
+# its substitution-not-addition warning) — NOT because any automated gate
+# exercises it. run_sims.sh only sets EXTRA_DEFINES when the STREAM_VEC env var
+# is passed explicitly, and tb_blitter_trilist_stream.sv defaults STREAM_VEC to
+# "stream_quiet_f0"; the gating run of that testbench therefore always replays
+# the QUIET vector. tb_blitter_trilist_streamcache — the bench that produced
+# this phase's calibration figure — is both NONGATING and NIGHTLY_ONLY. NO GATE
+# CURRENTLY EXERCISES THIS HEAVY VECTOR; regenerate with this target if the
+# capture is ever re-taken.
 #
 # The input trace (mftrace-heavy-b.txt) is NOT recorded under the default
 # TRACEDIR above — it lives wherever Task 2/5's capture was taken and is
 # passed explicitly on the command line, e.g.:
 #   make -f gen_tri_golden.mk stream-vectors-heavy \
 #     TRACEDIR=/path/to/the/capture/dir
+#
+# The committed capture used for THIS vector, within the mister-gmloader repo
+# (one directory level deeper than the default TRACEDIR above), is at:
+#   docs/superpowers/findings/data/2026-07-30-phase4-stage-b/mftrace-heavy-b.txt
+# At the time of writing that path exists only on the UNMERGED branch
+# perf/phase4-stage-b-harness in that repo — it may not be on your default
+# branch yet. Point TRACEDIR at that directory (checked out from the right
+# branch) to regenerate this vector; the committed .hex files below are a
+# stale-reference hazard for a future regenerator, not a build hazard today.
 # Frame index 0 (gen_tri_stream's --frame arg) selects the FIRST distinct
 # f= value in file order, which for this capture is device frame f=1890 —
 # the first frame of the f=1890..1960 gate-anchor plateau (all measured at
