@@ -968,6 +968,26 @@ module blitter_top #(
     wire signed [47:0] ts_dWudx, ts_dWvdx, ts_dWrdx, ts_dWgdx, ts_dWbdx, ts_dWadx;
     wire signed [47:0] ts_dWudy, ts_dWvdy, ts_dWrdy, ts_dWgdy, ts_dWbdy, ts_dWady;
 
+    // ── [W3 §2b] walk-constant register bank ──────────────────────────────────
+    // The coverage walk reads these on EVERY pixel. Holding them in
+    // blt_tri_setup's own output registers is precisely what pins that module to
+    // the triangle being walked and makes setup serial with the walk. Copying
+    // them here at the S_TRI_SWAIT seed cycle frees the module to start the NEXT
+    // triangle immediately, which is what the setup/vfetch overlap needs.
+    //
+    // Only the values read THROUGHOUT the walk are duplicated: the 18 dx/dy
+    // deltas and area_recip (19 x 48 = 912 flops). The bbox is already a
+    // blitter_top register (tri_maxx/tri_maxy/tri_bbox_neg, latched at
+    // S_TRI_SETUP) and the seeds (ts_w*_0 / ts_W*_0 / ts_ox / ts_oy) are consumed
+    // in the single seed cycle, so neither needs a copy.
+    //
+    // Prefix is tw_ (triangle walk); cw_ is already the composite-write mux.
+    reg signed [47:0] tw_dw0dx, tw_dw1dx, tw_dw2dx;
+    reg signed [47:0] tw_dw0dy, tw_dw1dy, tw_dw2dy;
+    reg signed [47:0] tw_dWudx, tw_dWvdx, tw_dWrdx, tw_dWgdx, tw_dWbdx, tw_dWadx;
+    reg signed [47:0] tw_dWudy, tw_dWvdy, tw_dWrdy, tw_dWgdy, tw_dWbdy, tw_dWady;
+    reg signed [47:0] tw_area_recip;
+
     blt_tri_setup #(.SHIFT(40)) u_tri_setup (
         .clk(clk), .rst(rst), .start(tri_setup_start),
         .vx0(tri_vx0), .vy0(tri_vy0), .vx1(tri_vx1), .vy1(tri_vy1), .vx2(tri_vx2), .vy2(tri_vy2),
@@ -1112,9 +1132,9 @@ module blitter_top #(
     // with dw/dx>0 is a LOWER bound (go right); with dw/dx<0 an UPPER bound (go left);
     // with dw/dx==0 the edge is x-independent, so a violation means the WHOLE row is
     // out (sk_block) -- that is the horizontal-edge case.
-    wire sk_need_r = ((w0<0) && (ts_dw0dx>0)) || ((w1<0) && (ts_dw1dx>0)) || ((w2<0) && (ts_dw2dx>0));
-    wire sk_need_l = ((w0<0) && (ts_dw0dx<0)) || ((w1<0) && (ts_dw1dx<0)) || ((w2<0) && (ts_dw2dx<0));
-    wire sk_block  = ((w0<0) && (ts_dw0dx==0))|| ((w1<0) && (ts_dw1dx==0))|| ((w2<0) && (ts_dw2dx==0));
+    wire sk_need_r = ((w0<0) && (tw_dw0dx>0)) || ((w1<0) && (tw_dw1dx>0)) || ((w2<0) && (tw_dw2dx>0));
+    wire sk_need_l = ((w0<0) && (tw_dw0dx<0)) || ((w1<0) && (tw_dw1dx<0)) || ((w2<0) && (tw_dw2dx<0));
+    wire sk_block  = ((w0<0) && (tw_dw0dx==0))|| ((w1<0) && (tw_dw1dx==0))|| ((w2<0) && (tw_dw2dx==0));
     // The row's direction: locked after the first A_SEEK cycle. A cursor that is
     // already covered can only be at-or-right-of the interval's left end, so it seeks
     // LEFT for minimality; an uncovered cursor with an upper bound violated is right
@@ -1143,9 +1163,9 @@ module blitter_top #(
         begin
             tri_px <= tri_px + 16'd1;
             w0m<=w0; w1m<=w1; w2m<=w2;
-            w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
-            Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
-            Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
+            w0<=w0+tw_dw0dx; w1<=w1+tw_dw1dx; w2<=w2+tw_dw2dx;
+            Wu<=Wu+tw_dWudx; Wv<=Wv+tw_dWvdx; Wr<=Wr+tw_dWrdx;
+            Wg<=Wg+tw_dWgdx; Wb<=Wb+tw_dWbdx; Wa<=Wa+tw_dWadx;
         end
     endtask
     // [span walk] one column left: the left-neighbour set BECOMES the current edges,
@@ -1155,9 +1175,9 @@ module blitter_top #(
         begin
             tri_px <= tri_px - 16'd1;
             w0<=w0m; w1<=w1m; w2<=w2m;
-            w0m<=w0m-ts_dw0dx; w1m<=w1m-ts_dw1dx; w2m<=w2m-ts_dw2dx;
-            Wu<=Wu-ts_dWudx; Wv<=Wv-ts_dWvdx; Wr<=Wr-ts_dWrdx;
-            Wg<=Wg-ts_dWgdx; Wb<=Wb-ts_dWbdx; Wa<=Wa-ts_dWadx;
+            w0m<=w0m-tw_dw0dx; w1m<=w1m-tw_dw1dx; w2m<=w2m-tw_dw2dx;
+            Wu<=Wu-tw_dWudx; Wv<=Wv-tw_dWvdx; Wr<=Wr-tw_dWrdx;
+            Wg<=Wg-tw_dWgdx; Wb<=Wb-tw_dWbdx; Wa<=Wa-tw_dWadx;
         end
     endtask
     // [span walk] pin the row-start snapshot to wherever the seek finished. This is
@@ -1180,18 +1200,18 @@ module blitter_top #(
         begin
             tri_py <= tri_py + 16'd1;
             tri_px <= row_px;
-            row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
-            row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
-            row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
-            row_w0m<=row_w0m+ts_dw0dy; w0m<=row_w0m+ts_dw0dy;
-            row_w1m<=row_w1m+ts_dw1dy; w1m<=row_w1m+ts_dw1dy;
-            row_w2m<=row_w2m+ts_dw2dy; w2m<=row_w2m+ts_dw2dy;
-            row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
-            row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
-            row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
-            row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
-            row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
-            row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
+            row_w0<=row_w0+tw_dw0dy; w0<=row_w0+tw_dw0dy;
+            row_w1<=row_w1+tw_dw1dy; w1<=row_w1+tw_dw1dy;
+            row_w2<=row_w2+tw_dw2dy; w2<=row_w2+tw_dw2dy;
+            row_w0m<=row_w0m+tw_dw0dy; w0m<=row_w0m+tw_dw0dy;
+            row_w1m<=row_w1m+tw_dw1dy; w1m<=row_w1m+tw_dw1dy;
+            row_w2m<=row_w2m+tw_dw2dy; w2m<=row_w2m+tw_dw2dy;
+            row_Wu<=row_Wu+tw_dWudy; Wu<=row_Wu+tw_dWudy;
+            row_Wv<=row_Wv+tw_dWvdy; Wv<=row_Wv+tw_dWvdy;
+            row_Wr<=row_Wr+tw_dWrdy; Wr<=row_Wr+tw_dWrdy;
+            row_Wg<=row_Wg+tw_dWgdy; Wg<=row_Wg+tw_dWgdy;
+            row_Wb<=row_Wb+tw_dWbdy; Wb<=row_Wb+tw_dWbdy;
+            row_Wa<=row_Wa+tw_dWady; Wa<=row_Wa+tw_dWady;
         end
     endtask
 
@@ -1601,6 +1621,17 @@ module blitter_top #(
                     Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
+                    // [W3 §2b] copy the walk constants out of blt_tri_setup so the
+                    // module is free from this cycle on. Loaded by NBA here, first
+                    // read on the next cycle (the walk's first cycle) -- the walk
+                    // never reads them in the seed cycle itself, so this is exact.
+                    tw_dw0dx<=ts_dw0dx; tw_dw1dx<=ts_dw1dx; tw_dw2dx<=ts_dw2dx;
+                    tw_dw0dy<=ts_dw0dy; tw_dw1dy<=ts_dw1dy; tw_dw2dy<=ts_dw2dy;
+                    tw_dWudx<=ts_dWudx; tw_dWvdx<=ts_dWvdx; tw_dWrdx<=ts_dWrdx;
+                    tw_dWgdx<=ts_dWgdx; tw_dWbdx<=ts_dWbdx; tw_dWadx<=ts_dWadx;
+                    tw_dWudy<=ts_dWudy; tw_dWvdy<=ts_dWvdy; tw_dWrdy<=ts_dWrdy;
+                    tw_dWgdy<=ts_dWgdy; tw_dWbdy<=ts_dWbdy; tw_dWady<=ts_dWady;
+                    tw_area_recip<=ts_area_recip;
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
                     // (the qword cache persists across triangles in a command; it is
                     // dropped only at the per-command STAGE barrier, not here.)
@@ -1696,7 +1727,7 @@ module blitter_top #(
                         pxs <= tri_px; pys <= tri_py;
                         wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
                         wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
-                        recip_q <= $signed(ts_area_recip);
+                        recip_q <= $signed(tw_area_recip);
                         // A span may run to the bbox's right edge. Do NOT step past it
                         // (the cursor must stay inside the bbox so the seek's clamps and
                         // the accumulator range are unchanged). [pipeline stage 3b] the
