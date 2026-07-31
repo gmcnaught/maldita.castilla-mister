@@ -105,6 +105,13 @@ jobs:
             fpga/sta_*.log
           if-no-files-found: warn
 
+      - name: Production gates (timing 332148 / M10K 276007)
+        # After the report upload so the reports survive for diagnosis when this
+        # fails; before the RBF upload so a failing build never publishes a
+        # bitstream. Until this existed, every artifact build-rbf.yml produced
+        # was ungated.
+        run: bash fpga/scripts/check_quartus_gates.sh fpga/output_files
+
       - name: Show result
         run: ls -lh _Other/MalditaCastilla_*.rbf
 
@@ -174,6 +181,11 @@ jobs:
             fpga/build_*.log
             fpga/sta_*.log
           if-no-files-found: warn
+
+      - name: Production gates (timing 332148 / M10K 276007)
+        # Same gate as build-windows -- the fallback toolchain must not be a way
+        # to ship an ungated bitstream.
+        run: bash fpga/scripts/check_quartus_gates.sh fpga/output_files
 
       - name: Show result
         run: ls -lh _Other/MalditaCastilla_*.rbf
