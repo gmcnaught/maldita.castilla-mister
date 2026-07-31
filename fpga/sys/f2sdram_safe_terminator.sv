@@ -54,7 +54,14 @@
 //
 module f2sdram_safe_terminator #(
   parameter     DATA_WIDTH = 64,
-  parameter     BURSTCOUNT_WIDTH = 8
+  parameter     BURSTCOUNT_WIDTH = 8,
+  // Declared here rather than in the body: the port list below uses them, and
+  // Icarus (unlike Quartus) will not bind an identifier used before it is
+  // declared. Moving them makes the module simulatable without changing its
+  // synthesised shape -- localparams are not overridable, so the existing
+  // positional `#(64, 8)` instantiations in sysmem.sv are unaffected.
+  localparam    BYTEENABLE_WIDTH = DATA_WIDTH/8,
+  localparam    ADDRESS_WITDH    = 32-$clog2(BYTEENABLE_WIDTH)
 ) (
 	// clk should be the same as one provided to f2sdram port
 	// clk should not be stop when reset is asserted
@@ -64,15 +71,18 @@ module f2sdram_safe_terminator #(
 	input         rst_req_sync,
 
 	// Master port: connecting to Alavon-MM slave(f2sdram)
-	input                         waitrequest_master,
-	output [BURSTCOUNT_WIDTH-1:0] burstcount_master,
-	output    [ADDRESS_WITDH-1:0] address_master,
-	input        [DATA_WIDTH-1:0] readdata_master,
-	input                         readdatavalid_master,
-	output                        read_master,
-	output       [DATA_WIDTH-1:0] writedata_master,
-	output [BYTEENABLE_WIDTH-1:0] byteenable_master,
-	output                        write_master,
+	input                               waitrequest_master,
+	// `logic` on the five signals driven from the always_comb bus mux at the
+	// bottom of this file: a plain `output` is an implicit wire, which is not a
+	// legal procedural l-value. Quartus accepts it; simulators do not.
+	output logic [BURSTCOUNT_WIDTH-1:0] burstcount_master,
+	output logic    [ADDRESS_WITDH-1:0] address_master,
+	input              [DATA_WIDTH-1:0] readdata_master,
+	input                               readdatavalid_master,
+	output logic                        read_master,
+	output             [DATA_WIDTH-1:0] writedata_master,
+	output logic [BYTEENABLE_WIDTH-1:0] byteenable_master,
+	output logic                        write_master,
 
 	// Slave port: connecting to Alavon-MM master(user logic)
 	output                        waitrequest_slave,
@@ -85,9 +95,6 @@ module f2sdram_safe_terminator #(
 	input  [BYTEENABLE_WIDTH-1:0] byteenable_slave,
 	input                         write_slave
 );
-
-localparam BYTEENABLE_WIDTH = DATA_WIDTH/8;
-localparam ADDRESS_WITDH    = 32-$clog2(BYTEENABLE_WIDTH);
 
 /*
 * Capture init reset deaseert
@@ -121,17 +128,18 @@ end
 /*
 * Write burst transaction observer
 */
-reg  state_write = 1'b0;
-wire next_state_write;
+reg   state_write = 1'b0;
+logic next_state_write;   // driven from an always_comb below -- must be a var
+
+// Declared before the wires below that reference them (simulator bind order).
+reg [BURSTCOUNT_WIDTH-1:0] write_burstcounter     = 0;
+reg [BURSTCOUNT_WIDTH-1:0] write_burstcount_latch = 0;
+reg [ADDRESS_WITDH-1:0]    write_address_latch    = 0;
 
 wire burst_write_start     = !state_write  && next_state_write;
 wire valid_write_data      = state_write && !waitrequest_master;
 wire burst_write_end       = state_write && (write_burstcounter == write_burstcount_latch - 1'd1);
 wire valid_non_burst_write = !state_write && write_slave && (burstcount_slave == 1) && !waitrequest_master;
-
-reg [BURSTCOUNT_WIDTH-1:0] write_burstcounter     = 0;
-reg [BURSTCOUNT_WIDTH-1:0] write_burstcount_latch = 0;
-reg [ADDRESS_WITDH-1:0]    write_address_latch    = 0;
 
 always_ff @(posedge clk) begin
 	state_write <= next_state_write;
@@ -245,6 +253,31 @@ end
 assign writedata_master    = writedata_slave;
 assign readdata_slave      = readdata_master;
 assign readdatavalid_slave = readdatavalid_master;
-assign waitrequest_slave   = waitrequest_master;
+
+// BACKPRESSURE WHILE TERMINATING, don't silently drop.
+//
+// The bus mux above stops forwarding commands as soon as `terminating` is set
+// (read_master = read_terminating, write_master = write_terminating). Passing
+// waitrequest straight through in that state told the user logic the opposite:
+// on Avalon-MM a command is ACCEPTED whenever it is asserted with waitrequest
+// low, so a master issuing here saw its read taken while it never reached the
+// port -- and then waited forever for a readdatavalid that was never requested.
+//
+// That window is not theoretical on this platform. `reset` reaches the core
+// asynchronously, while rst_req_sync is that same signal double-registered onto
+// the port clock (sysmem.sv), so the terminator stays locked for ~3 cycles after
+// the fabric has already left reset. A master that issues immediately out of
+// reset -- e.g. a control-block poller -- loses that first read every time the
+// skew lands wrong, which presents as a first-frame hang with the request
+// counter climbing and the completion counter stuck at zero.
+//
+// Holding waitrequest instead makes the window a stall: the command is retried
+// by the master's own Avalon handshake once the lock clears, so nothing is lost.
+//
+// `& ~read_terminating` is required. When read_terminating is set the terminator
+// is finishing the master's OWN read on its behalf, and the master must see that
+// accept; blocking it there would leave read_slave asserted and issue a second,
+// duplicate command the moment `terminating` drops.
+assign waitrequest_slave   = waitrequest_master | (terminating & ~read_terminating);
 
 endmodule
