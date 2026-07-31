@@ -1,0 +1,176 @@
+name: Release
+
+# Tag-triggered production release of the Maldita Castilla MiSTer core.
+# Design: docs/superpowers/specs/2026-07-31-release-consolidation-design.md
+#
+#   push v* tag        -> resolve the gated, device-validated RBF, build the
+#                         engine from the submodule pin, assemble the SD-card
+#                         bundle, publish a GitHub Release.
+#   workflow_dispatch  -> dry run: same resolve + build + assembly, uploads the
+#                         bundle as a CI artifact, does NOT publish a release.
+#
+# The RBF is NOT rebuilt here. Quartus fitting is seed-sensitive, so a fresh
+# build is a bitstream nobody validated on device. This resolves the artifact
+# from the build-rbf.yml run whose fpga/ tree matches the tag -- the same rule
+# deploy.py --fetch-rbf uses, shared via scripts/lib/resolve_rbf.py.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-rbf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      fpga_tree: ${{ steps.resolve.outputs.fpga_tree }}
+      built_sha: ${{ steps.resolve.outputs.built_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # resolve_rbf walks history to compare fpga/ trees across runs, so a
+          # shallow clone would make every comparison fail.
+          fetch-depth: 0
+
+      - name: Resolve the gated RBF build for this ref
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT=$(python3 scripts/lib/resolve_rbf.py --repo . --rev "${GITHUB_SHA}" --json)
+          echo "$OUT"
+          echo "run_id=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])')" >> "$GITHUB_OUTPUT"
+          echo "built_sha=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["built_sha"])')" >> "$GITHUB_OUTPUT"
+          echo "fpga_tree=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fpga_tree"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Download the RBF from that run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ steps.resolve.outputs.run_id }}" -n maldita-rbf -D dist/rbf
+          ls -lh dist/rbf/MalditaCastilla_*.rbf
+
+      - name: Upload the resolved RBF
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-rbf
+          path: dist/rbf/MalditaCastilla_*.rbf
+          if-no-files-found: error
+
+  build-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build the ARM engine in a container
+        run: |
+          # build_mister_arm.sh expects the gmloader-next checkout at /src. It
+          # runs no git commands, so mounting only the submodule dir is safe.
+          # The script asserts MISTER_BUILD linkage before stripping.
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD/external/gmloader-next:/src" -w /src \
+            arm32v7/debian:bullseye-slim \
+            bash .github/scripts/build_mister_arm.sh
+
+      - name: Engine sanity (32-bit ARM ELF)
+        run: |
+          file external/gmloader-next/games/gmloader/gmloader | tee /dev/stderr \
+            | grep "ELF 32-bit" | grep -q "ARM"
+
+      - name: Upload engine
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmloader-engine
+          path: external/gmloader-next/games/gmloader/gmloader
+          if-no-files-found: error
+
+  assemble-release:
+    needs: [resolve-rbf, build-engine]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: resolved-rbf
+          path: dist/rbf
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gmloader-engine
+          path: dist/engine
+
+      - name: Assemble the bundle
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="dryrun-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          RBF=$(ls dist/rbf/MalditaCastilla_*.rbf)
+          bash scripts/release/assemble_bundle.sh "$RBF" dist/engine/gmloader dist/out "$VERSION"
+
+      - name: Write provenance notes
+        run: |
+          {
+            echo "## Provenance"
+            echo '```'
+            echo "maldita.castilla-mister: ${GITHUB_SHA}"
+            echo "gmloader-next:           $(git -C external/gmloader-next rev-parse HEAD)"
+            echo "fpga/ tree hash:         ${{ needs.resolve-rbf.outputs.fpga_tree }}"
+            echo "RBF from build-rbf.yml:  run ${{ needs.resolve-rbf.outputs.run_id }} (commit ${{ needs.resolve-rbf.outputs.built_sha }})"
+            echo '```'
+            echo ""
+            echo "The RBF was not rebuilt for this release. It is the artifact from the"
+            echo "gated build-rbf.yml run above, matched by fpga/ tree hash."
+            echo ""
+            echo "Game data (mygame.apk, saves/) is user-provided -- see the bundle README.md."
+          } > dist/notes.md
+          cat dist/notes.md
+
+      - name: Publish the GitHub Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/out/MalditaCastilla-MiSTer-${VERSION}.zip" \
+            dist/rbf/MalditaCastilla_*.rbf \
+            dist/out/sha256sums.txt \
+            --title "Maldita Castilla MiSTer ${GITHUB_REF_NAME}" \
+            --notes-file dist/notes.md
+
+      - name: Upload the dry-run bundle (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ env.VERSION }}
+          path: |
+            dist/out/MalditaCastilla-MiSTer-*.zip
+            dist/out/sha256sums.txt
+          if-no-files-found: error
