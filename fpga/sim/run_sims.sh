@@ -19,6 +19,15 @@
 # Usage:
 #   ./run_sims.sh                 # all testbenches
 #   ./run_sims.sh tb_sdram_ctrl   # a subset (names with or without .sv)
+#
+# STREAM_VEC=<tag> env var: tb_blitter_trilist_stream[/cache]'s header
+# documents replaying an alternate committed vector tag via
+# -DSTREAM_VEC='"<tag>"' on the iverilog command line (see the tb header's
+# "SELECTING A FRAME" note). This is that pass-through, so an alternate tag
+# can be gated without hand-invoking iverilog:
+#   STREAM_VEC=stream_heavy_f0 ./run_sims.sh tb_blitter_trilist_stream
+# Applied to EVERY TB compile in the run (harmless on TBs that don't
+# reference the STREAM_VEC macro, same as TIER_DEFINES_FULL below).
 set -uo pipefail
 
 cd "$(dirname "$0")"   # fpga/sim — relative ../rtl, ../sys resolve from here
@@ -304,6 +313,14 @@ set -- ${POS[@]+"${POS[@]}"}            # bash-3.2-safe empty-array expansion (m
 TIER_DEFINES=''
 [ "$TIER" = nightly ] && TIER_DEFINES="$TIER_DEFINES_FULL"
 
+# STREAM_VEC pass-through (see the usage note above). Built once here so it's
+# a single already-quoted argv token by the time it reaches iverilog, same
+# shape as the tb header's own '-DSTREAM_VEC="tag"' example.
+EXTRA_DEFINES=''
+if [ -n "${STREAM_VEC:-}" ]; then
+  EXTRA_DEFINES="-DSTREAM_VEC=\"$STREAM_VEC\""
+fi
+
 # default N = nproc-2 (>=1); N=1 reproduces today's exact serial order+output
 if [ "$JOBS" -le 0 ] 2>/dev/null; then
   NPROC=$( { command -v nproc >/dev/null && nproc; } || sysctl -n hw.ncpu || echo 2 )
@@ -336,7 +353,7 @@ run_one_tb() {
     printf '%s,%s,defer,0\n' "$top" "$gating" >"$RESULTS/$top.result"; printf '%s\n' "$row" >"$RESULTS/$top.row"
     [ "$JOBS" = 1 ] && printf '%s\n' "$row"; return 0;; esac; fi
   blog="$BUILD/$top.build.log"
-  if ! iverilog -g2012 -o "$BUILD/$top.vvp" $(defines_for "$top") $TIER_DEFINES \
+  if ! iverilog -g2012 -o "$BUILD/$top.vvp" $(defines_for "$top") $TIER_DEFINES $EXTRA_DEFINES \
         -I ../rtl -I ../rtl/jtframe -I ../sys -I . \
         -y ../rtl -y ../rtl/jtframe -y ../sys -y . -Y .sv -Y .v \
         $STUBS "$tb" >"$blog" 2>&1; then
@@ -378,7 +395,7 @@ run_one_tb() {
 }
 
 # ── dispatch (xargs pool) + reducer ─────────────────────────────────────────
-export BUILD RESULTS STUBS TIER TIER_DEFINES TIMEOUT JOBS SKIP NONGATING NIGHTLY_ONLY FAIL_RE
+export BUILD RESULTS STUBS TIER TIER_DEFINES EXTRA_DEFINES TIMEOUT JOBS SKIP NONGATING NIGHTLY_ONLY FAIL_RE
 export -f run_one_tb pass_re timeout_s defines_for
 
 printf '%-26s %-8s %s\n' "TESTBENCH" "RESULT" "NOTE"

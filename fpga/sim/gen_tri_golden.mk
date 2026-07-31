@@ -37,7 +37,7 @@ CFLAGS    ?= -O2 -Wall
 
 SCENARIOS := tri_copy tri_key tri_calpha tri_add tri_quad tri_surface tri_uvfull tri_missdst tri_surfalpha
 
-.PHONY: all vectors clean contract-check stream-vectors
+.PHONY: all vectors clean contract-check stream-vectors stream-vectors-heavy
 all: gen_tri_golden gen_system_golden gen_tri_stream
 
 # Refuse to build a golden generator whose refmodel disagrees with the RTL on
@@ -113,10 +113,72 @@ vectors: gen_tri_golden gen_system_golden
 # the captures live in the mister-gmloader bundler repo, not in this one. Nothing
 # at TB RUN time needs them (the committed vectors/*.hex are self-contained) — the
 # path is only needed to REGENERATE vectors.
+#
+# ⚠ EXTRA_DEFINES (run_sims.sh's -DSTREAM_VEC pass-through) is applied to EVERY
+# testbench compile in a run_sims.sh invocation, not layered on top of the
+# default vector. Running `STREAM_VEC=stream_heavy_f0 ./run_sims.sh` SUBSTITUTES
+# stream_heavy_f0 for stream_quiet_f0 in tb_blitter_trilist_stream — it does not
+# add heavy-vector coverage alongside the quiet run. A green suite from that
+# invocation means the heavy vector was tested INSTEAD OF the quiet one, not in
+# addition to it; the two vectors are never both exercised by a single run.
 TRACEDIR := ../../../mister-gmloader/docs/superpowers/findings/data
 stream-vectors: gen_tri_stream
 	mkdir -p vectors
 	./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 0 stream_quiet_f0
+
+# [Phase 4 Stage B] The heavy scene is the gate anchor (cov_px ~213,358, device
+# frame 18.02 ms pre-W2). Committed for REPRODUCIBILITY and for on-demand replay
+# via STREAM_VEC=stream_heavy_f0 (see the STREAM_VEC usage note above, including
+# its substitution-not-addition warning) — NOT because any automated gate
+# exercises it. run_sims.sh only sets EXTRA_DEFINES when the STREAM_VEC env var
+# is passed explicitly, and tb_blitter_trilist_stream.sv defaults STREAM_VEC to
+# "stream_quiet_f0"; the gating run of that testbench therefore always replays
+# the QUIET vector. tb_blitter_trilist_streamcache — the bench that produced
+# this phase's calibration figure — is both NONGATING and NIGHTLY_ONLY. NO GATE
+# CURRENTLY EXERCISES THIS HEAVY VECTOR; regenerate with this target if the
+# capture is ever re-taken.
+#
+# The input trace (mftrace-heavy-b.txt) is NOT recorded under the default
+# TRACEDIR above — it lives wherever Task 2/5's capture was taken and is
+# passed explicitly on the command line, e.g.:
+#   make -f gen_tri_golden.mk stream-vectors-heavy \
+#     TRACEDIR=/path/to/the/capture/dir
+#
+# The committed capture used for THIS vector, within the mister-gmloader repo
+# (one directory level deeper than the default TRACEDIR above), is at:
+#   docs/superpowers/findings/data/2026-07-30-phase4-stage-b/mftrace-heavy-b.txt
+# At the time of writing that path exists only on the UNMERGED branch
+# perf/phase4-stage-b-harness in that repo — it may not be on your default
+# branch yet. Point TRACEDIR at that directory (checked out from the right
+# branch) to regenerate this vector; the committed .hex files below are a
+# stale-reference hazard for a future regenerator, not a build hazard today.
+# Frame index 0 (gen_tri_stream's --frame arg) selects the FIRST distinct
+# f= value in file order, which for this capture is device frame f=1890 —
+# the first frame of the f=1890..1960 gate-anchor plateau (all measured at
+# cov_px=213358; confirmed with scripts/mftrace_analyze.py
+# --expect-covered 213358, not from any engine console log — a live
+# MFSUBMIT log line for the same n=1890 is known to disagree with the
+# trace's own f=1890 outside the plateau).
+#
+# HONESTY NOTE: MFTRACE only records triangle groups (MFTRACE G / MFTRACE
+# V); it has no fill/clear commands. gen_tri_stream.c therefore synthesizes
+# exactly ONE full-screen clear itself via the control-block path. The real
+# device issues roughly THREE full-extent clears per frame, so this vector
+# is not a like-for-like model of the device's clear cost — one synthesized
+# clear here vs ~3 on hardware. That gap is for a later calibration task,
+# not this one.
+#
+# PROVENANCE: this committed vector was captured PRE-W2 (before the engine-side
+# deferred-clear elision landed). That capture is still valid post-W2 without
+# regeneration: W2 only removes redundant full-screen clears, MFTRACE never
+# recorded clears in the first place (only triangle groups, per the HONESTY
+# NOTE above), and a device A/B on the same scene proved `tri`, `dpath`,
+# `texwait` and `cov_px` bit-identical pre- vs post-W2. Device fabric frame for
+# this scene is 18.02 ms pre-W2 / 16.68 ms post-W2 — see the tb headers for the
+# full comparison; calibrate against 16.68 ms going forward.
+stream-vectors-heavy: gen_tri_stream
+	mkdir -p vectors
+	./gen_tri_stream $(TRACEDIR)/mftrace-heavy-b.txt 0 stream_heavy_f0
 
 clean:
 	rm -f gen_tri_golden gen_system_golden gen_tri_stream
