@@ -1,0 +1,29 @@
+# W3 pre-change sim baseline
+# Instrument: fpga/sim/tb_blitter_trilist_stream.sv (stub P_SRC, 3-cycle fixed)
+# maldita worktree ../wt-maldita-w3 at f55fb8ba9e0ece1eaf8cfa5d26e69753e82d660b
+# Recorded 2026-07-31
+#
+# NOTE: origin/milestone-a was fetched fresh for this task and already
+# contained the heavy-B vectors merge (PR #22, "Merge pull request #22 from
+# gmcnaught/test/phase4-stage-b-vectors", ae914d8 is an ancestor of this
+# HEAD). The brief's `git merge --no-edit origin/test/phase4-stage-b-vectors`
+# step was run anyway and reported "Already up to date." — a no-op, not a
+# conflict. The vectors were present and correct either way.
+#
+# NOTE: on stream_heavy_f0, setup=10976 matches the brief's expected value,
+# but vfetch=9846, NOT the brief's expected 9940. This is the actual
+# pre-change measurement and is what later tasks (including the plan's
+# -0.2125 ms figure) must be re-derived from, per the brief's own
+# instruction to prefer the measured values over the assumed ones.
+
+## stream_quiet_f0
+=== stream replay: stream_quiet_f0 ===
+CYC total=1194272 tri=1115958 pix_visits=185450 pix_covered=182661 rowsetup=12380 texwait=1303 wr=547983 setup=11872 vfetch=10722 pix=189850 other=432542
+CYCX nontri=78314 vwait=9026 pa_pix=1082514 pa_hold=897064 pa_done=7284 pa_seek=8154 pa_rowy=4226 ax_live=1090202 ax_push=182661
+CYCX pb_idle=187024 pb_look=120726 pb_fill=120726 pb_wait=1303 pb_wr=182661 pb_wr2=182661 pb_wr3=182661 pb_surfw=62208 pb_surfc=62208
+
+## stream_heavy_f0
+=== stream replay: stream_heavy_f0 ===
+CYC total=1377156 tri=1299945 pix_visits=218083 pix_covered=213358 rowsetup=18147 texwait=1276 wr=640074 setup=10976 vfetch=9846 pix=223466 other=491518
+CYCX nontri=77211 vwait=8278 pa_pix=1259440 pa_hold=1041357 pa_done=9618 pa_seek=12513 pa_rowy=5634 ax_live=1272233 ax_push=213358
+CYCX pb_idle=218597 pb_look=151421 pb_fill=151421 pb_wait=1276 pb_wr=213358 pb_wr2=213358 pb_wr3=213358 pb_surfw=62208 pb_surfc=62208

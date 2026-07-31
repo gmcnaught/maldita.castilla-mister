@@ -1,0 +1,60 @@
+# Persistent Sword (bit4 = 0x010) presses. The engine needs ~15s to load 49MB
+# of game data, and the intro/title timing is not known precisely, so press
+# every 2s across a wide window rather than guessing one moment.
+0 0x000
+20000 0x010
+20250 0x000
+22000 0x010
+22250 0x000
+24000 0x010
+24250 0x000
+26000 0x010
+26250 0x000
+28000 0x010
+28250 0x000
+30000 0x010
+30250 0x000
+32000 0x010
+32250 0x000
+34000 0x010
+34250 0x000
+36000 0x010
+36250 0x000
+38000 0x010
+38250 0x000
+40000 0x010
+40250 0x000
+42000 0x010
+42250 0x000
+44000 0x010
+44250 0x000
+46000 0x010
+46250 0x000
+48000 0x010
+48250 0x000
+50000 0x010
+50250 0x000
+52000 0x010
+52250 0x000
+54000 0x010
+54250 0x000
+56000 0x010
+56250 0x000
+58000 0x010
+58250 0x000
+60000 0x010
+60250 0x000
+62000 0x010
+62250 0x000
+64000 0x000
+settle 8000
+
+# VERIFIED 2026-07-28 on .81 (core MalditaCastilla_476a422, engine 288x216,
+# single engine asserted). Screenshot at settle shows Chapter I "Colomera del
+# Rey" gameplay: knight in the forest level, SPEEDRUN timer running.
+#
+# WHY SWORD AND NOT PAUSE: bit8 (Pause/Start) does NOT advance the game — it
+# opens gmloader's OWN gamepad overlay (RESUME / DISABLE OVERLAY / KEY CONFIG
+# / QUIT). That overlay renders ~168 tris and looks superficially like a game
+# scene in BLITPROF, which is exactly how an earlier tuning pass mistook it for
+# progress. Always confirm the scene with a screenshot, never with tri counts.
