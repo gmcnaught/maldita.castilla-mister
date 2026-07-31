@@ -141,9 +141,10 @@ module blitter_top #(
     // Continuously-driven live state for HW post-mortem: published by the scanout
     // reader into VSYNC_ADDR's HIGH 32 bits (0x3A070004) each frame — the reader
     // stays alive when the blitter wedges, so devmem 0x3A070004 reveals WHERE the
-    // blitter is stuck. dbg[5:0]=state, [22:15]=0, [14:6]=0 (legacy dx/dy retired with
-    // the per-pixel renderer), [23]=rd_issued, [31:24]=stuck-count (cycles-in-state >>
-    // 16, saturates 0xFF = frozen). No effect on the datapath.
+    // blitter is stuck. dbg[5:0]=state, [8:6]=pv (vertex-prefetch sub-FSM, [W3 §2b]),
+    // [14:9]=0 (legacy dx/dy retired with the per-pixel renderer), [22:15]=rd_reissue_cnt,
+    // [23]=rd_issued, [31:24]=stuck-count (cycles-in-state >> 16, saturates 0xFF =
+    // frozen). No effect on the datapath. Full rationale at the `assign dbg` below.
     output wire [31:0]   dbg
 );
     localparam [5:0]
@@ -153,6 +154,12 @@ module blitter_top #(
         S_SETUP=6'd11,      S_NEXT_CMD=6'd19,
         // [FB-in-BRAM] CLEAR routes through comp_pipeline as a full-screen FILL
         S_CLR_FILL=6'd12,   S_CLR_FILL_WAIT=6'd13,
+        // [W3 Stage C] publish the `notice` attribution word to C_CMDCOUNT.hi.
+        // 6'd14 is the LOWEST unused code (14..18 and 26..29 are free; 40/41 are
+        // retired-but-quoted). Nothing is renumbered on purpose: the wedge probe
+        // publishes raw state_at_peak values and past findings name states by
+        // number (23=S_RD_WAIT, 44=S_SNAP_DRAIN, 50=S_TRI_PIX, 56=S_TRI_NEXT).
+        S_WR_NOTICE=6'd14,
         S_FRAME_VCTRL=6'd20, S_WR_DONE=6'd21, S_WR_STATUS=6'd22,
         S_RD_WAIT=6'd23,    S_WR_WAIT=6'd24,
         S_WR_PERF=6'd25,    // [profiling] publish perf_tri_cyc to C_SRCSEL.hi (spare qw7 high)
@@ -305,6 +312,77 @@ module blitter_top #(
     // reads them via devmem at C_DONE+4 / C_STATUS+4. fabric_busy/pipe_busy vs the
     // vsync interval (0x3A070000) tells you whether the A9 or the fabric is the limit.
     reg  [31:0] perf_frame_cyc, perf_pipe_cyc;
+    // ── [W3 Stage C] `notice` attribution ───────────────────────────────────────
+    // notice = (host + block) - frame is one number today with an INFERRED split.
+    // These two counters bracket its fabric half and make the split re-checkable
+    // from any future run:
+    //   perf_snap_cyc   the C_DONE write ISSUED (S_WR_DONE entry, so the S_WR_WAIT
+    //                   bus-accept cycles are included) -> back in S_POLL_SUBMIT.
+    //                   This is the S_SNAP_* WORK->DDR copy tail, during which a
+    //                   doorbell cannot be SEEN at all: S_POLL_SUBMIT is the only
+    //                   state that reads C_SUBMIT. Designed ~0.158 ms; a device
+    //                   sweep put the whole dead window at ~0.335 ms, and whether
+    //                   THIS is that number is the open question the counter answers.
+    //   perf_detect_cyc S_POLL_SUBMIT entered -> S_CHK_NEW takes the new-work branch.
+    //                   The fabric's submit-detect round trip. NOTE it also absorbs
+    //                   any time the fabric spends polling an EMPTY doorbell, i.e.
+    //                   host-late time: it is "poll loop + host not yet submitted",
+    //                   not a pure fabric cost. That is deliberate -- it makes
+    //                   snap+detect span the ENTIRE C_DONE(N) -> work-seen(N+1)
+    //                   interval with no gap.
+    //
+    // THE IDENTITY IS  notice = snap + detect - pub.  It is NOT
+    // "notice - (snap + detect) = the host's share". Derivation, in mf_seam_stat.h's
+    // own terms (notice = (host + block) - frame; host starts at doorbell N; pub =
+    // barrier return -> doorbell N+1), with t0 = S_WR_DONE(N-1), t2 = doorbell N,
+    // t3 = S_POLL_SUBMIT, t4 = work-seen(N), t5 = S_WR_DONE(N), t6 = the host's
+    // observation of C_DONE(N), and eps = the host's own C_DONE observation latency
+    // (poll granularity + DDR visibility), so t6 = t5 + eps and t2 = t0 + eps + pub:
+    //
+    //     snap + detect = t4 - t0 = (t4 - t2) + (t2 - t0) = (t4 - t2) + eps + pub
+    //     notice        = (t6 - t2) - (t5 - t4)           = (t4 - t2) + eps
+    //  => notice - (snap + detect) = -pub                     (NOT eps)
+    //
+    // eps CANCELS. Not because it is zero, but because it is not exposed twice: the
+    // host spends it INSIDE the snap tail (t2 = t0 + eps + pub), so the fabric eats
+    // it off the FRONT of snap and re-exposes it exactly once, after C_DONE(N).
+    // Measured pub on .62 is 0.00-0.01 ms, so anyone subtracting per the old comment
+    // computes a "host share" of ~0 and concludes the host contributes nothing --
+    // while eps is real and hidden inside snap.
+    //
+    // CHECK THE IDENTITY FIRST, before reading anything into the numbers. It is a
+    // SELF-VALIDATION the instrument can run on its own first device measurement:
+    // MFSEAM already prints notice and pub, MFSUBMIT now prints snap and detect
+    // (averaged over the same BLOCKED-frame population MFSEAM uses). If
+    // notice ?= snap + detect - pub does not hold within the MFSEAM tolerance, the
+    // INSTRUMENT is wrong, not the fabric. The identity is per BLOCKED frame only:
+    // on a host-late frame t2 - t0 > eps + pub, detect absorbs the whole overrun,
+    // and snap + detect - pub over-states notice by all of it.
+    //
+    // WHAT snap IS AND IS NOT. Published snap is a PURE FABRIC interval, t3 - t0.
+    // Only t3 - t2 = snap - eps - pub of it is EXPOSED to notice: for the first
+    // eps + pub of the tail the host is not waiting on the doorbell at all, it is
+    // still observing C_DONE(N-1) and preparing the next submit. So snap OVER-STATES
+    // the dead window's contribution to notice by (eps + pub). Against the PRIOR
+    // SWEEP's numbers (snap ~0.335, eps ~0.237, pub ~0.00) the exposed part would be
+    // ~0.098 ms -- an illustration DERIVED from that sweep, not a value this counter
+    // measures.
+    //
+    // WHAT THE PAIR SETTLES: detect, directly. And the sum (snap - pub), which
+    // equals exposed-tail + eps. WHAT IT DOES NOT SETTLE: the SPLIT of that sum.
+    // (t3 - t2) + eps = snap - pub is one equation in two unknowns; separating the
+    // fabric tail from the host's observation latency needs a host timestamp
+    // referenced to the fabric clock, which this counter does not provide. Do not
+    // quote either half as measured.
+    //
+    // Both are PER-FRAME: the pair published with frame N+1's C_DONE is the snap
+    // tail that followed frame N and the detect that opened frame N+1 -- the two
+    // contiguous intervals that delayed frame N+1's OWN submit. See S_WR_NOTICE.
+    // snap_run/detect_run are the live counters; perf_* are the latched values the
+    // publish reads, so a mid-frame tick can never be sampled half-formed.
+    reg  [31:0] perf_snap_cyc, perf_detect_cyc;
+    reg  [31:0] snap_run, detect_run;
+    reg         snap_counting, detect_counting;
     // [profiling] TRILIST per-state attribution to locate the ~46 cyc/px cost:
     //   perf_tri_cyc     = cycles in any S_TRI_* state (published to C_SRCSEL.hi)
     //   perf_texwait_cyc = cycles blocked in S_TRI_GOTTEX waiting on p0_ok (texel
@@ -356,13 +434,8 @@ module blitter_top #(
             else if (~&dbg_stuck)     dbg_stuck <= dbg_stuck + 24'd1;
         end
     end
-    // [31:24]=stuck>>16 (0xFF=frozen >~167ms), [23]=rd_issued (read accepted, waiting
-    // for data = NOT starved), [5:0]=state. The legacy dx/dy fields are retired with
-    // the per-pixel renderer; comp_pipeline owns per-pixel progress now, so those
-    // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
-    // [startup-wedge fix] bits[22:15] now carry rd_reissue_cnt (reissue watchdog
-    // fires since reset) — 0 in a clean run, >0 means a lost f2h beat was healed.
-    assign dbg = {dbg_stuck[23:16], rd_issued, rd_reissue_cnt, 9'd0, state};
+    // `assign dbg` MOVED to just after the `pv` prefetch-FSM declarations below: it now
+    // carries pv in bits [8:6] and `default_nettype none` forbids forward references.
     // [wedge probe v2] declared/defined AFTER the tri sub-FSM regs (pa/pb/fill_busy/tri_maxx/y),
     // since `default_nettype none` forbids forward references — see the block below ~L590.
 
@@ -446,6 +519,83 @@ module blitter_top #(
     reg         [7:0]  tri_vr1,tri_vg1,tri_vb1,tri_va1;
     reg         [7:0]  tri_vr2,tri_vg2,tri_vb2,tri_va2;
     reg          tri_setup_start;           // 1-cycle pulse into blt_tri_setup
+
+    // ── [W3 §2b] vertex + setup prefetch engine ───────────────────────────────
+    // Runs CONCURRENTLY with the coverage walk, i.e. only while state==S_TRI_PIX
+    // (plus a DRAIN-only tick in S_TRI_NEXT, see the block itself).
+    // That is the one state in which the main FSM leaves bm_*/mem_* idle: the
+    // walk's texels come from the SDRAM P_SRC port (src_in_sdram is hardwired 1)
+    // and its writes go to comp_fbram, so nothing else drives the DDR3 read
+    // master between S_TRI_SWAIT and S_TRI_NEXT. The prefetch therefore steals no
+    // walk cycle -- it re-times reads that already happened, from BETWEEN
+    // triangles to DURING them.
+    //
+    // BUS EXCLUSIVITY (the invariant this whole block rests on):
+    //   * bm_rd/bm_addr/bm_wr are written ONLY by (a) the block-top defaults,
+    //     (b) arms of the main `case (state)`, and (c) this prefetch block.
+    //   * The S_TRI_PIX and S_TRI_NEXT case arms contain NO bm_* assignment
+    //     (verified by inspection of both arms; the walk's memory traffic is
+    //     p0_* / comp_fbram, not bm_*).
+    //   * This block is gated on state being one of exactly those two.
+    //   Therefore no cycle exists in which both write bm_rd/bm_addr.
+    //   Corollary: the main FSM can never have a read OUTSTANDING here either,
+    //   because a main-FSM read is always awaited in S_RD_WAIT, which only
+    //   leaves on mem_dout_ready. That matters because mem_dout_ready carries no
+    //   tag -- two outstanding reads would be indistinguishable. S_TRI_NEXT
+    //   correspondingly refuses to leave while pv is non-quiescent.
+    //
+    // It has its OWN issue/accept/response handshake rather than borrowing
+    // S_RD_WAIT, which is a main-FSM subroutine. That includes its own reissue
+    // watchdog on the same RW_WD_MAX window: the startup wedge (a lost f2h read
+    // response at core-load bring-up) was exactly a master that never re-issued,
+    // and a second requester without the watchdog would re-introduce it.
+    localparam [2:0] PV_IDLE  = 3'd0,   // nothing in flight
+                     PV_ISSUE = 3'd1,   // drive bm_rd for qword pv_k
+                     PV_WAIT  = 3'd2,   // await the response (with reissue watchdog)
+                     PV_DECV  = 3'd3,   // unpack the 6 qwords into tri_v*
+                     PV_START = 3'd4,   // pulse blt_tri_setup.start; latch the bbox
+                     PV_RUN   = 3'd5,   // setup computing; await ts_valid
+                     PV_HOLD  = 3'd6;   // ts_* hold the NEXT triangle: seed on demand
+    reg  [2:0]   pv;
+    reg  [2:0]   pv_k;                  // which of the 6 vertex qwords
+    // Six 64-bit words read at CONSTANT indices in PV_DECV (pv_qw[0]..pv_qw[5])
+    // and written at the variable index pv_k -- no variable READ address, so this
+    // infers 384 plain flops, not an M10K. That is deliberate and is what we want
+    // here: a `ramstyle` array whose read sits inside an FSM case arm is exactly
+    // the pattern that silently failed M10K inference once already (map.rpt
+    // 276007) and cost 20,480 stray flops plus a 1,735-fanout mux. Same shape as
+    // tri_vqw, which has always been flops.
+    reg  [63:0]  pv_qw [0:5];
+    reg  [31:0]  pv_base;               // qword address of the prefetched vertex 0
+    reg          pv_rd_issued;
+    reg  [21:0]  pv_wd;                 // reissue watchdog (same window as rw_wd)
+    // Pre-registered bbox for the prefetched triangle, for the same reason
+    // S_TRI_SETUP pre-registers it: keep the raw-vertex compare cloud out of the
+    // seed cycle, which was the -4.5 ns worst setup path before it was hoisted.
+    reg  [15:0]  pv_maxx, pv_maxy;
+    reg          pv_bbox_neg;
+    reg          pv_ready;              // PV_HOLD reached: ts_* are the next triangle's
+
+    // ---- DEBUG: the #34 HW wedge-probe word (no datapath effect) ----------------
+    // Moved down here from the dbg_stuck block above so it can reference `pv`.
+    // [31:24]=stuck>>16 (0xFF=frozen >~167ms), [23]=rd_issued (read accepted, waiting
+    // for data = NOT starved), [5:0]=state. The legacy dx/dy fields are retired with
+    // the per-pixel renderer; comp_pipeline owns per-pixel progress now, so those
+    // bits are zeroed (state+stuck+rd_issued remain the HW wedge post-mortem signal).
+    // [startup-wedge fix] bits[22:15] now carry rd_reissue_cnt (reissue watchdog
+    // fires since reset) — 0 in a clean run, >0 means a lost f2h beat was healed.
+    // [W3 §2b] bits[8:6] now carry `pv`, the vertex-prefetch sub-FSM. It drives the
+    // DDR3 read master CONCURRENTLY with the pixel walk, which created a NEW wedge
+    // signature: a dead f2h read during a walk now parks the machine at S_TRI_NEXT
+    // (state 56) with rd_issued=0, because S_TRI_NEXT refuses to leave until pv is
+    // quiescent and the stalled read belongs to pv, not to the main FSM. Under the
+    // pre-prefetch RTL a lost beat ALWAYS showed as S_RD_WAIT (23) with rd_issued=1
+    // — the opposite reading of the same fault. Without pv on the bus a post-mortem
+    // cannot tell "stuck in PV_WAIT on a lost beat" (pv=2) from "stuck in PV_HOLD
+    // waiting on the walk" (pv=6). Existing fields keep their exact bit positions:
+    // external readers and past findings quote them by offset.
+    // Layout: [31:24]stuck [23]rd_issued [22:15]rd_reissue_cnt [14:9]0 [8:6]pv [5:0]state
+    assign dbg = {dbg_stuck[23:16], rd_issued, rd_reissue_cnt, 6'd0, pv, state};
 
     // walk state
     reg  [15:0]  tri_px, tri_py, tri_maxx, tri_maxy;   // current pixel + bbox max
@@ -960,6 +1110,7 @@ module blitter_top #(
 
     // blt_tri_setup registered outputs (stable from `valid` until the next start)
     wire               ts_valid, ts_degenerate;
+    wire               ts_ready;    // [W3 §2b] a start would be accepted this cycle
     wire        [15:0] ts_ox, ts_oy;
     wire signed [47:0] ts_area, ts_area_recip;
     wire signed [47:0] ts_w0_0, ts_w1_0, ts_w2_0;
@@ -968,8 +1119,28 @@ module blitter_top #(
     wire signed [47:0] ts_dWudx, ts_dWvdx, ts_dWrdx, ts_dWgdx, ts_dWbdx, ts_dWadx;
     wire signed [47:0] ts_dWudy, ts_dWvdy, ts_dWrdy, ts_dWgdy, ts_dWbdy, ts_dWady;
 
+    // ── [W3 §2b] walk-constant register bank ──────────────────────────────────
+    // The coverage walk reads these on EVERY pixel. Holding them in
+    // blt_tri_setup's own output registers is precisely what pins that module to
+    // the triangle being walked and makes setup serial with the walk. Copying
+    // them here at the S_TRI_SWAIT seed cycle frees the module to start the NEXT
+    // triangle immediately, which is what the setup/vfetch overlap needs.
+    //
+    // Only the values read THROUGHOUT the walk are duplicated: the 18 dx/dy
+    // deltas and area_recip (19 x 48 = 912 flops). The bbox is already a
+    // blitter_top register (tri_maxx/tri_maxy/tri_bbox_neg, latched at
+    // S_TRI_SETUP) and the seeds (ts_w*_0 / ts_W*_0 / ts_ox / ts_oy) are consumed
+    // in the single seed cycle, so neither needs a copy.
+    //
+    // Prefix is tw_ (triangle walk); cw_ is already the composite-write mux.
+    reg signed [47:0] tw_dw0dx, tw_dw1dx, tw_dw2dx;
+    reg signed [47:0] tw_dw0dy, tw_dw1dy, tw_dw2dy;
+    reg signed [47:0] tw_dWudx, tw_dWvdx, tw_dWrdx, tw_dWgdx, tw_dWbdx, tw_dWadx;
+    reg signed [47:0] tw_dWudy, tw_dWvdy, tw_dWrdy, tw_dWgdy, tw_dWbdy, tw_dWady;
+    reg signed [47:0] tw_area_recip;
+
     blt_tri_setup #(.SHIFT(40)) u_tri_setup (
-        .clk(clk), .rst(rst), .start(tri_setup_start),
+        .clk(clk), .rst(rst), .start(tri_setup_start), .ready(ts_ready),
         .vx0(tri_vx0), .vy0(tri_vy0), .vx1(tri_vx1), .vy1(tri_vy1), .vx2(tri_vx2), .vy2(tri_vy2),
         .vu0(tri_vu0), .vv0(tri_vv0), .vu1(tri_vu1), .vv1(tri_vv1), .vu2(tri_vu2), .vv2(tri_vv2),
         .vr0(tri_vr0), .vg0(tri_vg0), .vb0(tri_vb0), .va0(tri_va0),
@@ -1112,9 +1283,9 @@ module blitter_top #(
     // with dw/dx>0 is a LOWER bound (go right); with dw/dx<0 an UPPER bound (go left);
     // with dw/dx==0 the edge is x-independent, so a violation means the WHOLE row is
     // out (sk_block) -- that is the horizontal-edge case.
-    wire sk_need_r = ((w0<0) && (ts_dw0dx>0)) || ((w1<0) && (ts_dw1dx>0)) || ((w2<0) && (ts_dw2dx>0));
-    wire sk_need_l = ((w0<0) && (ts_dw0dx<0)) || ((w1<0) && (ts_dw1dx<0)) || ((w2<0) && (ts_dw2dx<0));
-    wire sk_block  = ((w0<0) && (ts_dw0dx==0))|| ((w1<0) && (ts_dw1dx==0))|| ((w2<0) && (ts_dw2dx==0));
+    wire sk_need_r = ((w0<0) && (tw_dw0dx>0)) || ((w1<0) && (tw_dw1dx>0)) || ((w2<0) && (tw_dw2dx>0));
+    wire sk_need_l = ((w0<0) && (tw_dw0dx<0)) || ((w1<0) && (tw_dw1dx<0)) || ((w2<0) && (tw_dw2dx<0));
+    wire sk_block  = ((w0<0) && (tw_dw0dx==0))|| ((w1<0) && (tw_dw1dx==0))|| ((w2<0) && (tw_dw2dx==0));
     // The row's direction: locked after the first A_SEEK cycle. A cursor that is
     // already covered can only be at-or-right-of the interval's left end, so it seeks
     // LEFT for minimality; an uncovered cursor with an upper bound violated is right
@@ -1143,9 +1314,9 @@ module blitter_top #(
         begin
             tri_px <= tri_px + 16'd1;
             w0m<=w0; w1m<=w1; w2m<=w2;
-            w0<=w0+ts_dw0dx; w1<=w1+ts_dw1dx; w2<=w2+ts_dw2dx;
-            Wu<=Wu+ts_dWudx; Wv<=Wv+ts_dWvdx; Wr<=Wr+ts_dWrdx;
-            Wg<=Wg+ts_dWgdx; Wb<=Wb+ts_dWbdx; Wa<=Wa+ts_dWadx;
+            w0<=w0+tw_dw0dx; w1<=w1+tw_dw1dx; w2<=w2+tw_dw2dx;
+            Wu<=Wu+tw_dWudx; Wv<=Wv+tw_dWvdx; Wr<=Wr+tw_dWrdx;
+            Wg<=Wg+tw_dWgdx; Wb<=Wb+tw_dWbdx; Wa<=Wa+tw_dWadx;
         end
     endtask
     // [span walk] one column left: the left-neighbour set BECOMES the current edges,
@@ -1155,9 +1326,9 @@ module blitter_top #(
         begin
             tri_px <= tri_px - 16'd1;
             w0<=w0m; w1<=w1m; w2<=w2m;
-            w0m<=w0m-ts_dw0dx; w1m<=w1m-ts_dw1dx; w2m<=w2m-ts_dw2dx;
-            Wu<=Wu-ts_dWudx; Wv<=Wv-ts_dWvdx; Wr<=Wr-ts_dWrdx;
-            Wg<=Wg-ts_dWgdx; Wb<=Wb-ts_dWbdx; Wa<=Wa-ts_dWadx;
+            w0m<=w0m-tw_dw0dx; w1m<=w1m-tw_dw1dx; w2m<=w2m-tw_dw2dx;
+            Wu<=Wu-tw_dWudx; Wv<=Wv-tw_dWvdx; Wr<=Wr-tw_dWrdx;
+            Wg<=Wg-tw_dWgdx; Wb<=Wb-tw_dWbdx; Wa<=Wa-tw_dWadx;
         end
     endtask
     // [span walk] pin the row-start snapshot to wherever the seek finished. This is
@@ -1180,18 +1351,18 @@ module blitter_top #(
         begin
             tri_py <= tri_py + 16'd1;
             tri_px <= row_px;
-            row_w0<=row_w0+ts_dw0dy; w0<=row_w0+ts_dw0dy;
-            row_w1<=row_w1+ts_dw1dy; w1<=row_w1+ts_dw1dy;
-            row_w2<=row_w2+ts_dw2dy; w2<=row_w2+ts_dw2dy;
-            row_w0m<=row_w0m+ts_dw0dy; w0m<=row_w0m+ts_dw0dy;
-            row_w1m<=row_w1m+ts_dw1dy; w1m<=row_w1m+ts_dw1dy;
-            row_w2m<=row_w2m+ts_dw2dy; w2m<=row_w2m+ts_dw2dy;
-            row_Wu<=row_Wu+ts_dWudy; Wu<=row_Wu+ts_dWudy;
-            row_Wv<=row_Wv+ts_dWvdy; Wv<=row_Wv+ts_dWvdy;
-            row_Wr<=row_Wr+ts_dWrdy; Wr<=row_Wr+ts_dWrdy;
-            row_Wg<=row_Wg+ts_dWgdy; Wg<=row_Wg+ts_dWgdy;
-            row_Wb<=row_Wb+ts_dWbdy; Wb<=row_Wb+ts_dWbdy;
-            row_Wa<=row_Wa+ts_dWady; Wa<=row_Wa+ts_dWady;
+            row_w0<=row_w0+tw_dw0dy; w0<=row_w0+tw_dw0dy;
+            row_w1<=row_w1+tw_dw1dy; w1<=row_w1+tw_dw1dy;
+            row_w2<=row_w2+tw_dw2dy; w2<=row_w2+tw_dw2dy;
+            row_w0m<=row_w0m+tw_dw0dy; w0m<=row_w0m+tw_dw0dy;
+            row_w1m<=row_w1m+tw_dw1dy; w1m<=row_w1m+tw_dw1dy;
+            row_w2m<=row_w2m+tw_dw2dy; w2m<=row_w2m+tw_dw2dy;
+            row_Wu<=row_Wu+tw_dWudy; Wu<=row_Wu+tw_dWudy;
+            row_Wv<=row_Wv+tw_dWvdy; Wv<=row_Wv+tw_dWvdy;
+            row_Wr<=row_Wr+tw_dWrdy; Wr<=row_Wr+tw_dWrdy;
+            row_Wg<=row_Wg+tw_dWgdy; Wg<=row_Wg+tw_dWgdy;
+            row_Wb<=row_Wb+tw_dWbdy; Wb<=row_Wb+tw_dWbdy;
+            row_Wa<=row_Wa+tw_dWady; Wa<=row_Wa+tw_dWady;
         end
     endtask
 
@@ -1203,6 +1374,14 @@ module blitter_top #(
             rw_wd<=22'd0; rd_reissue_cnt<=8'd0;
             perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;
             perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0; perf_covered_px<=32'd0;
+            // [W3 Stage C] notice attribution comes out of reset disarmed. The FIRST
+            // published pair is therefore (0,0): reset lands directly in S_POLL_SUBMIT
+            // with snap_counting low, so frame 1 has no preceding snap tail to time and
+            // no detect window is opened for it. From frame 2 on both are live. A
+            // leading 0/0 sample is correct, not a dropout.
+            perf_snap_cyc<=32'd0; perf_detect_cyc<=32'd0;
+            snap_run<=32'd0; detect_run<=32'd0;
+            snap_counting<=1'b0; detect_counting<=1'b0;
             throttle_cnt<=8'd0; throttle_cfg<=8'd0;
             ring_sel<=1'b0;                   // [Phase 1 A3] default to ring A
             pipe_start<=1'b0;
@@ -1212,6 +1391,8 @@ module blitter_top #(
             fb_dma_start<=1'b0; // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
             snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
+            // [W3 §2b] the prefetch engine comes out of reset quiescent.
+            pv<=PV_IDLE; pv_rd_issued<=1'b0; pv_wd<=22'd0; pv_ready<=1'b0;
             tri_bbox_neg<=1'b0; sk_dir_set<=1'b0; sk_left<=1'b0;
             ax_v<=6'd0; ax_cred<={AX_CW{1'b0}};   // [pipeline stage 3b]
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
@@ -1251,6 +1432,37 @@ module blitter_top #(
                     perf_texwait_cyc <= perf_texwait_cyc + 32'd1;
             end
 
+            // [W3 Stage C] notice-attribution ticks. OUTSIDE the `!idle` block on
+            // purpose: both intervals live in the window where the fabric is NOT
+            // working on a frame (the snap tail runs with idle still low but the
+            // detect loop runs with idle high), so gating them on !idle would count
+            // the detect interval as zero. Arming/disarming happens in the states
+            // themselves (S_WR_DONE / S_POLL_SUBMIT / S_CHK_NEW); here they only tick.
+            //
+            // The |run[31:19] stop is what makes the published field's saturation
+            // HONEST rather than nominal. A free 32-bit counter wraps after 43.6 s,
+            // and detect_run is reachable there: it ticks for as long as the host
+            // leaves the doorbell unrung (a pause, a level load), not just for a poll
+            // round trip. A wrapped run would then publish a small, plausible-looking
+            // number. Freezing at the first value with bit 19 set (524288 cyc, i.e.
+            // 65536 in eighths) is one past the field's range, so the S_WR_NOTICE
+            // guard turns it into a pegged 0xFFFF and it stays pegged. 13-input OR.
+            //
+            // OFF BY EXACTLY ONE CYCLE, both intervals, by construction. This tick and
+            // the latch in the case arm below are concurrent NBAs in this same always
+            // block, so both read the SAME pre-edge `run` value. With T = the S_WR_DONE
+            // cycle that arms snap, P = the S_POLL_SUBMIT cycle that latches it and arms
+            // detect, and Q = the S_CHK_NEW cycle that latches detect:
+            //     perf_snap_cyc   = P - T - 1      (true interval P - T)
+            //     perf_detect_cyc = Q - P - 1      (true interval Q - P)
+            // The two still ABUT -- snap closes and detect opens in the same cycle P --
+            // but their SUM is short of Q - T by 2 cycles. That is ~20 ns at 98.4375 MHz
+            // against a 0.565 ms signal, i.e. 4e-5 of it. Stated so nobody has to
+            // rediscover it; not worth a correction term, and correcting it would mean
+            // touching counting logic that is verified as-is.
+            if (snap_counting   && !(|snap_run[31:19]))   snap_run   <= snap_run   + 32'd1;
+            if (detect_counting && !(|detect_run[31:19])) detect_run <= detect_run + 32'd1;
+
             // [fill watchdog] count continuous fill-stall cycles; saturate at WD_TIMEOUT.
             if (fill_busy && !p0_ok) begin
                 if (wd_stall != WD_TIMEOUT) wd_stall <= wd_stall + 13'd1;
@@ -1262,10 +1474,32 @@ module blitter_top #(
             if (state != S_RD_WAIT) rw_wd <= 22'd0;
             else if (rw_wd != RW_WD_MAX) rw_wd <= rw_wd + 22'd1;
 
+            // [W3 §2b] prefetch reissue watchdog, mirroring rw_wd. Reset outside
+            // PV_WAIT; PV_WAIT's own reissue branch clears it too (that NBA runs
+            // later in this block, so it wins on the reissue cycle). The window
+            // is the SAME RW_WD_MAX and must stay > the arbiter's
+            // FLUSH_QUIET_MAX, so a reissue can only fire after the arb has
+            // flushed the dead expectation -- see the S_RD_WAIT comment.
+            if (pv != PV_WAIT) pv_wd <= 22'd0;
+            else if (pv_wd != RW_WD_MAX) pv_wd <= pv_wd + 22'd1;
+
             case (state)
             S_POLL_SUBMIT: begin
                 idle<=1; bm_rd<=1; bm_addr<=`BLTCTRL_QW+`C_SUBMIT;
                 rd_ret<=S_POLL_DONE; state<=S_RD_WAIT;
+                // [W3 Stage C] close the snap tail on the FIRST cycle of the poll loop
+                // — this is the exact instant a doorbell becomes observable again —
+                // and open the detect interval in the same cycle so the two abut with
+                // no gap. S_POLL_SUBMIT is re-entered on every poll round, so the
+                // snap_counting guard is what makes this latch once per frame; without
+                // it every round would restart detect and the measurement would only
+                // ever show one poll round trip.
+                if (snap_counting) begin
+                    perf_snap_cyc   <= snap_run;
+                    snap_counting   <= 1'b0;
+                    detect_run      <= 32'd0;
+                    detect_counting <= 1'b1;
+                end
             end
             S_POLL_DONE: begin
                 submit_reg<=rd_data[31:0];
@@ -1282,6 +1516,12 @@ module blitter_top #(
                     perf_frame_cyc<=32'd0; perf_pipe_cyc<=32'd0;   // frame start: reset perf
                     perf_tri_cyc<=32'd0; perf_texwait_cyc<=32'd0;   // [profiling] reset per-frame
                     perf_covered_px<=32'd0;                        // [Phase 1 A4] per-frame too
+                    // [W3 Stage C] close the detect interval: this is the cycle the new
+                    // work is SEEN. perf_snap_cyc is deliberately NOT cleared here — it
+                    // already holds the tail that immediately preceded this detect, and
+                    // the two together are what THIS frame's C_DONE will publish.
+                    perf_detect_cyc <= detect_run;
+                    detect_counting <= 1'b0;
                 end
             end
             S_GOT_CMDCNT: begin
@@ -1436,6 +1676,14 @@ module blitter_top #(
                     // c_blend/c_alpha/c_colorkey = blend params.
                     tri_count    <= c_w;
                     tri_idx      <= 16'd0;
+                    // [W3 §2b] a new command's first triangle always takes the
+                    // serial path; the prefetch arms once its walk begins. This
+                    // is belt-and-braces -- a TRILIST can only be decoded from
+                    // S_SETUP, which is reachable only after the previous
+                    // command's S_TRI_NEXT already forced pv to PV_IDLE -- but it
+                    // makes the "pv is IDLE outside a TRILIST walk" invariant
+                    // hold by construction rather than by reachability argument.
+                    pv <= PV_IDLE; pv_rd_issued <= 1'b0; pv_ready <= 1'b0;
                     tri_entry_qw <= `SRC_QW + ({c_dst_y, c_dst_x} >> 3);
                     tri_busy     <= 1'b1;
                     // [app-surface v1] texel source = off-screen APPSURF surface when set,
@@ -1579,11 +1827,27 @@ module blitter_top #(
             // Wait for setup valid; seed bbox + running accumulators at (ox,oy).
             // Skip degenerate, off-left/above (negative bbox-max) or fully-off
             // (min>max) triangles.
-            S_TRI_SWAIT: if (ts_valid) begin
-                // guard against registered bbox-max / bbox-neg (set at S_TRI_SETUP)
-                if (ts_degenerate || tri_bbox_neg || (ts_ox > tri_maxx) || (ts_oy > tri_maxy))
+            // [W3 §2b] `pv_ready` is the prefetch path's latched equivalent of the
+            // one-cycle ts_valid pulse: on the prefetched path ts_valid fired
+            // thousands of cycles ago, during the PREVIOUS triangle's walk, but
+            // blt_tri_setup's outputs are all `output reg` and it has been idle
+            // since (no further start), so ts_ox/ts_oy/ts_degenerate/ts_w*_0/
+            // ts_W*_0/ts_d*/ts_area_recip still hold that triangle's results.
+            // The two gate terms are mutually exclusive by construction: pv_ready
+            // is set only on PV_RUN->PV_HOLD, and this state is reached from
+            // S_TRI_SETUP only on the serial path, which is taken only when
+            // pv==PV_IDLE.
+            S_TRI_SWAIT: if (ts_valid || pv_ready) begin
+                // guard against registered bbox-max / bbox-neg (set at S_TRI_SETUP
+                // on the serial path, or copied from pv_maxx/pv_maxy/pv_bbox_neg
+                // by S_TRI_NEXT's fast path -- either way a REGISTER, never the
+                // raw-vertex compare cloud)
+                if (ts_degenerate || tri_bbox_neg || (ts_ox > tri_maxx) || (ts_oy > tri_maxy)) begin
+                    pv_ready <= 1'b0;   // [W3 §2b] consumed (reject path)
                     state<=S_TRI_NEXT;
+                end
                 else begin
+                    pv_ready <= 1'b0;   // [W3 §2b] consumed (seed path)
                     tri_ox <= ts_ox;
                     tri_px <= ts_ox;      tri_py <= ts_oy;
                     row_px <= ts_ox;
@@ -1601,6 +1865,17 @@ module blitter_top #(
                     Wu<=ts_Wu_0; Wv<=ts_Wv_0; Wr<=ts_Wr_0; Wg<=ts_Wg_0; Wb<=ts_Wb_0; Wa<=ts_Wa_0;
                     row_Wu<=ts_Wu_0; row_Wv<=ts_Wv_0; row_Wr<=ts_Wr_0;
                     row_Wg<=ts_Wg_0; row_Wb<=ts_Wb_0; row_Wa<=ts_Wa_0;
+                    // [W3 §2b] copy the walk constants out of blt_tri_setup so the
+                    // module is free from this cycle on. Loaded by NBA here, first
+                    // read on the next cycle (the walk's first cycle) -- the walk
+                    // never reads them in the seed cycle itself, so this is exact.
+                    tw_dw0dx<=ts_dw0dx; tw_dw1dx<=ts_dw1dx; tw_dw2dx<=ts_dw2dx;
+                    tw_dw0dy<=ts_dw0dy; tw_dw1dy<=ts_dw1dy; tw_dw2dy<=ts_dw2dy;
+                    tw_dWudx<=ts_dWudx; tw_dWvdx<=ts_dWvdx; tw_dWrdx<=ts_dWrdx;
+                    tw_dWgdx<=ts_dWgdx; tw_dWbdx<=ts_dWbdx; tw_dWadx<=ts_dWadx;
+                    tw_dWudy<=ts_dWudy; tw_dWvdy<=ts_dWvdy; tw_dWrdy<=ts_dWrdy;
+                    tw_dWgdy<=ts_dWgdy; tw_dWbdy<=ts_dWbdy; tw_dWady<=ts_dWady;
+                    tw_area_recip<=ts_area_recip;
                     // [pipeline stage 3a] arm both sub-FSMs empty for this triangle
                     // (the qword cache persists across triangles in a command; it is
                     // dropped only at the per-command STAGE barrier, not here.)
@@ -1696,7 +1971,7 @@ module blitter_top #(
                         pxs <= tri_px; pys <= tri_py;
                         wu_q <= Wu; wv_q <= Wv; wr_q <= Wr;
                         wg_q <= Wg; wb_q <= Wb; wa_q <= Wa;
-                        recip_q <= $signed(ts_area_recip);
+                        recip_q <= $signed(tw_area_recip);
                         // A span may run to the bbox's right edge. Do NOT step past it
                         // (the cursor must stay inside the bbox so the seek's clamps and
                         // the accumulator range are unchanged). [pipeline stage 3b] the
@@ -2157,12 +2432,50 @@ module blitter_top #(
             // Triangle done: advance to the next triangle, else finish the command.
             S_TRI_NEXT: begin
                 if (tri_idx + 16'd1 < tri_count) begin
-                    tri_idx <= tri_idx + 16'd1;
-                    state<=S_TRI_VFETCH;
-                end else begin
+                    // [W3 §2b] fast path: the prefetch already fetched this
+                    // triangle's vertices and ran its setup during the previous
+                    // triangle's walk, so ts_* hold its outputs and the bbox is
+                    // pre-registered in pv_*. Seed straight from them.
+                    if (pv == PV_HOLD) begin
+                        tri_idx      <= tri_idx + 16'd1;
+                        tri_maxx     <= pv_maxx;
+                        tri_maxy     <= pv_maxy;
+                        tri_bbox_neg <= pv_bbox_neg;
+                        pv           <= PV_IDLE;
+                        state        <= S_TRI_SWAIT;
+                    end else if (pv == PV_IDLE) begin
+                        // No prefetch ran (first triangle of a command, or the
+                        // previous triangle was rejected in S_TRI_SWAIT and so
+                        // never entered S_TRI_PIX where the prefetch arms): the
+                        // original serial path, unchanged.
+                        tri_idx <= tri_idx + 16'd1;
+                        state   <= S_TRI_VFETCH;
+                    end
+                    // else: a prefetch is mid-flight (PV_ISSUE/WAIT/DECV/START/
+                    // RUN). HOLD here. Leaving now would let the main FSM issue
+                    // bm_rd with a prefetch read still outstanding, and the two
+                    // responses are indistinguishable on mem_dout_ready.
+                    //
+                    // This hold cannot deadlock: the prefetch block below is
+                    // gated on S_TRI_PIX *or S_TRI_NEXT* precisely so it keeps
+                    // ticking here, and none of its non-quiescent states waits on
+                    // `state` -- PV_WAIT waits on the bus (bounded by its reissue
+                    // watchdog), PV_START on ts_ready (high: this triangle's setup
+                    // finished before its walk began), PV_RUN on ts_valid (~54
+                    // cycles). So pv always reaches PV_HOLD and this arm retires.
+                end else if (pv == PV_IDLE || pv == PV_HOLD) begin
+                    // Command done. Same quiescence requirement: never leave the
+                    // TRILIST walk with a prefetch read outstanding. (PV_HOLD is
+                    // accepted as well as PV_IDLE only for symmetry -- the arming
+                    // guard means no prefetch is ever started for a non-existent
+                    // triangle tri_count, so on the last triangle pv is PV_IDLE.)
                     tri_busy <= 1'b0;
-                    state<=S_NEXT_CMD;
+                    pv       <= PV_IDLE;
+                    pv_ready <= 1'b0;
+                    state    <= S_NEXT_CMD;
                 end
+                // else: mid-flight prefetch on the command-done path. Same hold,
+                // same liveness argument.
             end
 
             S_NEXT_CMD: begin cmd_idx<=cmd_idx+1; state<=S_FETCH; end
@@ -2195,6 +2508,40 @@ module blitter_top #(
             S_WR_COVPX: begin
                 bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_FLAGS;
                 bm_din<={perf_covered_px, 32'd0};
+                wr_ret<=S_WR_NOTICE;   // [W3 Stage C] then the notice pair, then C_DONE
+                state<=S_WR_WAIT;
+            end
+            // [W3 Stage C] Publish the `notice` attribution pair to the spare HIGH 32 of
+            // C_CMDCOUNT. be=0xF0 preserves the host-written command count in the LOW
+            // word: the host writes it as a 32-bit store at qw*8 (raster_backend_mfgpu.cpp
+            // mf_ctrl_wr), so producer and consumer never touch the same bytes — exactly
+            // the split C_FLAGS.hi already ships. C_CMDCOUNT.hi is the last spare high
+            // word: C_FLAGS.hi=covered_px, C_DONE.hi=frame, C_STATUS.hi=texwait,
+            // C_SRCSEL.hi=tri, and control-block qword 8 aliases the ring base.
+            //
+            // FRAME PAIRING (the whole value of the instrument). The host reads this word
+            // the moment it observes C_DONE. perf_snap_cyc was last written when the poll
+            // loop resumed after the PREVIOUS frame; perf_detect_cyc was written in
+            // S_CHK_NEW at the START of THIS frame. Nothing rewrites either between there
+            // and here (snap re-arms only in S_WR_DONE, which is strictly after this
+            // state). So the pair the host reads is the contiguous
+            // C_DONE(N-1) -> work-seen(N) window: precisely the delay that THIS frame's
+            // submit experienced. Sequenced BEFORE S_WR_DONE because C_DONE is the host's
+            // release barrier — anything published after it is read one frame stale, which
+            // for this counter would attribute the wrong frame's dead window. Guarded by
+            // tb_perf_publish_order.
+            //
+            // Units: cycles >> 3, each field saturating at 16'hFFFF = 524280 cyc = 5.33 ms
+            // at 98.4375 MHz. Expected magnitudes are ~0.335 ms snap (~33k cyc, ~4.1k in
+            // eighths) and a small detect, so both sit two orders inside the field; the
+            // saturation exists so a WEDGE (S_SNAP_DRAIN has parked for 18 s before) reads
+            // as a pegged 0xFFFF rather than silently wrapping into a plausible value.
+            // The [31:3] > 0xFFFF test is what makes that true: [18:3] alone would wrap.
+            S_WR_NOTICE: begin
+                bm_wr<=1; bm_be<=8'hF0; bm_addr<=`BLTCTRL_QW+`C_CMDCOUNT;
+                bm_din<={ (perf_snap_cyc[31:3]   > 29'h0000FFFF) ? 16'hFFFF : perf_snap_cyc[18:3],
+                          (perf_detect_cyc[31:3] > 29'h0000FFFF) ? 16'hFFFF : perf_detect_cyc[18:3],
+                          32'd0 };
                 wr_ret<=S_WR_DONE;
                 state<=S_WR_WAIT;
             end
@@ -2213,6 +2560,12 @@ module blitter_top #(
                 bm_wr<=1; bm_be<=8'hFF; bm_addr<=`BLTCTRL_QW+`C_DONE;
                 bm_din<={perf_frame_cyc, submit_reg};
                 wr_ret<=S_SNAP_WAIT; state<=S_WR_WAIT;
+                // [W3 Stage C] open the snap tail here, where the C_DONE write is handed
+                // to S_WR_WAIT. It therefore includes the bus-accept cycles for C_DONE
+                // itself, which is the conservative choice: the host cannot see C_DONE
+                // before it is accepted, so this can only OVER-state the dead window,
+                // never hide part of it. Closed on the next S_POLL_SUBMIT.
+                snap_run <= 32'd0; snap_counting <= 1'b1;
             end
             S_WR_STATUS: begin
                 // low32 = OSD mirror bits (bit0=osd_restart_pending, the sticky-latched
@@ -2333,6 +2686,95 @@ module blitter_top #(
                 else state <= wr_ret;
             default: state<=S_POLL_SUBMIT;
             endcase
+
+            // ── [W3 §2b] the prefetch engine ──────────────────────────────────
+            // Gated on state==S_TRI_PIX so its bm_* drive can never collide with
+            // the main FSM's: that is the only state in which the case above
+            // leaves bm_rd/bm_addr untouched while a triangle is being walked.
+            // Also ticks in S_TRI_NEXT so an in-flight prefetch can DRAIN -- that
+            // state issues no bm_* of its own either, and S_TRI_NEXT refuses to
+            // leave until pv is quiescent, so the two can never both drive the
+            // master. Placed AFTER the case so its NBAs win over the block-top
+            // `bm_rd<=1'b0` default (and over `tri_setup_start<=1'b0`).
+            if ((state == S_TRI_PIX) || (state == S_TRI_NEXT)) begin
+                case (pv)
+                // Arm only from S_TRI_PIX: a drain-only tick in S_TRI_NEXT must
+                // never START a new prefetch, or S_TRI_NEXT would re-arm itself
+                // the instant it went quiescent and never retire.
+                PV_IDLE: if ((state == S_TRI_PIX) && (tri_idx + 16'd1 < tri_count)) begin
+                    pv_base <= tri_entry_qw + (tri_idx + 16'd1)*16'd6;
+                    pv_k    <= 3'd0;
+                    pv      <= PV_ISSUE;
+                end
+                PV_ISSUE: begin
+                    bm_rd        <= 1'b1;
+                    bm_addr      <= pv_base + {29'd0, pv_k};
+                    pv_rd_issued <= 1'b0;
+                    pv           <= PV_WAIT;
+                end
+                // Byte-for-byte the S_RD_WAIT handshake, on its own registers:
+                // hold bm_rd until the bus accepts (~mem_busy), then await the
+                // response, with the same RW_WD_MAX reissue watchdog.
+                PV_WAIT: begin
+                    if (!pv_rd_issued) begin
+                        bm_rd <= 1'b1;                    // hold the request
+                        if (!mem_busy) pv_rd_issued <= 1'b1;
+                    end else if (mem_dout_ready) begin
+                        pv_qw[pv_k]  <= mem_dout;
+                        pv_rd_issued <= 1'b0;
+                        if (pv_k == 3'd5) pv <= PV_DECV;
+                        else begin pv_k <= pv_k + 3'd1; pv <= PV_ISSUE; end
+                    end else if (pv_wd == RW_WD_MAX) begin
+                        pv_rd_issued <= 1'b0;             // response lost: re-arm
+                        bm_rd        <= 1'b1;
+                        pv_wd        <= 22'd0;
+                        // rd_reissue_cnt is a saturating DIAGNOSTIC only (its sole
+                        // reader is the `dbg` bus, bits [22:15]); nothing uses it
+                        // for control, so the two requesters sharing one counter
+                        // is a deliberate "reissues since reset, either master".
+                        if (~&rd_reissue_cnt) rd_reissue_cnt <= rd_reissue_cnt + 8'd1;
+                    end
+                end
+                // Identical unpack to S_TRI_DECV. Writing tri_v* here is safe: the
+                // CURRENT triangle's setup latched its vertices at P1 on `start`
+                // and the walk reads only tw_*/w*/W*, never tri_v*. The only other
+                // consumer of tri_v* is the combinational tri_maxx_cl/tri_maxy_cl/
+                // tri_bbox_neg_c bbox cloud, which is sampled only at S_TRI_SETUP
+                // (serial path) and at PV_START (this path) -- never during a walk.
+                PV_DECV: begin
+                    tri_vx0<=pv_qw[0][15:0];  tri_vy0<=pv_qw[0][31:16];
+                    tri_vu0<=pv_qw[0][47:32]; tri_vv0<=pv_qw[0][63:48];
+                    tri_vr0<=pv_qw[1][7:0];   tri_vg0<=pv_qw[1][15:8];
+                    tri_vb0<=pv_qw[1][23:16]; tri_va0<=pv_qw[1][31:24];
+                    tri_vx1<=pv_qw[2][15:0];  tri_vy1<=pv_qw[2][31:16];
+                    tri_vu1<=pv_qw[2][47:32]; tri_vv1<=pv_qw[2][63:48];
+                    tri_vr1<=pv_qw[3][7:0];   tri_vg1<=pv_qw[3][15:8];
+                    tri_vb1<=pv_qw[3][23:16]; tri_va1<=pv_qw[3][31:24];
+                    tri_vx2<=pv_qw[4][15:0];  tri_vy2<=pv_qw[4][31:16];
+                    tri_vu2<=pv_qw[4][47:32]; tri_vv2<=pv_qw[4][63:48];
+                    tri_vr2<=pv_qw[5][7:0];   tri_vg2<=pv_qw[5][15:8];
+                    tri_vb2<=pv_qw[5][23:16]; tri_va2<=pv_qw[5][31:24];
+                    pv <= PV_START;
+                end
+                // ts_ready is high here in every expected case (the current
+                // triangle's setup completed before its walk began), but the pulse
+                // is gated on it anyway: blt_tri_setup drops a start it cannot
+                // accept, and a dropped start here would park the walk in
+                // S_TRI_NEXT forever.
+                PV_START: if (ts_ready) begin
+                    tri_setup_start <= 1'b1;
+                    pv_maxx <= tri_maxx_cl; pv_maxy <= tri_maxy_cl;
+                    pv_bbox_neg <= tri_bbox_neg_c;
+                    pv <= PV_RUN;
+                end
+                PV_RUN: if (ts_valid) begin
+                    pv_ready <= 1'b1;
+                    pv       <= PV_HOLD;
+                end
+                PV_HOLD: ;   // ts_* hold the next triangle; S_TRI_NEXT consumes them
+                default: pv <= PV_IDLE;
+                endcase
+            end
         end
     end
 

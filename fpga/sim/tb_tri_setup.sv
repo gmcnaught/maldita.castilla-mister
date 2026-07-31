@@ -67,6 +67,7 @@ module tb_tri_setup;
   // ---- setup under test (registered; start->valid) ----
   reg  start=0;
   wire valid, degenerate;
+  wire ts_ready;
   wire [15:0] ox, oy;
   wire signed [47:0] area;
   wire        [47:0] area_recip;
@@ -83,7 +84,7 @@ module tb_tri_setup;
     .vr1(VR1),.vg1(VG1),.vb1(VB1),.va1(VA1),
     .vr2(VR2),.vg2(VG2),.vb2(VB2),.va2(VA2),
     .tex_w(TEX_W),.tex_h(TEX_H),
-    .valid(valid),.degenerate(degenerate),.ox(ox),.oy(oy),
+    .valid(valid),.degenerate(degenerate),.ready(ts_ready),.ox(ox),.oy(oy),
     .area(area),.area_recip(area_recip),
     .w0_0(w0_0),.w1_0(w1_0),.w2_0(w2_0),
     .dw0dx(dw0dx),.dw1dx(dw1dx),.dw2dx(dw2dx),
@@ -135,6 +136,53 @@ module tb_tri_setup;
       nsamp = nsamp + 1;
     end
   end endtask
+
+  // [W3 §2b] The ready contract: a start pulsed while !ready must be IGNORED (the
+  // module's internal guard already does this), ready must be low from the
+  // accepted start until the outputs are valid, AND ready must be back high on
+  // the EXACT cycle valid rises. Task 7's prefetch engine pulses the next start
+  // the moment it observes valid; a ready that lagged valid by even one cycle
+  // would silently drop that start and stall the walk forever.
+  task automatic check_ready_contract;
+    integer guard;
+    begin
+      // idle => ready
+      @(posedge clk);
+      if (ts_ready !== 1'b1) begin
+        $display("RESULT: FAIL (ready low while idle)"); $finish;
+      end
+      // accept a start, then ready must fall and stay low until valid
+      start <= 1'b1; @(posedge clk); start <= 1'b0;
+      @(posedge clk);
+      if (ts_ready !== 1'b0) begin
+        $display("RESULT: FAIL (ready still high one cycle after an accepted start)");
+        $finish;
+      end
+      guard = 0;
+      while (!valid && guard < 200) begin
+        if (ts_ready !== 1'b0) begin
+          $display("RESULT: FAIL (ready rose at cycle %0d before valid)", guard);
+          $finish;
+        end
+        @(posedge clk); guard = guard + 1;
+      end
+      if (guard >= 200) begin
+        $display("RESULT: FAIL (no valid within 200 cycles)"); $finish;
+      end
+      // Positively assert the property the next task depends on. The while
+      // loop above only ever checked ready==0 BEFORE valid was observed and
+      // exits the instant valid reads 1 — with no intervening @(posedge clk) —
+      // so `ts_ready` read here samples the SAME cycle as the `valid` that
+      // just broke the loop, not the cycle after it. That loop would happily
+      // tolerate a regression that held ready low for one extra cycle past
+      // valid; this check would not.
+      if (ts_ready !== 1'b1) begin
+        $display("RESULT: FAIL (ready not high on the same cycle valid rose -- a consumer that issues the next start as soon as it observes valid would have that start silently dropped)");
+        $finish;
+      end
+      $display("  ready contract OK (valid after %0d cycles, ready high same cycle as valid)", guard);
+    end
+  endtask
 
   // run one full triangle case: load verts+attrs into the shared regs, pulse
   // start, wait for valid, check degenerate against expectation, and (unless
@@ -233,6 +281,10 @@ module tb_tri_setup;
       16'd8,16'd8,
       84,92,3, 1'b0);
 
+    // ---- ready contract: reuse case 1's triangle (still loaded in VX0.. above)
+    //      to check that `ready` tracks the start-acceptance guard one-for-one.
+    check_ready_contract;
+
     // ---- case 2: CW winding (signed area<0), so blt_tri_setup's vertex-swap
     //      normalize path runs. v0=(60,60), v1=(60,140), v2=(140,60): going
     //      v0->v1->v2 is clockwise on screen (edgef<0), unlike case 1's CCW
@@ -258,6 +310,14 @@ module tb_tri_setup;
       8'd0,8'd0,8'd0,8'd0,
       16'd8,16'd8,
       0,0,1, 1'b1);
+
+    // ---- ready contract on the DEGENERATE path: case 3's triangle is still
+    //      loaded (still in VX0.. above). Unlike case 1 (and case 2), where
+    //      `valid` is driven by the divider finishing, a degenerate triangle's
+    //      `valid` comes from the Stage-3 MAC draining (mac_degen) with the
+    //      divider never started at all -- a distinct RTL path that must
+    //      independently satisfy ready-rises-with-valid.
+    check_ready_contract;
 
     // ---- case 4: envelope worst-case. Near-full-screen triangle (~300x220px:
     //      v0=(10,10), v1=(310,10), v2=(160,230), all well within the 16-bit-
