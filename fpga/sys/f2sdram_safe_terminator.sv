@@ -54,14 +54,7 @@
 //
 module f2sdram_safe_terminator #(
   parameter     DATA_WIDTH = 64,
-  parameter     BURSTCOUNT_WIDTH = 8,
-  // Declared here rather than in the body: the port list below uses them, and
-  // Icarus (unlike Quartus) will not bind an identifier used before it is
-  // declared. Moving them makes the module simulatable without changing its
-  // synthesised shape -- localparams are not overridable, so the existing
-  // positional `#(64, 8)` instantiations in sysmem.sv are unaffected.
-  localparam    BYTEENABLE_WIDTH = DATA_WIDTH/8,
-  localparam    ADDRESS_WITDH    = 32-$clog2(BYTEENABLE_WIDTH)
+  parameter     BURSTCOUNT_WIDTH = 8
 ) (
 	// clk should be the same as one provided to f2sdram port
 	// clk should not be stop when reset is asserted
@@ -71,30 +64,40 @@ module f2sdram_safe_terminator #(
 	input         rst_req_sync,
 
 	// Master port: connecting to Alavon-MM slave(f2sdram)
-	input                               waitrequest_master,
+	// The two derived widths are spelled out inline rather than referring to the
+	// BYTEENABLE_WIDTH / ADDRESS_WITDH localparams declared in the body below.
+	// Neither tool accepts the alternatives: Quartus Lite 17.0 rejects
+	// `localparam` in the parameter port list outright (Error 10170), and Icarus
+	// will not bind a body localparam used up here. Inline expressions are the
+	// only spelling both parsers take. They are identical by construction --
+	// BYTEENABLE_WIDTH = DATA_WIDTH/8, ADDRESS_WITDH = 32-$clog2(that).
+	input                                          waitrequest_master,
 	// `logic` on the five signals driven from the always_comb bus mux at the
 	// bottom of this file: a plain `output` is an implicit wire, which is not a
 	// legal procedural l-value. Quartus accepts it; simulators do not.
-	output logic [BURSTCOUNT_WIDTH-1:0] burstcount_master,
-	output logic    [ADDRESS_WITDH-1:0] address_master,
-	input              [DATA_WIDTH-1:0] readdata_master,
-	input                               readdatavalid_master,
-	output logic                        read_master,
-	output             [DATA_WIDTH-1:0] writedata_master,
-	output logic [BYTEENABLE_WIDTH-1:0] byteenable_master,
-	output logic                        write_master,
+	output logic          [BURSTCOUNT_WIDTH-1:0]   burstcount_master,
+	output logic [(32-$clog2(DATA_WIDTH/8))-1:0]   address_master,
+	input                      [DATA_WIDTH-1:0]    readdata_master,
+	input                                          readdatavalid_master,
+	output logic                                   read_master,
+	output                     [DATA_WIDTH-1:0]    writedata_master,
+	output logic          [(DATA_WIDTH/8)-1:0]     byteenable_master,
+	output logic                                   write_master,
 
 	// Slave port: connecting to Alavon-MM master(user logic)
-	output                        waitrequest_slave,
-	input  [BURSTCOUNT_WIDTH-1:0] burstcount_slave,
-	input     [ADDRESS_WITDH-1:0] address_slave,
-	output       [DATA_WIDTH-1:0] readdata_slave,
-	output                        readdatavalid_slave,
-	input                         read_slave,
-	input        [DATA_WIDTH-1:0] writedata_slave,
-	input  [BYTEENABLE_WIDTH-1:0] byteenable_slave,
-	input                         write_slave
+	output                                         waitrequest_slave,
+	input                 [BURSTCOUNT_WIDTH-1:0]   burstcount_slave,
+	input        [(32-$clog2(DATA_WIDTH/8))-1:0]   address_slave,
+	output                     [DATA_WIDTH-1:0]    readdata_slave,
+	output                                         readdatavalid_slave,
+	input                                          read_slave,
+	input                      [DATA_WIDTH-1:0]    writedata_slave,
+	input                 [(DATA_WIDTH/8)-1:0]     byteenable_slave,
+	input                                          write_slave
 );
+
+localparam BYTEENABLE_WIDTH = DATA_WIDTH/8;
+localparam ADDRESS_WITDH    = 32-$clog2(BYTEENABLE_WIDTH);
 
 /*
 * Capture init reset deaseert
