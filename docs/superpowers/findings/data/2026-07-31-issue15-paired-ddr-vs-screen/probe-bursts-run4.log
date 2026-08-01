@@ -1,0 +1,68 @@
+=== scene run: ingame-stage1 (sword every 2s from t=20s), 300s window, godmode ===
+burst 1   maxNB0=0    maxNB214=0    | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=0 blackout=0 neighbors-blank=20
+burst 2   maxNB0=288  maxNB214=36   | Test A (row214==row0 dup): usable=20 dup=0 row0-blank=0 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+   ^ row0 lit — verdicts:      VERDICT A: DDR-CLEAN (Test A: N=20 usable, 0/20 duplicated - DDR has no duplicate -> created during scanout, go to Task 3)
+     VERDICT B: DDR-CLEAN (Test B: N=20 usable, 0/20 show a blackout - row 214 is intact in DDR whenever its neighbors are lit; if the on-screen defect persists it is created downstream, go to Task 3)
+burst 3   maxNB0=0    maxNB214=0    | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=0 blackout=0 neighbors-blank=20
+burst 4   maxNB0=52   maxNB214=288  | Test A (row214==row0 dup): usable=1 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=1 blackout=0 neighbors-blank=19
+   ^ row0 lit — verdicts:      VERDICT A: DDR-CLEAN (Test A: N=1 usable, 0/1 duplicated - DDR has no duplicate -> created during scanout, go to Task 3) [LOW-CONFIDENCE: below the 8-sample floor (MIN_USABLE=8); re-run for more samples before branching a task on this]
+     VERDICT B: DDR-CLEAN (Test B: N=1 usable, 0/1 show a blackout - row 214 is intact in DDR whenever its neighbors are lit; if the on-screen defect persists it is created downstream, go to Task 3) [LOW-CONFIDENCE: below the 8-sample floor (MIN_USABLE=8); re-run for more samples before branching a task on this]
+burst 5   maxNB0=52   maxNB214=288  | Test A (row214==row0 dup): usable=20 dup=0 row0-blank=0 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+   ^ row0 lit — verdicts:      VERDICT A: DDR-CLEAN (Test A: N=20 usable, 0/20 duplicated - DDR has no duplicate -> created during scanout, go to Task 3)
+     VERDICT B: DDR-CLEAN (Test B: N=20 usable, 0/20 show a blackout - row 214 is intact in DDR whenever its neighbors are lit; if the on-screen defect persists it is created downstream, go to Task 3)
+burst 6   maxNB0=52   maxNB214=288  | Test A (row214==row0 dup): usable=20 dup=0 row0-blank=0 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+   ^ row0 lit — verdicts:      VERDICT A: DDR-CLEAN (Test A: N=20 usable, 0/20 duplicated - DDR has no duplicate -> created during scanout, go to Task 3)
+     VERDICT B: DDR-CLEAN (Test B: N=20 usable, 0/20 show a blackout - row 214 is intact in DDR whenever its neighbors are lit; if the on-screen defect persists it is created downstream, go to Task 3)
+burst 7   maxNB0=0    maxNB214=0    | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=0 blackout=0 neighbors-blank=20
+burst 8   maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 9   maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 10  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 11  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 12  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 13  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 14  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 15  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 16  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 17  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 18  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 19  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 20  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 21  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 22  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 23  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 24  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 25  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 26  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 27  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 28  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 29  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 30  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 31  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 32  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 33  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 34  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 35  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 36  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 37  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 38  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 39  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 40  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 41  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 42  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 43  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 44  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 45  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 46  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 47  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 48  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 49  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 50  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 51  maxNB0=0    maxNB214=0    | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=0 blackout=0 neighbors-blank=20
+burst 52  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=19 | Test B (row214 blackout vs 213/215): usable=19 blackout=0 neighbors-blank=0
+burst 53  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 54  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+burst 55  maxNB0=0    maxNB214=288  | Test A (row214==row0 dup): usable=0 dup=0 row0-blank=20 | Test B (row214 blackout vs 213/215): usable=20 blackout=0 neighbors-blank=0
+
+=== total probe hits: 0 ===
+Maldita Castilla1
+pulled       25 screenshots
