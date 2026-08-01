@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Tests for fpga/scripts/check_quartus_gates.sh. Builds synthetic report
+# Tests for scripts/ci/check_quartus_gates.sh. Builds synthetic report
 # fixtures in a temp dir — no Quartus required. Pure bash, no deps, exit 0/1,
 # matching the other scripts/tests/test_*.sh files.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-GATE="$(cd "$HERE/../.." && pwd)/fpga/scripts/check_quartus_gates.sh"
+GATE="$(cd "$HERE/../.." && pwd)/scripts/ci/check_quartus_gates.sh"
 PASS=0; FAIL=0
 
 run_case() {
