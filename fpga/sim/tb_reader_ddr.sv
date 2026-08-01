@@ -530,9 +530,15 @@ module tb_reader_ddr;
             && u_reader.hcol < HACT && tim_vc < 9'(VACT)) begin
             if (row_pix[tim_vc] == 0) row_bsrc0[tim_vc] = bank_src[tim_vc[0]];
             row_pix[tim_vc]  = row_pix[tim_vc] + 1;
+            // The row-0 comparison is only evaluated when the pixel FAILED its own row —
+            // a second bufpix() call per pixel per frame is the single most expensive thing
+            // in this bench (the run past the beacon is ~5.5 M cycles). Equivalent: the
+            // classifier below only consults row_dup0 under `row_dup0[rr] == row_pix[rr]`,
+            // i.e. EVERY pixel of the row was wrong, and a pixel that matched its own row
+            // was never one of those.
             if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc))
                 row_ok[tim_vc] = row_ok[tim_vc] + 1;
-            if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, 0))
+            else if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, 0))
                 row_dup0[tim_vc] = row_dup0[tim_vc] + 1;
             row_bsrc[tim_vc] = bank_src[tim_vc[0]];
         end
@@ -595,6 +601,59 @@ module tb_reader_ddr;
             anchor_events   = anchor_events + 1;
             if (anchor_first_row < 0) anchor_first_row = u_reader.vcount_ddr;
             anchor_last_row = u_reader.vcount_ddr;
+        end
+    end
+
+    // ── (i)/(j) [#15] FRAME-RESTART DISPATCH ─────────────────────────────────────
+    // A frame restart is the ST_CHECK_CTRL -> ST_READ_LINE transition (both the new-frame
+    // and the stale-frame branch; ST_PAINT is compiled out). Three things worth counting
+    // that dup_events cannot see:
+    //   restarts_active   — a restart dispatched with vblank_ddr LOW, i.e. INSIDE active
+    //                       video. That is the #15 mechanism itself (it refills bank 0 with
+    //                       line 0 while the display is still scanning). Must be 0.
+    //   frames_no_restart — a frame in which NO restart was dispatched at all. The reader
+    //                       re-scans the previous buffer for another frame: the buffer flip
+    //                       AND the stale_vblank_count blank-to-black watchdog are both
+    //                       deferred. Reachable when the FSM sits in ST_WAIT_DISPLAY across
+    //                       the whole vblank (that state only leaves on a !vblank new_line),
+    //                       so ST_IDLE is never visited there and new_frame_pending is not
+    //                       serviced — the ST_WAIT_DISPLAY hardening is aimed at exactly this.
+    //   park_wd           — frame boundaries reached with the FSM in ST_WAIT_DISPLAY, i.e.
+    //                       the entry condition for the above.
+    // NOTE on sampling: reading u_reader.state from another always block at the same posedge
+    // yields its PRE-edge value, so st_q4/state_read is a 1-cycle-late edge detect — and
+    // vb_q4/vc_q4 are therefore the vblank/row that were live while the FSM sat in
+    // ST_CHECK_CTRL, which is what we want to attribute the dispatch to.
+    integer restarts = 0, restarts_active = 0, restart_first_row = -1;
+    integer frames_no_restart = 0, no_restart_first = -1, restarts_this_frame = 0;
+    integer park_wd = 0, chk_frame = 0;
+    reg       seen_restart = 1'b0;
+    reg [4:0] st_q4 = 5'd0;
+    reg       vb_q4 = 1'b0;
+    reg [8:0] vc_q4 = 9'd0;
+    reg       nf_q4 = 1'b0;
+    always @(posedge clk) begin
+        st_q4 <= u_reader.state;
+        vb_q4 <= u_reader.vblank_ddr;
+        vc_q4 <= tim_vc;
+        nf_q4 <= tim_nf;
+        if (!reset && st_q4 == 5'd3 /*ST_CHECK_CTRL*/ && u_reader.state == 5'd4 /*ST_READ_LINE*/) begin
+            restarts            = restarts + 1;
+            restarts_this_frame = restarts_this_frame + 1;
+            seen_restart        = 1'b1;
+            if (!vb_q4) begin
+                restarts_active = restarts_active + 1;
+                if (restart_first_row < 0) restart_first_row = vc_q4;
+            end
+        end
+        if (!reset && tim_nf && !nf_q4) begin
+            if (u_reader.state == 5'd7 /*ST_WAIT_DISPLAY*/) park_wd = park_wd + 1;
+            if (seen_restart && restarts_this_frame == 0) begin
+                frames_no_restart = frames_no_restart + 1;
+                if (no_restart_first < 0) no_restart_first = chk_frame;
+            end
+            restarts_this_frame = 0;
+            chk_frame = chk_frame + 1;
         end
     end
 
@@ -678,6 +737,9 @@ module tb_reader_ddr;
                      DDR_G, DDR_B, STALL_LEN, STALL_ROW, BEACON_ROW, dup_events, dup_first_row,
                      dup_first_frame, alias_events, bad_rows_total, collide_errs, anchor_events,
                      anchor_first_row, anchor_last_row, addr_errs, data_errs, mon_frame);
+            $display("DIAG RESTART restarts=%0d active=%0d active_first_row=%0d frames_no_restart=%0d first=%0d park_wd=%0d",
+                     restarts, restarts_active, restart_first_row, frames_no_restart,
+                     no_restart_first, park_wd);
             $display("DIAG DONE");
         end
     endtask
@@ -774,9 +836,13 @@ module tb_reader_ddr;
                      beacon_wait);
             $fatal;
         end
-        $display("BEACON: fired by frame %0d (beacon_cnt=%0d) — running 3 more frames",
+        $display("BEACON: fired by frame %0d (beacon_cnt=%0d) — running 2 more frames",
                  mon_frame, u_reader.beacon_cnt);
-        wait_frames(3);
+        // 2 frames, not 3: the fire is serviced at the ST_IDLE park of the frame in progress
+        // and the displaced restart lands in the NEXT frame, so two boundaries after the
+        // beacon_cnt observation covers the defect frame. Verified: the pre-fix RTL still
+        // FAILs this gate naming row 214 (see .superpowers/sdd/task-4-report.md).
+        wait_frames(2);
 
         // [#15] every active row must have been orientation-checked. A row that the
         // pacing gate skipped is a hole in the test, and rows 214/215 are precisely the
@@ -837,6 +903,17 @@ module tb_reader_ddr;
         // fix that trades row 214 for an underflow shows up as anchors > 0.
         $display("ROWPROV: dup_events=%0d dup_row=%0d dup_frame=%0d bad_rows=%0d anchors=%0d",
                  dup_events, dup_first_row, dup_first_frame, bad_rows_total, anchor_events);
+        // (i)/(j) [#15] GATING: no restart may be dispatched inside active video (the defect's
+        // mechanism, independent of whether a row happened to show it), and no frame may pass
+        // without one (the ST_WAIT_DISPLAY park — the restart deferred a whole frame).
+        $display("RESTART: restarts=%0d active=%0d active_first_row=%0d frames_no_restart=%0d first=%0d park_wd=%0d",
+                 restarts, restarts_active, restart_first_row, frames_no_restart,
+                 no_restart_first, park_wd);
+        if (restarts_active || frames_no_restart) begin
+            $display("RESULT: FAIL — frame-restart dispatch: %0d restart(s) inside active video (first at row %0d), %0d frame(s) with no restart (first frame %0d)",
+                     restarts_active, restart_first_row, frames_no_restart, no_restart_first);
+            $fatal;
+        end
         if (dup_events || bad_rows_total) begin
             $display("RESULT: FAIL — displayed-row provenance: row %0d of frame %0d displayed ROW 0's content (dup_events=%0d), bad_rows=%0d",
                      dup_first_row, dup_first_frame, dup_events, bad_rows_total);

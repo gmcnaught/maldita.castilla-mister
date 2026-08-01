@@ -867,7 +867,7 @@ always @(posedge ddr_clk) begin
                 // [#15] RESTART GATE — a frame restart may only be dispatched during vblank.
                 // Both branches below re-anchor the scan to line 0 (display_line <= 0 ->
                 // ST_READ_LINE). The fill writes bank display_line[0] (lb_waddr, :562) and the
-                // display reads bank vcount[0] (:1050), so a line-0 fill dispatched inside
+                // display reads bank vcount[0] (:1102), so a line-0 fill dispatched inside
                 // active video is scanned out by the next EVEN row — the device symptom "row
                 // 214 shows row 0's pixels" (issue #15, findings 2026-07-31).
                 //
@@ -913,7 +913,13 @@ always @(posedge ddr_clk) begin
                     state              <= BLT_PAINT_TEST ? ST_PAINT : ST_READ_LINE;
                 end
                 else if (first_frame_loaded) begin
-                    // Stale frame -- re-read previous buffer
+                    // Stale frame -- re-read previous buffer.
+                    // [#15] CADENCE NOTE: this state is now only reached during vblank (the
+                    // restart gate above), so stale_vblank_count advances at most ONCE per
+                    // vblank and the blank-to-black watchdog below is exactly ~30 displayed
+                    // frames (~0.5 s), matching the counter's name. Before the gate, a
+                    // mid-frame ST_CHECK_CTRL visit could also increment it, so the watchdog
+                    // could fire in fewer than 30 vblanks. Behaviour change, deliberate.
                     if (stale_vblank_count < 5'd30)
                         stale_vblank_count <= stale_vblank_count + 5'd1;
                     if (stale_vblank_count >= 5'd29)
@@ -1023,6 +1029,28 @@ always @(posedge ddr_clk) begin
                     end
                     state <= ST_READ_LINE;
                 end
+                // [#15] VBLANK ESCAPE — companion to the ST_CHECK_CTRL restart gate.
+                // The exit above needs a !vblank new_line, so a frame whose last fetch
+                // finished INSIDE vblank parks here for all 46 blanking lines: ST_IDLE is
+                // never visited, the latched new_frame_pending is never serviced, and the
+                // restart gate then correctly refuses the belated mid-frame restart — so the
+                // buffer flip, stale_vblank_count and the blank-to-black watchdog all slip a
+                // whole frame. Reachable whenever a line fetch outlives its line (~62 us),
+                // i.e. sustained f2h starvation; the pre-a8512e5 WORK->DDR copy could starve
+                // this reader ~158 us. Measured with a 2-line-late line-214 response
+                // (+DEFER_LINE=214 +DEFER_CYC=3000): 214 stale rows and one frame with no
+                // restart at all; with this escape, 2 and none.
+                //
+                // Qualified on new_frame_pending, NOT on vblank alone: the line-0 preload
+                // ALSO lands in ST_WAIT_DISPLAY during vblank (ST_LINE_DONE routes here for
+                // every line but the last), and a bare `vblank_ddr` exit would strand the
+                // frame in ST_IDLE — which has no path back to ST_READ_LINE — leaving the
+                // whole frame unfetched. new_frame_pending is set only by a frame boundary
+                // that no ST_IDLE/ST_POLL_CTRL visit has consumed, which is exactly the park
+                // and never the preload (that boundary's pending bit was just consumed to
+                // dispatch the restart).
+                else if (vblank_ddr && new_frame_pending)
+                    state <= ST_IDLE;
             end
 
 
