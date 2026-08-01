@@ -7,10 +7,18 @@
 > row 0's content at row 214 while the DDR framebuffer's row 214 is intact in the same window.
 > **Take branch A (Task 3). Task 4 (producer side) is closed — `comp_fb_dma`/the compositor are
 > exonerated.** Task 2 found the reader clean for all 216 rows under an ideal-latency DDR model with
-> zero bank collisions, so the live work is **Task 3 Step 2**. Full evidence and the corrected symptom
-> statement: `docs/superpowers/findings/2026-07-31-issue-15-row-214.md`. Read that before this plan —
-> it supersedes several assumptions below, including the Phase 1 section's applicability to the build
-> the issue was filed against.
+> zero bank collisions. **Task 3 Step 2 is also complete: the defect is REPRODUCED in sim** (commit
+> `cef0b54`, `fpga/sim/sweep_reader_ddr.sh run +FRAMES=16` → `dup_row=214 bad_rows=0 elsewhere`), with
+> no injected delay and no injected event. The live work is now **writing the fix**.
+>
+> **The "Phase 1 findings" section below is RETRACTED — it is wrong.** It refuted the issue's
+> `ST_CHECK_CTRL` hypothesis; the issue was right. `ST_IDLE` is parked in **line 214's hblank** (not
+> 215 — the fetch runs a line ahead), `beacon_pending` is a live exit from it, and a beacon fire
+> displaces the frame restart so the *next* frame's restart lands at the end of row 213 and fills
+> bank 0 with line 0. Do not act on that section. The confirmed mechanism, the reproduction, and the
+> constraints any fix must satisfy are in
+> `docs/superpowers/findings/2026-07-31-issue-15-row-214.md`. Read that instead of this plan's
+> Phase 1.
 
 **Goal:** Find and fix the mechanism that makes display row 214 a byte-exact copy of row 0, with a sim test that fails before the fix and passes after.
 

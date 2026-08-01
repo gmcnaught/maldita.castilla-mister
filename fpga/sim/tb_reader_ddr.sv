@@ -162,8 +162,30 @@ module tb_reader_ddr;
     //                the display reaches STALL_ROW on frame STALL_FRAME (also freezes a
     //                burst mid-stream). Models a single long starvation event rather
     //                than a uniform per-access latency.
+    // ── [#15 Task 3b] UNTAGGED-BEAT-CAPTURE injectors ────────────────────────────
+    // The reader files every beat under whatever display_line is live when it
+    // arrives (`lb_waddr <= {display_line[0], beat_count}`, :562) — there is no tag
+    // matching a response to its request. These four knobs exercise every way a
+    // response can be misattributed. All off by default.
+    //
+    //   +DEFER_LINE=<n> +DEFER_CYC=<c>   hold the burst requested for display_line n
+    //                for c cycles before streaming it (a LATE response).
+    //   +DROP_LINE=<n> +DROP_BEATS=<k>   deliver only (72-k) beats of line n's burst,
+    //                so beat_count never reaches LINE_BURST and the reader ABANDONS
+    //                it via ST_WAIT_LINE's TIMEOUT_MAX escape.
+    //   +EXTRA_LINE=<n> +EXTRA_BEATS=<k> +EXTRA_DELAY=<d>   after line n's burst
+    //                completes, emit k more UNREQUESTED beats of line n's data d
+    //                cycles later (an OVER-delivering fabric); they land in whatever
+    //                ST_WAIT_LINE is live then.
+    //   +MISROUTE_LINE=<n> +MISROUTE_SRC=<m>  serve line n's request with line m's
+    //                DATA (a stale/mis-routed response — the pure untagged failure).
     integer DDR_G = 0, DDR_B = 0;
     integer STALL_LEN = 0, STALL_ROW = -1, STALL_FRAME = 3;
+    integer DEFER_LINE = -1, DEFER_CYC = 0;
+    integer DROP_LINE  = -1, DROP_BEATS = 0;
+    integer EXTRA_LINE = -1, EXTRA_BEATS = 0, EXTRA_DELAY = 0;
+    integer MISROUTE_LINE = -1, MISROUTE_SRC = 0;
+    integer INJ_FRAME = 5;   // all four injectors are ONE-SHOT, on this frame
     integer mon_frame = 0;   // monitor-side frame index (declared here: used by the model)
 
     // serve: on an accepted read (r_rd & ~busy) latch addr+cnt, stream cnt beats.
@@ -174,12 +196,21 @@ module tb_reader_ddr;
     integer    gap_cnt   = 0;      // inter-beat gap countdown
     integer    stall_cnt = 0;      // one-shot injected stall countdown
     reg        stall_armed = 1'b1;
+    integer    defer_cnt = 0;      // late-response countdown for THIS burst
+    integer    drop_n    = 0;      // beats withheld from THIS burst
+    reg [8:0]  req_line;           // display_line at acceptance (which line asked)
+    // stray/unrequested beat stream, independent of `serving`
+    integer    xtra_wait = 0, xtra_left = 0, xtra_i = 0;
+    reg [28:0] xtra_addr;
+    reg        xtra_armed = 1'b1;
+    reg        def_armed = 1'b1, drop_armed = 1'b1, mis_armed = 1'b1;
     assign r_ddr_busy = (grant_cnt != 0) || (stall_cnt != 0);
 
     always @(posedge clk) begin
         r_dout_ready <= 1'b0;
         if (reset) begin
             serving <= 1'b0; grant_cnt <= 0; gap_cnt <= 0; stall_cnt <= 0;
+            defer_cnt <= 0; drop_n <= 0; xtra_wait <= 0; xtra_left <= 0;
         end
         else begin
             if (grant_cnt != 0) grant_cnt <= grant_cnt - 1;
@@ -192,25 +223,76 @@ module tb_reader_ddr;
                 $display("DIAG stall injected len=%0d at frame=%0d row=%0d state=%0d dline=%0d",
                          STALL_LEN, mon_frame, tim_vc, u_reader.state, u_reader.display_line);
             end
-            if (!serving) begin
+
+            // ---- stray-beat emitter (has priority over the normal stream) ----
+            if (xtra_wait != 0) xtra_wait <= xtra_wait - 1;
+            else if (xtra_left != 0 && stall_cnt == 0) begin
+                r_dout       <= mem_read(xtra_addr + 29'(xtra_i));
+                r_dout_ready <= 1'b1;
+                xtra_i       <= xtra_i + 1;
+                xtra_left    <= xtra_left - 1;
+                if (xtra_left == 1)
+                    $display("DIAG XTRA %0d stray beats delivered, last at frame=%0d vc=%0d state=%0d dline=%0d",
+                             EXTRA_BEATS, mon_frame, tim_vc, u_reader.state, u_reader.display_line);
+            end
+            else if (!serving) begin
                 if (r_rd && !r_ddr_busy) begin
-                    rd_addr_l <= r_addr; rd_cnt_l <= r_burstcnt; rd_i <= 8'd0;
-                    gap_cnt   <= DDR_B;  serving  <= 1'b1;
+                    req_line  <= u_reader.display_line;
+                    rd_cnt_l  <= r_burstcnt; rd_i <= 8'd0;
+                    gap_cnt   <= DDR_B;      serving <= 1'b1;
+                    // MISROUTE: same beat count, DATA of a different source line.
+                    if (mis_armed && MISROUTE_LINE >= 0 && mon_frame >= INJ_FRAME
+                        && u_reader.display_line == 9'(MISROUTE_LINE)) begin
+                        mis_armed <= 1'b0;
+                        rd_addr_l <= 29'(int'(r_addr) + (MISROUTE_SRC - MISROUTE_LINE) * STRIDE);
+                        $display("DIAG MISROUTE serving dline=%0d with line %0d data (frame=%0d vc=%0d)",
+                                 MISROUTE_LINE, MISROUTE_SRC, mon_frame, tim_vc);
+                    end
+                    else rd_addr_l <= r_addr;
+                    if (def_armed && DEFER_LINE >= 0 && mon_frame >= INJ_FRAME
+                        && u_reader.display_line == 9'(DEFER_LINE)) begin
+                        defer_cnt <= DEFER_CYC; def_armed <= 1'b0;
+                    end else defer_cnt <= 0;
+                    if (drop_armed && DROP_LINE >= 0 && mon_frame >= INJ_FRAME
+                        && u_reader.display_line == 9'(DROP_LINE)) begin
+                        drop_n <= DROP_BEATS; drop_armed <= 1'b0;
+                    end else drop_n <= 0;
                 end
                 else if (r_we && !r_ddr_busy) grant_cnt <= DDR_G;   // write accepted
             end
             else if (stall_cnt != 0) begin
                 // injected stall freezes the burst mid-stream too
             end
+            else if (defer_cnt != 0) begin
+                defer_cnt <= defer_cnt - 1;      // late response: reader waits in ST_WAIT_LINE
+                if (defer_cnt == 1)
+                    $display("DIAG DEFER line %0d burst released at frame=%0d vc=%0d state=%0d dline=%0d",
+                             DEFER_LINE, mon_frame, tim_vc, u_reader.state, u_reader.display_line);
+            end
             else if (gap_cnt != 0) begin
                 gap_cnt <= gap_cnt - 1;
+            end
+            else if (drop_n != 0 && rd_i == rd_cnt_l - 8'(drop_n)) begin
+                serving <= 1'b0; grant_cnt <= DDR_G;   // burst truncated -> reader hangs
+                $display("DIAG DROP line %0d truncated after %0d beats (frame=%0d vc=%0d)",
+                         DROP_LINE, rd_i, mon_frame, tim_vc);
             end
             else begin
                 r_dout       <= mem_read(rd_addr_l + {21'd0, rd_i});
                 r_dout_ready <= 1'b1;
                 rd_i         <= rd_i + 8'd1;
                 gap_cnt      <= DDR_B;
-                if (rd_i == rd_cnt_l - 8'd1) begin serving <= 1'b0; grant_cnt <= DDR_G; end
+                if (rd_i == rd_cnt_l - 8'd1) begin
+                    serving <= 1'b0; grant_cnt <= DDR_G;
+                    if (xtra_armed && EXTRA_BEATS > 0 && EXTRA_LINE >= 0
+                        && mon_frame >= INJ_FRAME && req_line == 9'(EXTRA_LINE)) begin
+                        xtra_armed <= 1'b0;
+                        xtra_addr  <= rd_addr_l;
+                        xtra_i     <= 0;
+                        xtra_left  <= EXTRA_BEATS;
+                        xtra_wait  <= EXTRA_DELAY;
+                    end
+                end
             end
         end
     end
@@ -560,6 +642,9 @@ module tb_reader_ddr;
         begin
             $display("DIAG CFG G=%0d B=%0d stall_len=%0d stall_row=%0d stall_frame=%0d beacon_row=%0d beacon_frame=%0d frames=%0d",
                      DDR_G, DDR_B, STALL_LEN, STALL_ROW, STALL_FRAME, BEACON_ROW, BEACON_FRAME, RUN_FRAMES);
+            $display("DIAG CFG2 defer=%0d@line%0d drop=%0d@line%0d extra=%0dx%0d@line%0d misroute=line%0d<-line%0d inj_frame=%0d",
+                     DEFER_CYC, DEFER_LINE, DROP_BEATS, DROP_LINE, EXTRA_BEATS, EXTRA_DELAY,
+                     EXTRA_LINE, MISROUTE_LINE, MISROUTE_SRC, INJ_FRAME);
             model_active = 1'b0;
             wait_frames(3);
             if (BEACON_ROW >= 0) begin
@@ -616,6 +701,16 @@ module tb_reader_ddr;
         void'($value$plusargs("BEACON_FRAME=%d",BEACON_FRAME));
         void'($value$plusargs("FRAMES=%d",      RUN_FRAMES));
         void'($value$plusargs("TRACE_FRAME=%d", TRACE_FRAME));
+        void'($value$plusargs("DEFER_LINE=%d",  DEFER_LINE));
+        void'($value$plusargs("DEFER_CYC=%d",   DEFER_CYC));
+        void'($value$plusargs("DROP_LINE=%d",   DROP_LINE));
+        void'($value$plusargs("DROP_BEATS=%d",  DROP_BEATS));
+        void'($value$plusargs("EXTRA_LINE=%d",  EXTRA_LINE));
+        void'($value$plusargs("EXTRA_BEATS=%d", EXTRA_BEATS));
+        void'($value$plusargs("EXTRA_DELAY=%d", EXTRA_DELAY));
+        void'($value$plusargs("MISROUTE_LINE=%d", MISROUTE_LINE));
+        void'($value$plusargs("MISROUTE_SRC=%d",  MISROUTE_SRC));
+        void'($value$plusargs("INJ_FRAME=%d",   INJ_FRAME));
         diag_mode    = $test$plusargs("DIAG");
         diag_verbose = $test$plusargs("VERBOSE");
         diag_trace   = $test$plusargs("TRACE");
