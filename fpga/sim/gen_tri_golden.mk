@@ -24,12 +24,14 @@
 # compiled from, so the golden and the device share one contract, and contract-check below
 # enforces that agreement on every generator build.
 #
-# CAVEAT (be honest about what this path is): maldita is NOT a submodule of mister-gmloader,
-# so this resolves to the SIBLING WORKING CHECKOUT of gmloader-next on whatever branch it
-# happens to be on — it is NOT pinned by a recorded commit pointer. Since contract-check
-# joined run_sims.sh, the whole battery hard-fails at step 0 if that checkout drifts or is
-# absent (a fresh clone without it runs ZERO testbenches). Pinning this properly is an open
-# follow-up.
+# CAVEAT (be honest about what this path is): no repo records a pinned commit for
+# gmloader-next here (mister-gmloader, the former umbrella repo, used to; it is now
+# ARCHIVED and retired — see docs/architecture/README.md), so this resolves to the
+# SIBLING WORKING CHECKOUT of gmloader-next on whatever branch it happens to be on —
+# it is NOT pinned by a recorded commit pointer. Since contract-check joined
+# run_sims.sh, the whole battery hard-fails at step 0 if that checkout drifts or is
+# absent (a fresh clone without it runs ZERO testbenches). Pinning this properly is an
+# open follow-up.
 REFMODEL  := ../../../gmloader-next/3rdparty/mfgpu/refmodel
 RTLDEFS   := ../rtl/blitter_defs.vh
 CC        ?= cc
@@ -101,16 +103,18 @@ vectors: gen_tri_golden gen_system_golden
 	./gen_system_golden
 
 # ── stream-replay vectors ────────────────────────────────────────────────────
-# TRACEDIR points at the committed device captures (Task 3). Only stream_quiet_f0
-# is COMMITTED (it is what tb_blitter_trilist_stream.sv loads by default and what
-# run_sims.sh gates on); the other frames are ~700 KiB each and are regenerated on
-# demand:
+# TRACEDIR points at the committed device captures (Task 3), which now live in
+# THIS repo (post release-consolidation — mister-gmloader, the former bundler
+# repo, is archived; its docs/superpowers/findings/data was absorbed here).
+# Only stream_quiet_f0 is COMMITTED (it is what tb_blitter_trilist_stream.sv
+# loads by default and what run_sims.sh gates on); the other frames are
+# ~700 KiB each and are regenerated on demand:
 #   make -f gen_tri_golden.mk stream-vectors                    # quiet frame 0
 #   ./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 1 stream_quiet_f1
 #   ./gen_tri_stream $(TRACEDIR)/mftrace-arrival.txt 3 stream_arrival_f3
 # then run the tb against one with -DSTREAM_VEC='"stream_quiet_f1"' (see the tb header).
-# Same "sibling working checkout, not a recorded pin" caveat as REFMODEL above:
-# the captures live in the mister-gmloader bundler repo, not in this one. Nothing
+# Unlike REFMODEL above, TRACEDIR is NOT a sibling-checkout caveat: the captures
+# are committed in-repo, so no external checkout can drift underneath it. Nothing
 # at TB RUN time needs them (the committed vectors/*.hex are self-contained) — the
 # path is only needed to REGENERATE vectors.
 #
@@ -121,7 +125,7 @@ vectors: gen_tri_golden gen_system_golden
 # add heavy-vector coverage alongside the quiet run. A green suite from that
 # invocation means the heavy vector was tested INSTEAD OF the quiet one, not in
 # addition to it; the two vectors are never both exercised by a single run.
-TRACEDIR := ../../../mister-gmloader/docs/superpowers/findings/data
+TRACEDIR := ../../docs/superpowers/findings/data
 stream-vectors: gen_tri_stream
 	mkdir -p vectors
 	./gen_tri_stream $(TRACEDIR)/mftrace-quiet.txt 0 stream_quiet_f0
@@ -139,19 +143,18 @@ stream-vectors: gen_tri_stream
 # capture is ever re-taken.
 #
 # The input trace (mftrace-heavy-b.txt) is NOT recorded under the default
-# TRACEDIR above — it lives wherever Task 2/5's capture was taken and is
-# passed explicitly on the command line, e.g.:
+# TRACEDIR above — it is one directory level deeper, and is passed explicitly
+# on the command line, e.g.:
 #   make -f gen_tri_golden.mk stream-vectors-heavy \
 #     TRACEDIR=/path/to/the/capture/dir
 #
-# The committed capture used for THIS vector, within the mister-gmloader repo
-# (one directory level deeper than the default TRACEDIR above), is at:
+# The committed capture used for THIS vector, within this repo (one directory
+# level deeper than the default TRACEDIR above), is at:
 #   docs/superpowers/findings/data/2026-07-30-phase4-stage-b/mftrace-heavy-b.txt
-# At the time of writing that path exists only on the UNMERGED branch
-# perf/phase4-stage-b-harness in that repo — it may not be on your default
-# branch yet. Point TRACEDIR at that directory (checked out from the right
-# branch) to regenerate this vector; the committed .hex files below are a
-# stale-reference hazard for a future regenerator, not a build hazard today.
+# It is committed on this repo's default branch (post release-consolidation) —
+# point TRACEDIR at that directory to regenerate this vector; the committed
+# .hex files below are a stale-reference hazard for a future regenerator, not
+# a build hazard today.
 # Frame index 0 (gen_tri_stream's --frame arg) selects the FIRST distinct
 # f= value in file order, which for this capture is device frame f=1890 —
 # the first frame of the f=1890..1960 gate-anchor plateau (all measured at

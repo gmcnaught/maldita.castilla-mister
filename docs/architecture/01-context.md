@@ -82,8 +82,9 @@ gmloader itself is out of scope for this doc set (see
 `docs/architecture/README.md`).
 
 **Developer** (out-of-scope, dashed). Deploys builds and drives bench runs
-from outside the running system — `mister-gmloader/Makefile`,
-`maldita.castilla-mister/deploy.py`, `mister-gmloader/scripts/mister_run.sh` —
+from outside the running system — `Makefile`, `deploy.py`,
+`scripts/mister_run.sh` (all three now live in this repo,
+`maldita.castilla-mister`, after the mister-gmloader release consolidation) —
 none of which are runtime actors; included only to show the boundary is
 crossed out-of-band, not during gameplay.
 
