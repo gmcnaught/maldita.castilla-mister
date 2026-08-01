@@ -29,7 +29,8 @@
 // (c) is the make-or-break: it catches a wrong-axis fix (an accidental X reversal, or none).
 //
 // [#15 Task 3] The DDR model takes latency knobs (+DDR_G grant latency, +DDR_B inter-beat
-// gap, +STALL_LEN/+STALL_ROW/+STALL_FRAME one-shot starvation) and the bench takes a +DIAG
+// gap, +STALL_LEN/+STALL_ROW/+STALL_FRAME one-shot starvation), beat-misattribution knobs
+// (+DEFER_*, +DROP_*, +EXTRA_*, +MISROUTE_* — see the model header), and the bench takes a +DIAG
 // characterisation mode (+FRAMES, +BEACON_ROW/+BEACON_FRAME, +TRACE/+TRACE_FRAME) driven by
 // fpga/sim/sweep_reader_ddr.sh. EVERY knob defaults to the pre-existing behaviour, so the
 // plain `./run_sims.sh tb_reader_ddr` gate is unchanged. See .superpowers/sdd/task-3-report.md:
@@ -116,7 +117,7 @@ module tb_reader_ddr;
     // the first ctrl read at ~165us, which captured that X into
     // prev_frame_counter and poisoned frame detection for the whole run.
     wire [31:0] ctrl_word;
-    integer i, qw, ln, xx, r_i, rows_missing;
+    integer i, qw, ln, xx, r_i, rows_missing, beacon_wait;
     // active buffer pixel at STORAGE (x,y)
     function [15:0] bufpix(input integer act, input integer x, input integer y);
         reg [63:0] q;
@@ -202,7 +203,11 @@ module tb_reader_ddr;
     // stray/unrequested beat stream, independent of `serving`
     integer    xtra_wait = 0, xtra_left = 0, xtra_i = 0;
     reg [28:0] xtra_addr;
-    reg        xtra_armed = 1'b1;
+    reg        xtra_armed = 1'b1, xtra_run = 1'b0;
+    wire       xtra_ready = (EXTRA_AT_DLINE >= 0)
+                          ? (u_reader.state == 5'd5 /*ST_WAIT_LINE*/
+                             && u_reader.display_line == 9'(EXTRA_AT_DLINE))
+                          : (xtra_wait == 0);
     reg        def_armed = 1'b1, drop_armed = 1'b1, mis_armed = 1'b1;
     assign r_ddr_busy = (grant_cnt != 0) || (stall_cnt != 0);
 
@@ -210,7 +215,7 @@ module tb_reader_ddr;
         r_dout_ready <= 1'b0;
         if (reset) begin
             serving <= 1'b0; grant_cnt <= 0; gap_cnt <= 0; stall_cnt <= 0;
-            defer_cnt <= 0; drop_n <= 0; xtra_wait <= 0; xtra_left <= 0;
+            defer_cnt <= 0; drop_n <= 0; xtra_wait <= 0; xtra_left <= 0; xtra_run <= 1'b0;
         end
         else begin
             if (grant_cnt != 0) grant_cnt <= grant_cnt - 1;
@@ -224,22 +229,25 @@ module tb_reader_ddr;
                          STALL_LEN, mon_frame, tim_vc, u_reader.state, u_reader.display_line);
             end
 
-            // ---- stray-beat emitter (has priority over the normal stream) ----
-            // Release either after EXTRA_DELAY cycles, or (EXTRA_AT_DLINE >= 0) the
+            // ---- stray-beat emitter ----
+            // Released either after EXTRA_DELAY cycles, or (EXTRA_AT_DLINE >= 0) the
             // moment the reader is sitting in ST_WAIT_LINE for that display_line —
             // i.e. exactly "the stale beats land while display_line == 214".
-            if (xtra_wait != 0
-                && !(EXTRA_AT_DLINE >= 0 && u_reader.state == 5'd5
-                     && u_reader.display_line == 9'(EXTRA_AT_DLINE)))
-                xtra_wait <= (EXTRA_AT_DLINE >= 0) ? xtra_wait : xtra_wait - 1;
-            else if (xtra_left != 0 && stall_cnt == 0) begin
+            // The countdown is OUTSIDE the serve chain: an armed-but-not-yet-released
+            // stray stream must not block the model from accepting real requests.
+            if (xtra_wait != 0 && EXTRA_AT_DLINE < 0) xtra_wait <= xtra_wait - 1;
+            if (xtra_left != 0 && !xtra_run && xtra_ready) xtra_run <= 1'b1;
+
+            if (xtra_left != 0 && (xtra_run || xtra_ready) && stall_cnt == 0) begin
                 r_dout       <= mem_read(xtra_addr + 29'(xtra_i));
                 r_dout_ready <= 1'b1;
                 xtra_i       <= xtra_i + 1;
                 xtra_left    <= xtra_left - 1;
-                if (xtra_left == 1)
+                if (xtra_left == 1) begin
+                    xtra_run <= 1'b0;
                     $display("DIAG XTRA %0d stray beats delivered, last at frame=%0d vc=%0d state=%0d dline=%0d",
                              EXTRA_BEATS, mon_frame, tim_vc, u_reader.state, u_reader.display_line);
+                end
             end
             else if (!serving) begin
                 if (r_rd && !r_ddr_busy) begin
@@ -748,6 +756,28 @@ module tb_reader_ddr;
                  addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
         if (u_reader.active_buffer !== 1'b1) active_err = active_err + 1;
 
+        // [#15] RUN PAST THE LIVENESS BEACON. The two measurement phases above end around
+        // frame 10, and the reader's own free-running 2^22-cycle beacon (beacon_tick, ~10.53
+        // bench frames) first fires in frame 10/11 — so the gate used to stop ONE frame short
+        // of the only event that exercises a frame restart dispatched from the ST_IDLE park
+        // during active video. Run until the beacon has provably fired (beacon_cnt leaves 0 in
+        // ST_BEACON) plus 3 more frames: the fire frame, the frame the displaced restart lands
+        // in, and the heal frame. The provenance monitor (g) and the collision monitor (f) are
+        // free-running, so they cover this window without any arming.
+        beacon_wait = 0;
+        while (u_reader.beacon_cnt == 32'd0 && beacon_wait < 40) begin
+            wait_frames(1);
+            beacon_wait = beacon_wait + 1;
+        end
+        if (u_reader.beacon_cnt == 32'd0) begin
+            $display("RESULT: FAIL — liveness beacon never fired in %0d frames; this gate is blind",
+                     beacon_wait);
+            $fatal;
+        end
+        $display("BEACON: fired by frame %0d (beacon_cnt=%0d) — running 3 more frames",
+                 mon_frame, u_reader.beacon_cnt);
+        wait_frames(3);
+
         // [#15] every active row must have been orientation-checked. A row that the
         // pacing gate skipped is a hole in the test, and rows 214/215 are precisely the
         // rows the old 25-line window and the `tim_vc < VACT-1` exclusion left uncovered.
@@ -799,10 +829,19 @@ module tb_reader_ddr;
             $fatal;
         end
         $display("reader_ddr: scanout counter @SCANFRM_ADDR advances exactly once per scanout frame (period=%0d cyc), published on the SCANOUT_ONLY ship path", EXP_PERIOD);
-        // (g)/(h) [#15] informational: the ungated provenance monitor and the
-        // ST_WAIT_DISPLAY re-anchor counter, over the whole standard run.
-        $display("ROWPROV: dup_events=%0d dup_row=%0d bad_rows=%0d anchors=%0d (informational)",
-                 dup_events, dup_first_row, bad_rows_total, anchor_events);
+        // (g)/(h) [#15] GATING: the ungated provenance monitor over the whole run — every
+        // active row of every frame must have displayed ITSELF. dup_events isolates the
+        // device symptom (row N byte-identical to row 0); bad_rows catches any other wrong
+        // row. anchors (ST_WAIT_DISPLAY re-anchors = fill fell behind the live scan) stays
+        // informational: it is a pacing measure, and 0 here is the pre-fix baseline, so a
+        // fix that trades row 214 for an underflow shows up as anchors > 0.
+        $display("ROWPROV: dup_events=%0d dup_row=%0d dup_frame=%0d bad_rows=%0d anchors=%0d",
+                 dup_events, dup_first_row, dup_first_frame, bad_rows_total, anchor_events);
+        if (dup_events || bad_rows_total) begin
+            $display("RESULT: FAIL — displayed-row provenance: row %0d of frame %0d displayed ROW 0's content (dup_events=%0d), bad_rows=%0d",
+                     dup_first_row, dup_first_frame, dup_events, bad_rows_total);
+            $fatal;
+        end
         $display("reader_ddr: ddr_* fetch reads the ACTIVE buffer; FORWARD scanout — screen(c,d)=buf(c,d), no re-ordering, both buffers");
         $display("RESULT: PASS");
         $finish;
