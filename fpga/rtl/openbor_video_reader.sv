@@ -864,6 +864,37 @@ always @(posedge ddr_clk) begin
                     synced <= 1'b1;
                     state <= ST_IDLE;
                 end
+                // [#15] RESTART GATE — a frame restart may only be dispatched during vblank.
+                // Both branches below re-anchor the scan to line 0 (display_line <= 0 ->
+                // ST_READ_LINE). The fill writes bank display_line[0] (lb_waddr, :562) and the
+                // display reads bank vcount[0] (:1102), so a line-0 fill dispatched inside
+                // active video is scanned out by the next EVEN row — the device symptom "row
+                // 214 shows row 0's pixels" (issue #15, findings 2026-07-31).
+                //
+                // How the FSM reaches here mid-frame: ST_LINE_DONE parks in ST_IDLE after the
+                // LAST fetch of a frame, and because the fetch runs one line ahead that park is
+                // in line V_ACTIVE-2's hblank (214), not vblank. ANY work ST_IDLE services from
+                // that park then walks ST_POLL_CTRL -> ST_WAIT_CTRL -> here while the display is
+                // still active: beacon_pending today, the deleted audio_wake path historically
+                // (which is why deleting the audio FSM in 7980785 dropped the device rate from
+                // ~100% to ~39% without fixing anything), any future ST_IDLE-anchored work
+                // tomorrow. Gate the RESTART, not the trigger.
+                //
+                // Blocking costs one wasted 1-qword ctrl read and consumes NOTHING (no
+                // prev_frame_counter / active_buffer / display_line update), so the pending
+                // frame is picked up by the normal path: new_frame_ddr latches
+                // new_frame_pending every frame (:540), ST_IDLE dispatches it at the boundary,
+                // and the JOY/SCANFRM chain re-reads a FRESH ctrl word here inside vblank. It
+                // cannot stall a frame — the restart still happens at the very next vblank.
+                //
+                // No-op on the normal path (verified, not assumed): new_frame pulses on the
+                // same clk_vid edge that raises vblank (openbor_video_timing.sv:143/162), and
+                // vblank_ddr is a 2-FF sync while new_frame_ddr is a 3-FF sync + edge detect,
+                // so vblank_ddr is already high whenever the boundary path arrives here — with
+                // 46 blanking lines of margin. Sim confirms unchanged fetch timing and
+                // anchors=0, i.e. the line-0 preload slack set just below is untouched.
+                else if (!vblank_ddr)
+                    state <= ST_IDLE;
                 else if (ctrl_word[31:2] != prev_frame_counter) begin
                     // New frame available
                     prev_frame_counter <= ctrl_word[31:2];
@@ -882,7 +913,13 @@ always @(posedge ddr_clk) begin
                     state              <= BLT_PAINT_TEST ? ST_PAINT : ST_READ_LINE;
                 end
                 else if (first_frame_loaded) begin
-                    // Stale frame -- re-read previous buffer
+                    // Stale frame -- re-read previous buffer.
+                    // [#15] CADENCE NOTE: this state is now only reached during vblank (the
+                    // restart gate above), so stale_vblank_count advances at most ONCE per
+                    // vblank and the blank-to-black watchdog below is exactly ~30 displayed
+                    // frames (~0.5 s), matching the counter's name. Before the gate, a
+                    // mid-frame ST_CHECK_CTRL visit could also increment it, so the watchdog
+                    // could fire in fewer than 30 vblanks. Behaviour change, deliberate.
                     if (stale_vblank_count < 5'd30)
                         stale_vblank_count <= stale_vblank_count + 5'd1;
                     if (stale_vblank_count >= 5'd29)
@@ -921,11 +958,11 @@ always @(posedge ddr_clk) begin
                     // simply mirrors it again — which is exactly the whole-frame inversion
                     // seen on device.
                     //
-                    // Reversing here was also subtly wrong independent of the above: the
-                    // pivot uses this module's V_ACTIVE=240 while openbor_video_timing.sv
-                    // displays 224 lines, so display_line only reaches ~223 and the reversed
-                    // fetch showed FB rows 239..16 — a 16-row offset with rows 0-15 never
-                    // displayed. Forward addressing does not depend on the pivot at all.
+                    // Reversing here was also subtly wrong independent of the above: it
+                    // needs a pivot, and forward addressing does not. (The old text here
+                    // cited a V_ACTIVE=240-vs-224-displayed-lines mismatch; both are `FB_H
+                    // = 216 now — V_ACTIVE:206 and openbor_video_timing.sv:57 take the
+                    // same root — so that particular offset is structurally gone.)
                     ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // `FB_STRIDE_QW-beat burst
                     ddr_rd       <= 1'b1;
@@ -992,6 +1029,28 @@ always @(posedge ddr_clk) begin
                     end
                     state <= ST_READ_LINE;
                 end
+                // [#15] VBLANK ESCAPE — companion to the ST_CHECK_CTRL restart gate.
+                // The exit above needs a !vblank new_line, so a frame whose last fetch
+                // finished INSIDE vblank parks here for all 46 blanking lines: ST_IDLE is
+                // never visited, the latched new_frame_pending is never serviced, and the
+                // restart gate then correctly refuses the belated mid-frame restart — so the
+                // buffer flip, stale_vblank_count and the blank-to-black watchdog all slip a
+                // whole frame. Reachable whenever a line fetch outlives its line (~62 us),
+                // i.e. sustained f2h starvation; the pre-a8512e5 WORK->DDR copy could starve
+                // this reader ~158 us. Measured with a 2-line-late line-214 response
+                // (+DEFER_LINE=214 +DEFER_CYC=3000): 214 stale rows and one frame with no
+                // restart at all; with this escape, 2 and none.
+                //
+                // Qualified on new_frame_pending, NOT on vblank alone: the line-0 preload
+                // ALSO lands in ST_WAIT_DISPLAY during vblank (ST_LINE_DONE routes here for
+                // every line but the last), and a bare `vblank_ddr` exit would strand the
+                // frame in ST_IDLE — which has no path back to ST_READ_LINE — leaving the
+                // whole frame unfetched. new_frame_pending is set only by a frame boundary
+                // that no ST_IDLE/ST_POLL_CTRL visit has consumed, which is exactly the park
+                // and never the preload (that boundary's pending bit was just consumed to
+                // dispatch the restart).
+                else if (vblank_ddr && new_frame_pending)
+                    state <= ST_IDLE;
             end
 
 
@@ -1038,11 +1097,10 @@ end
 reg  [8:0]  hcol;
 reg  [63:0] lb_q;
 
-// [device-fix: vertical (Y) flip] The frame renders upside-down on hardware — a GameMaker/OpenGL
-// Y-up vs framebuffer Y-down convention mismatch (uniform across borders/HUD/scene). The X axis
-// is CORRECT (sword stays on the left; columns forward). Un-flip on the DISPLAY side, Y ONLY: the
-// ST_READ_LINE fetch reads the reversed SOURCE line (239 - display_line). The pixel output here is
-// UNCHANGED (hcol forward: column 0 = leftmost, lane = hcol[1:0]) — do NOT reverse X.
+// The pixel output is FORWARD on both axes: column 0 = leftmost (lane = hcol[1:0]), row d = source
+// row d. The fetch is forward too — see the ST_READ_LINE comment for why the Y flip does NOT belong
+// here (it lives at its source, raster_backend_mfgpu.cpp's src_is_appsurf branch). The old text here
+// described a reversed `239 - display_line` fetch that this module has not done since 94fc48d.
 
 // vcount here is the native clk_vid timing counter (same domain as this read
 // port) -- no CDC needed. The ddr_clk fill side uses the gray-synced vcount_ddr.

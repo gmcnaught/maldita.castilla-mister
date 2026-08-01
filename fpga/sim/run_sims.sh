@@ -238,6 +238,13 @@ timeout_s() { case "$1" in
   tb_vram_contention)                      echo 180 ;;
   # Non-gating full-frame visual-dump TB: ~350s to actually PASS, capped low.
   tb_comp_replay)                          echo 30 ;;
+  # [#15] The scanout gate must run PAST the reader's own 2^22-cycle liveness beacon
+  # (~10.5 bench frames) — that fire is what dispatched a frame restart inside active
+  # video and made row 214 display row 0. That puts the run at ~13 frames / 5.5 M cycles,
+  # ~58s standalone (was ~46s at 10 frames), and it spuriously timed out at 120s under
+  # concurrent suite load. Same situation and same remedy as tb_vram_contention above.
+  # The frame count is a floor, not slack: the beacon period sets it.
+  tb_reader_ddr)                           echo 300 ;;
   # Non-gating real-cache+mt48 TRILIST co-sim (see NONGATING note above). Wall time
   # is HIGHLY contention-sensitive: ~45-60s isolated, but observed 8+ min under
   # concurrent CPU load from other sims/builds on the same machine (this bench

@@ -1,0 +1,36 @@
+# Makefile.fb_row_probe — standalone armhf cross-build of the issue #15
+# framebuffer row probe. No mfgpu dependency: it only mmaps /dev/mem read-only.
+#
+# Build (from this repo root, reusing the gmloader armhf image):
+#   docker run --rm -v "$PWD:/src" -w /src gmloader-armhf-build:bullseye \
+#       make -f tools/Makefile.fb_row_probe
+# Host-native build (compile check only — it needs /dev/mem to run):
+#   make -f tools/Makefile.fb_row_probe ARCH=native
+# Output: tools/fb_row_probe.armhf
+
+ARCH ?= arm-linux-gnueabihf
+
+ifeq ($(ARCH),native)
+CC  := cc
+OUT := tools/fb_row_probe.native
+else
+CC  := $(ARCH)-gcc
+OUT := tools/fb_row_probe.armhf
+endif
+
+# gnu11, not c11: mmap/usleep sit behind glibc's __STRICT_ANSI__ gate under -std=c11.
+CFLAGS ?= -O2 -std=gnu11 -Wall -Wextra
+ifeq ($(ARCH),arm-linux-gnueabihf)
+CFLAGS += -mtune=cortex-a9
+endif
+
+SRC := tools/fb_row_probe.c
+
+.PHONY: all clean
+all: $(OUT)
+
+$(OUT): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $(SRC)
+
+clean:
+	rm -f tools/fb_row_probe.armhf tools/fb_row_probe.native

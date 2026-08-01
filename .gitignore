@@ -12,6 +12,8 @@ incremental_db/
 
 # Icarus sim build artifacts (fpga/sim/run_sims.sh)
 fpga/sim/.simbuild/
+# [#15] sweep harness build/output dir (fpga/sim/sweep_reader_ddr.sh)
+fpga/sim/.sweepbuild/
 # host-built golden generators (Mach-O/ELF binaries; `make -f gen_tri_golden.mk`
 # rebuilds them on demand, and a committed one is wrong on any other architecture)
 fpga/sim/gen_tri_golden
