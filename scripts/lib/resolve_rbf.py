@@ -129,27 +129,42 @@ def find_run_for_tree(repo, want_tree, runs):
 
 
 def run_artifact_names(run_id):
-    """Artifact names attached to `run_id`.
+    """Names of NON-EXPIRED artifacts attached to `run_id`.
+
+    `gh run view --json artifacts` is not a real field -- there is no such
+    JSON key on that command, and it always fails with "Unknown JSON field:
+    \"artifacts\"". The REST API is the actual source: `gh api
+    repos/{owner}/{repo}/actions/runs/<run_id>/artifacts`. The {owner}/{repo}
+    placeholders are resolved by `gh` itself from the repository of the
+    current directory (documented in `gh help api`), matching how
+    list_successful_runs() above already relies on `gh run list` resolving
+    the repo from cwd rather than passing -R explicitly.
+
+    An expired artifact is treated as absent: GitHub keeps the artifact's
+    metadata after expiry, but `gh run download` on it fails, so a run whose
+    only maldita-rbf has expired is exactly as unusable as one that never had
+    it and must be skipped the same way.
 
     Fails loudly: a `gh` query error is NOT the same as "no artifacts", and
     must never be silently treated as "skip this run" -- that would make a
     transient API failure look identical to the linux-only-dispatch failure
     mode this whole check exists to catch.
     """
+    endpoint = f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/artifacts"
     r = subprocess.run(
-        ["gh", "run", "view", str(run_id), "--json", "artifacts"],
+        ["gh", "api", endpoint],
         text=True, capture_output=True)
     if r.returncode != 0:
         raise RbfResolutionError(
-            f"gh run view {run_id} --json artifacts failed -- is gh installed "
-            f"and authenticated?\n{r.stderr}")
+            f"gh api {endpoint} failed -- is gh installed and "
+            f"authenticated?\n{r.stderr}")
     try:
         data = json.loads(r.stdout or "{}")
     except json.JSONDecodeError as e:
         raise RbfResolutionError(
-            f"gh run view {run_id} --json artifacts returned unparseable "
-            f"JSON: {e}")
-    return [a.get("name") for a in data.get("artifacts", [])]
+            f"gh api {endpoint} returned unparseable JSON: {e}")
+    return [a.get("name") for a in data.get("artifacts", [])
+            if not a.get("expired")]
 
 
 def resolve_run_id(repo, rev="HEAD", workflow=RBF_WORKFLOW):
