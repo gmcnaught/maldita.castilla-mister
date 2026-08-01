@@ -13,23 +13,38 @@
 #                 milestone-a build measured -0.159 ns on that domain, CI run
 #                 30663741590, 2026-07-31); any other domain going negative,
 #                 or emu|pll regressing past the baseline, fails.
-#   276007        an array carrying a `ramstyle` attribute did not infer to M10K.
-#                 When this fires the array becomes thousands of stray flops behind a
-#                 huge mux and timing collapses (see the 2026-07-29 tq_data
-#                 regression: -0.983 ns, ALMs 61%). Any hit fails EXCEPT the
-#                 reviewed, known-benign case listed in M10K_ALLOWLIST below.
+#   276007        Quartus declined to infer an array to M10K. Two distinct mechanisms
+#                 produce this: (a) a `ramstyle`-attributed array whose read is nested
+#                 inside an FSM case arm (the 2026-07-29 tq_data regression: -0.983 ns,
+#                 ALMs 61%, 20,480 stray flops -- see docs/architecture/04-code-fabric-raster.md
+#                 §(b)); (b) asynchronous-read logic on an array with NO ramstyle
+#                 attribute at all, e.g. ddr_blitter_arb.sv's xq_mem. Either way the
+#                 array becomes stray flops behind a big mux and timing degrades. Any
+#                 hit fails EXCEPT the reviewed, known-benign array(s) listed in
+#                 M10K_ALLOWLIST below.
 set -uo pipefail
 
 [ $# -eq 1 ] || { echo "usage: $0 <output_files_dir>" >&2; exit 2; }
 OUT="$1"
 
-# Files whose 276007 hit has been reviewed and accepted. Named individually on
-# purpose: a blanket skip would also hide the NEXT regression, which is the
-# failure mode this gate exists to catch.
+# Array(s) whose 276007 hit has been reviewed and accepted. Each entry is
+# "file.sv+array_name" -- a report line is allowlisted only when BOTH
+# substrings appear in it. This is per-ARRAY, not per-file: a blanket
+# file-only skip would also hide a SECOND array regressing in the same file,
+# which is exactly the failure mode this gate exists to catch (that is what
+# the tq_data precedent was -- one array in one file). The `.sv` suffix is
+# load-bearing on the first token: every 276007 hit in this file also carries
+# the "ddr_blitter_arb:blitter_arb" INSTANCE PATH substring (the hierarchy,
+# not the filename), so a bare "ddr_blitter_arb" token (no ".sv") would
+# false-match that instance-path text before the array-name check even runs.
 #
-#   ddr_blitter_arb.sv -- pre-existing, reviewed 2026-07-31. Predates the gate;
-#                         not introduced by any Phase 4 work.
-M10K_ALLOWLIST="ddr_blitter_arb.sv"
+#   ddr_blitter_arb.sv+xq_mem -- pre-existing, reviewed 2026-07-31. Predates
+#       the gate; not introduced by any Phase 4 work. NOT a `ramstyle`-array
+#       case (this file carries no `ramstyle` attribute at all) -- Quartus
+#       17.0 flags xq_mem "uninferred due to asynchronous read logic", a
+#       different mechanism from the ramstyle/FSM-case-arm mechanism 276007
+#       also reports (see docs/architecture/04-code-fabric-raster.md §(b)).
+M10K_ALLOWLIST="ddr_blitter_arb.sv+xq_mem"
 
 fail() { echo "::error::$*"; echo "GATE FAIL: $*" >&2; exit 1; }
 
@@ -135,8 +150,13 @@ if [ -n "$M10K_LINES" ]; then
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         allowed=0
-        for f in $M10K_ALLOWLIST; do
-            case "$line" in *"$f"*) allowed=1; break;; esac
+        for entry in $M10K_ALLOWLIST; do
+            entry_ok=1
+            IFS='+' read -ra reqs <<< "$entry"
+            for req in "${reqs[@]}"; do
+                case "$line" in *"$req"*) ;; *) entry_ok=0; break;; esac
+            done
+            if [ "$entry_ok" -eq 1 ]; then allowed=1; break; fi
         done
         [ "$allowed" -eq 1 ] || UNEXPECTED="$UNEXPECTED$line
 "

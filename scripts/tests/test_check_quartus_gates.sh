@@ -135,13 +135,23 @@ fixture_m10k_new_file() {
 
 fixture_m10k_allowlisted() {
     fixture_clean "$1"
-    printf 'Warning (276007): Inferred RAM node in file ddr_blitter_arb.sv\n' \
+    printf 'Warning (276007): Instance "emu:emu|ddr_blitter_arb:blitter_arb|xq_mem" of file "ddr_blitter_arb.sv" uninferred due to asynchronous read logic\n' \
         >> "$1/output_files/Maldita.map.rpt"
 }
 
 fixture_m10k_both() {
     fixture_m10k_allowlisted "$1"
     printf 'Warning (276007): Inferred RAM node in file blitter_top.sv\n' \
+        >> "$1/output_files/Maldita.map.rpt"
+}
+
+fixture_m10k_same_file_different_array() {
+    fixture_clean "$1"
+    # SAME file as the allowlisted xq_mem hit, but a DIFFERENT array -- the
+    # allowlist is per-array, not per-file, so this must still fail. This is
+    # the regression the old file-only allowlist would have waved through
+    # silently.
+    printf 'Warning (276007): Instance "emu:emu|ddr_blitter_arb:blitter_arb|new_mem" of file "ddr_blitter_arb.sv" uninferred due to asynchronous read logic\n' \
         >> "$1/output_files/Maldita.map.rpt"
 }
 
@@ -156,8 +166,9 @@ run_case "non-emu|pll negative fails even with emu|pll within baseline"  1 fixtu
 run_case "negative Hold slack does not trip the setup gate"              0 fixture_setup_hold_negative_only
 run_case "summary with no Setup entries fails"                           1 fixture_setup_no_setup_entries
 run_case "276007 on a new file fails"                                    1 fixture_m10k_new_file
-run_case "276007 on ddr_blitter_arb.sv passes"                           0 fixture_m10k_allowlisted
+run_case "276007 on ddr_blitter_arb.sv xq_mem passes"                    0 fixture_m10k_allowlisted
 run_case "allowlisted plus new file still fails"                         1 fixture_m10k_both
+run_case "different array in same allowlisted file still fails"          1 fixture_m10k_same_file_different_array
 
 echo "---"
 echo "$PASS passed, $FAIL failed"
