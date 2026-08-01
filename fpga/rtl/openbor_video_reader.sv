@@ -1114,29 +1114,46 @@ wire  [7:0] dec_b = {cur_pix[4:0],   cur_pix[4:2]};
 
 always @(posedge clk_vid) begin
     if (reset_vid) begin
-        hcol  <= 9'd0;
-        r_out <= 8'd0;
-        g_out <= 8'd0;
-        b_out <= 8'd0;
+        hcol <= 9'd0;
     end
     else if (ce_pix) begin
-        // Output the pixel for the current hcol (lb_q already settled).
-        if (de && frame_ready_vid) begin
-            r_out <= dec_r;
-            g_out <= dec_g;
-            b_out <= dec_b;
-        end
-        else begin
-            r_out <= 8'd0;
-            g_out <= 8'd0;
-            b_out <= 8'd0;
-        end
-
-        // Advance the position anchor.
+        // Advance the position anchor. hcol is IN PHASE with the timing generator's
+        // hcount: hcol == 0 throughout the hcount == 0 pixel window.
         if (new_line)
             hcol <= 9'd0;
         else if (de)
             hcol <= (hcol == 9'(`FB_W-1)) ? hcol : (hcol + 9'd1);
+    end
+end
+
+// [#32] The pixel outputs are registered on clk_vid, NOT on ce_pix.
+//
+// The consumer (video_mixer, via Maldita.sv's VGA_R/G/B) captures these pins on the
+// ce_pix edge at which `de` is high, and `de` is undelayed (openbor_video_top.sv:186,
+// `assign vga_de = tim_de`). A ce_pix-gated output register writes the pixel for the
+// CURRENT hcol on that same edge, so the mixer sampled the value written one pixel
+// earlier: screen column 0 showed the blanking value (black), screen column c showed
+// framebuffer column c-1, and framebuffer column `FB_W-1 was never displayed.
+//
+// Registering on clk_vid instead settles the pixel for hcol within one clk_vid of hcol
+// advancing -- ~8 clk_vid before the mixer's next sampling edge at the device's /9
+// ce_pix -- so the value present at the edge where de/hcount name column c IS column c.
+// Combinational depth is unchanged (same linebuf -> lb_q -> lane mux -> expand cone,
+// just without the clock enable), so this does not move an STA path.
+//
+// The alternative -- prefetching with hcol+1 -- has to latch column 0 during the last
+// blanking pixel of the previous line, where vcount still names that previous line, so
+// linebuf[{vcount[0],...}] would read column 0 out of the wrong bank.
+always @(posedge clk_vid) begin
+    if (reset_vid || !(de && frame_ready_vid)) begin
+        r_out <= 8'd0;
+        g_out <= 8'd0;
+        b_out <= 8'd0;
+    end
+    else begin
+        r_out <= dec_r;
+        g_out <= dec_g;
+        b_out <= dec_b;
     end
 end
 

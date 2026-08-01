@@ -71,11 +71,12 @@ module tb_reader_ddr;
     // ── timing ───────────────────────────────────────────────────────────────────
     wire        tim_hs, tim_vs, tim_hb, tim_vb, tim_de, tim_nf, tim_nl;
     wire [8:0]  tim_vc;
+    wire [9:0]  tim_hc;   // [#32] screen column, the mixer's view — NOT the reader's internal hcol
     openbor_video_timing u_timing (
         .clk(clk), .ce_pix(ce_pix), .reset(reset),
         .h_adj(5'sd0), .v_adj(4'sd0),
         .hsync(tim_hs), .vsync(tim_vs), .hblank(tim_hb), .vblank(tim_vb), .de(tim_de),
-        .hcount(), .vcount(tim_vc), .new_frame(tim_nf), .new_line(tim_nl)
+        .hcount(tim_hc), .vcount(tim_vc), .new_frame(tim_nf), .new_line(tim_nl)
     );
 
     // ── reader (SCANOUT_ONLY, base 0) ─────────────────────────────────────────────
@@ -480,6 +481,47 @@ module tb_reader_ddr;
         end
     end
 
+    // ── (k) [#32] OUTPUT PHASE — the module's pins, sampled the way the mixer samples ──
+    // Check (c) above compares u_reader.cur_pix against u_reader.hcol: both are INTERNAL
+    // nets of the DUT, so it is structurally blind to a phase error between the pixel
+    // outputs and `de`. The mixer does not see cur_pix/hcol — it registers r_out/g_out/
+    // b_out on the ce_pix edge at which `de` is high, and the screen column of that
+    // sample is hcount, not hcol. This monitor is that register: an `always @(posedge
+    // clk)` reads the PRE-edge value of every signal, exactly what a downstream
+    // `if (ce_pix) q <= r_out;` captures.
+    //
+    // Two failures are counted separately:
+    //   phase_errs — screen (hcount,vcount) did not show framebuffer pixel (hcount,vcount)
+    //                (a one-pixel right shift lands the whole line here), and
+    //   col0_errs  — the device symptom itself: screen column 0 came out black on a row
+    //                whose framebuffer column 0 is NOT black.
+    function [23:0] dec24(input [15:0] p);   // the RTL's RGB565->888 expansion
+        dec24 = {{p[15:11], p[15:13]}, {p[10:5], p[10:9]}, {p[4:0], p[4:2]}};
+    endfunction
+    integer phase_checks = 0, phase_errs = 0, col0_checks = 0, col0_errs = 0;
+    reg [23:0] exp24, got24;
+    always @(posedge clk) begin
+        if (!reset && orient_arm && ce_pix && tim_de && u_reader.frame_ready_vid
+            && (u_reader.display_line == (tim_vc + 9'd1))
+            && tim_hc < 10'(HACT) && tim_vc < 9'(VACT)) begin
+            exp24 = dec24(bufpix(u_reader.active_buffer, tim_hc, tim_vc));
+            got24 = {reader_r, reader_g, reader_b};
+            if (got24 !== exp24) begin
+                if (phase_errs < 8) $display("  PHASE MISMATCH screen(%0d,%0d) got=%h exp=%h",
+                    tim_hc, tim_vc, got24, exp24);
+                phase_errs = phase_errs + 1;
+            end
+            phase_checks = phase_checks + 1;
+            if (tim_hc == 10'd0 && exp24 !== 24'd0) begin
+                col0_checks = col0_checks + 1;
+                if (got24 === 24'd0) begin
+                    if (col0_errs < 4) $display("  COL0 BLACK row=%0d exp=%h", tim_vc, exp24);
+                    col0_errs = col0_errs + 1;
+                end
+            end
+        end
+    end
+
     // ── (f) [#15] line-buffer bank collision ─────────────────────────────────────
     // A fill must never write the bank the display is reading out of while active
     // video is on. lb_waddr[7] is the fill bank ({display_line[0], beat_count}),
@@ -870,6 +912,19 @@ module tb_reader_ddr;
         if (addr_errs || data_errs || orient_errs || active_err) begin
             $display("RESULT: FAIL — addr_errs=%0d data_errs=%0d orient_errs=%0d active_err=%0d",
                      addr_errs, data_errs, orient_errs, active_err);
+            $fatal;
+        end
+        // (k) [#32] output phase at the PINS. Coverage first — a gate with no checks is blind.
+        $display("PHASE: phase_checks=%0d phase_errs=%0d col0_checks=%0d col0_errs=%0d",
+                 phase_checks, phase_errs, col0_checks, col0_errs);
+        if (phase_checks < 300 || col0_checks < 100) begin
+            $display("RESULT: FAIL — output-phase gate under-exercised (phase=%0d col0=%0d)",
+                     phase_checks, col0_checks);
+            $fatal;
+        end
+        if (phase_errs || col0_errs) begin
+            $display("RESULT: FAIL — output phase: phase_errs=%0d col0_errs=%0d (screen col c must show framebuffer col c; col 0 must not be black)",
+                     phase_errs, col0_errs);
             $fatal;
         end
         // (d) joystick writeback ran every settled frame with the live values (>=3 frames
