@@ -20,8 +20,16 @@ on:
   push:
     paths:
       - 'fpga/**'
-      - '!fpga/sim/**'        # sims/scripts/docs don't affect the RBF — skip the ~13min build
-      - '!fpga/scripts/**'
+      # sim/ and docs/ don't affect the RBF -- skip the ~13min build for them.
+      # fpga/scripts/ used to be excluded here too; it's gone now (moved to
+      # scripts/ci/), so trigger scope matches tree scope for it. sim/ and
+      # docs/ do NOT: fpga_tree() (scripts/lib/resolve_rbf.py) hashes the
+      # WHOLE fpga/ tree, so an edit under fpga/sim/** or fpga/docs/** still
+      # moves the bitstream identity even though it produces no build --
+      # resolve_rbf.py then finds no matching run and deploy.py refuses until
+      # someone manually dispatches a build for the new tree hash. This is a
+      # live trap, not a hypothetical.
+      - '!fpga/sim/**'
       - '!fpga/docs/**'
       - '.github/workflows/build-rbf.yml'
   workflow_dispatch:
@@ -110,7 +118,7 @@ jobs:
         # fails; before the RBF upload so a failing build never publishes a
         # bitstream. Until this existed, every artifact build-rbf.yml produced
         # was ungated.
-        run: bash fpga/scripts/check_quartus_gates.sh fpga/output_files
+        run: bash scripts/ci/check_quartus_gates.sh fpga/output_files
 
       - name: Show result
         run: ls -lh _Other/MalditaCastilla_*.rbf
@@ -185,7 +193,7 @@ jobs:
       - name: Production gates (timing 332148 / M10K 276007)
         # Same gate as build-windows -- the fallback toolchain must not be a way
         # to ship an ungated bitstream.
-        run: bash fpga/scripts/check_quartus_gates.sh fpga/output_files
+        run: bash scripts/ci/check_quartus_gates.sh fpga/output_files
 
       - name: Show result
         run: ls -lh _Other/MalditaCastilla_*.rbf

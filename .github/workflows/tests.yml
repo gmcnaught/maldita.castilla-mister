@@ -6,7 +6,7 @@ name: Tests
 #
 #   test_check_quartus_gates.sh  GATING. Guards the 332148 (timing) / 276007
 #                                 (M10K) production gate that build-rbf.yml
-#                                 runs on every RBF build (fpga/scripts/
+#                                 runs on every RBF build (scripts/ci/
 #                                 check_quartus_gates.sh). A regression here
 #                                 means a bad bitstream could pass the real
 #                                 gate undetected.
@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: fpga/scripts/check_quartus_gates.sh tests
+      - name: scripts/ci/check_quartus_gates.sh tests
         run: bash scripts/tests/test_check_quartus_gates.sh
 
       - name: scripts/lib/resolve_rbf.py tests
