@@ -228,6 +228,7 @@ def fetch_rbf_for_head():
     sidecar_for(final).write_text(json.dumps({
         "commit": sha_short, "commit_full": full, "ci_run_id": run_id,
         "fpga_tree": fpga_tree(REPO, full),   # the real bitstream identity
+        "tree_algo": resolve_rbf.TREE_ALGO,   # see check_rbf_provenance()
         "sha1": sha1_of(final), "fetched_at": int(time.time()),
         "workflow": RBF_WORKFLOW,
     }, indent=2) + "\n")
@@ -256,6 +257,23 @@ def check_rbf_provenance(rbf, force):
     actual = sha1_of(rbf)
     if meta.get("sha1") != actual:
         bail("RBF contents do not match its provenance sidecar (file was replaced)")
+    # The tree hash's algorithm changed under fix/fpga-tree-narrow (algo 1 = the
+    # whole fpga/ tree; algo 2 = fpga/ minus fpga/sim, fpga/docs — see
+    # resolve_rbf.TREE_ALGO). A sidecar written under an older algo is NOT
+    # comparable to a hash computed under a newer one; the two numbering
+    # schemes measure different things and an inequality between them proves
+    # nothing about whether the RTL moved. Check the algo BEFORE comparing
+    # trees so a stale-format sidecar bails with an honest "cannot compare"
+    # message instead of the "STALE RBF" message below, which would be
+    # actively wrong here.
+    got_algo = meta.get("tree_algo")
+    if got_algo is None or got_algo < resolve_rbf.TREE_ALGO:
+        bail("RBF sidecar was written by an older provenance format "
+             f"(tree_algo={got_algo!r}, current is {resolve_rbf.TREE_ALGO}) — "
+             "the recorded fpga/ tree hash cannot be compared against HEAD's. "
+             "This does NOT mean the RBF is stale.")
+        return {"commit": meta.get("commit"), "sha1": actual[:12],
+                "ci_run_id": meta.get("ci_run_id"), "note": "unverified (old provenance format)"}
     # Gate on the fpga/ TREE, not the commit — see fpga_tree(). An RBF built from an
     # older commit is still current so long as fpga/ has not moved since.
     want_tree, got_tree = fpga_tree(REPO), meta.get("fpga_tree")

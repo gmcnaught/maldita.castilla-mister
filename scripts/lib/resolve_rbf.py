@@ -14,6 +14,7 @@ spuriously, which trains everyone to pass --force by reflex and kills the gate.
 The tree hash changes if and only if fpga/ actually changed.
 """
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -22,16 +23,80 @@ from pathlib import Path
 RBF_WORKFLOW = "build-rbf.yml"
 RBF_ARTIFACT = "maldita-rbf"
 
+# Bitstream-affecting exclusions within fpga/, mirroring build-rbf.yml's push
+# trigger ('!fpga/sim/**', '!fpga/docs/**'): those subtrees are a testbench
+# harness and prose respectively, neither reaches the RBF, so a push touching
+# only them fires no build. fpga_tree() below must exclude the same paths
+# from the bitstream's identity hash, or a sim/docs-only edit moves the
+# identity with no build to match it and resolution refuses spuriously (the
+# fix/fpga-tree-narrow bug). These two lists MUST be changed together -- add
+# an exclusion here without mirroring it in the workflow (or vice versa) and
+# the trap comes straight back.
+EXCLUDED_PREFIXES = ("fpga/sim", "fpga/docs")
+
+# fpga_tree()'s hashing algorithm, recorded in provenance sidecars (see
+# deploy.py's fetch_rbf_for_head) so an old sidecar written under a prior
+# algorithm is never silently compared as if commensurable with a new one.
+#   1 -- raw `git rev-parse <rev>:fpga` (the whole fpga/ tree, sim/ and docs/
+#        included). This is the bug fix/fpga-tree-narrow closes.
+#   2 -- git ls-tree -r <rev> -- fpga, with EXCLUDED_PREFIXES entries removed,
+#        then hashed.
+TREE_ALGO = 2
+
 
 class RbfResolutionError(Exception):
     """No CI build matches the requested fpga/ tree."""
 
 
+def _is_excluded(path):
+    """True if `path` (an fpga/... path from `git ls-tree`) is under one of
+    EXCLUDED_PREFIXES.
+
+    Must match on a full path-segment boundary, not a bare string prefix:
+    fpga/simulation_notes.sv and fpga/docs_helper.sv are siblings of
+    fpga/sim and fpga/docs, not members of them, and must still count toward
+    the bitstream identity. A plain path.startswith(prefix) would wrongly
+    swallow both -- path == prefix or path.startswith(prefix + "/") is what
+    enforces the boundary.
+    """
+    return any(path == prefix or path.startswith(prefix + "/")
+               for prefix in EXCLUDED_PREFIXES)
+
+
 def fpga_tree(repo, rev="HEAD"):
-    """git tree hash of fpga/ at `rev`, or None if it cannot be resolved."""
-    r = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{rev}:fpga"],
+    """Deterministic hash of the bitstream-affecting entries of fpga/ at `rev`.
+
+    "Bitstream-affecting" means exactly what build-rbf.yml's push filter
+    treats as able to trigger a build: fpga/** minus EXCLUDED_PREFIXES.
+    Hashing that set (rather than the whole fpga/ tree, algo 1's bug)
+    guarantees the identity used for RBF resolution never moves except when
+    the actual synthesis inputs do.
+
+    `git ls-tree -r` output is already deterministically ordered and each
+    line already carries the blob's content sha, so hashing the filtered
+    listing's raw bytes is sufficient -- no need to read blob contents.
+
+    Returns None if `rev` or `repo` cannot be resolved (same contract algo 1
+    had -- existing callers treat None as "give up", not "empty tree").
+    """
+    r = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", str(rev), "--", "fpga"],
                        text=True, capture_output=True)
-    return r.stdout.strip() if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None
+    lines = [ln for ln in r.stdout.splitlines() if ln]
+    if not lines:
+        # Either `rev` resolves but has no fpga/ tree at all, or something
+        # unexpected happened -- either way there is nothing to identify a
+        # bitstream by. Treat the same as unresolved rather than hashing an
+        # empty listing.
+        return None
+    kept = []
+    for ln in lines:
+        # ls-tree -r line format: "<mode> <type> <sha>\t<path>"
+        _, _, path = ln.partition("\t")
+        if not _is_excluded(path):
+            kept.append(ln)
+    return hashlib.sha1("\n".join(kept).encode()).hexdigest()
 
 
 def list_successful_runs(workflow=RBF_WORKFLOW, limit=60):

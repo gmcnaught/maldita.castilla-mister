@@ -52,6 +52,13 @@ class ResolveRbfTest(unittest.TestCase):
         git(self.dir, "add", "-A")
         git(self.dir, "commit", "-qm", "rtl v2")
 
+    def write_and_commit(self, relpath, contents, msg):
+        p = self.dir / relpath
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(contents)
+        git(self.dir, "add", "-A")
+        git(self.dir, "commit", "-qm", msg)
+
     # --- fpga_tree ---------------------------------------------------------
     def test_fpga_tree_is_stable_across_a_docs_only_commit(self):
         before = resolve_rbf.fpga_tree(self.dir)
@@ -65,6 +72,57 @@ class ResolveRbfTest(unittest.TestCase):
 
     def test_fpga_tree_returns_none_for_a_non_repo(self):
         self.assertIsNone(resolve_rbf.fpga_tree(self.dir / "nope"))
+
+    # --- fpga_tree: the fix/fpga-tree-narrow scope (EXCLUDED_PREFIXES) -----
+    # These prove the actual bug fix: fpga/sim/** and fpga/docs/** must not
+    # move the bitstream identity (they cannot trigger a build under
+    # build-rbf.yml's push filter, so counting them toward the hash is the
+    # exact trap that blocked milestone-a), while everything else under
+    # fpga/ -- including files that merely LOOK like they're in those
+    # directories -- still must.
+    def test_editing_fpga_sim_does_not_change_the_tree_hash(self):
+        self.write_and_commit("fpga/sim/README.md", "sim harness\n", "add sim readme")
+        before = resolve_rbf.fpga_tree(self.dir)
+        self.write_and_commit("fpga/sim/README.md", "sim harness v2\n", "edit sim readme")
+        self.assertEqual(resolve_rbf.fpga_tree(self.dir), before)
+
+    def test_editing_fpga_docs_does_not_change_the_tree_hash(self):
+        self.write_and_commit("fpga/docs/notes.md", "notes\n", "add docs notes")
+        before = resolve_rbf.fpga_tree(self.dir)
+        self.write_and_commit("fpga/docs/notes.md", "notes v2\n", "edit docs notes")
+        self.assertEqual(resolve_rbf.fpga_tree(self.dir), before)
+
+    def test_adding_a_new_file_under_fpga_sim_does_not_change_the_tree_hash(self):
+        before = resolve_rbf.fpga_tree(self.dir)
+        self.write_and_commit("fpga/sim/new_tb.sv", "module tb; endmodule\n",
+                              "add a new sim testbench")
+        self.assertEqual(resolve_rbf.fpga_tree(self.dir), before)
+
+    def test_editing_fpga_rtl_changes_the_tree_hash(self):
+        before = resolve_rbf.fpga_tree(self.dir)
+        self.commit_rtl_change()
+        self.assertNotEqual(resolve_rbf.fpga_tree(self.dir), before)
+
+    def test_adding_a_new_file_directly_under_fpga_changes_the_tree_hash(self):
+        before = resolve_rbf.fpga_tree(self.dir)
+        self.write_and_commit("fpga/new_module.sv", "module c; endmodule\n",
+                              "add a new fpga module")
+        self.assertNotEqual(resolve_rbf.fpga_tree(self.dir), before)
+
+    def test_a_path_merely_starting_with_sim_or_docs_still_changes_the_hash(self):
+        # Guards against a sloppy prefix match: fpga/simulation_notes.sv and
+        # fpga/docs_helper.sv are siblings of fpga/sim and fpga/docs, not
+        # members of them -- path.startswith("fpga/sim") would wrongly treat
+        # them as excluded.
+        before = resolve_rbf.fpga_tree(self.dir)
+        self.write_and_commit("fpga/simulation_notes.sv", "// notes\n",
+                              "add simulation_notes.sv (not fpga/sim/)")
+        after_sim_lookalike = resolve_rbf.fpga_tree(self.dir)
+        self.assertNotEqual(after_sim_lookalike, before)
+        self.write_and_commit("fpga/docs_helper.sv", "// helper\n",
+                              "add docs_helper.sv (not fpga/docs/)")
+        after_docs_lookalike = resolve_rbf.fpga_tree(self.dir)
+        self.assertNotEqual(after_docs_lookalike, after_sim_lookalike)
 
     # --- find_run_for_tree -------------------------------------------------
     def test_matches_the_build_for_an_unchanged_fpga_tree(self):
