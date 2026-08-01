@@ -253,13 +253,98 @@ class ResolveRbfTest(unittest.TestCase):
         self.assertIn("not authenticated", str(cm.exception))
 
     def test_run_artifact_names_parses_artifact_list(self):
-        payload = '{"artifacts": [{"name": "maldita-rbf"}, {"name": "quartus-reports"}]}'
+        # Real `gh api repos/{owner}/{repo}/actions/runs/<id>/artifacts` shape
+        # (confirmed against run 30675960267 on gmcnaught/maldita.castilla-mister):
+        # a top-level "artifacts" array of objects each carrying (among other
+        # fields) "name" and "expired". Using an invented shape here is exactly
+        # how the original bug (a nonexistent `gh run view --json artifacts`
+        # field) went undetected -- the mock must mirror the real API.
+        payload = ('{"total_count": 2, "artifacts": ['
+                   '{"name": "maldita-rbf", "expired": false}, '
+                   '{"name": "quartus-reports", "expired": false}]}')
         with mock.patch.object(
                 resolve_rbf.subprocess, "run",
                 return_value=subprocess.CompletedProcess(
                     args=[], returncode=0, stdout=payload, stderr="")):
             names = resolve_rbf.run_artifact_names(1)
         self.assertEqual(names, ["maldita-rbf", "quartus-reports"])
+
+    def test_run_artifact_names_treats_an_expired_artifact_as_absent(self):
+        # A run whose maldita-rbf has expired cannot satisfy `gh run download
+        # -n maldita-rbf` -- it must be filtered out here so resolve_run_id
+        # skips the run exactly as it would for a run that never had the
+        # artifact at all.
+        payload = ('{"total_count": 2, "artifacts": ['
+                   '{"name": "maldita-rbf", "expired": true}, '
+                   '{"name": "quartus-reports", "expired": false}]}')
+        with mock.patch.object(
+                resolve_rbf.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=payload, stderr="")):
+            names = resolve_rbf.run_artifact_names(1)
+        self.assertEqual(names, ["quartus-reports"])
+        self.assertNotIn(resolve_rbf.RBF_ARTIFACT, names)
+
+    def test_run_artifact_names_invokes_gh_api_against_the_artifacts_endpoint(self):
+        # Exercises the ACTUAL command construction, mocking only the
+        # subprocess boundary -- not run_artifact_names itself -- so a future
+        # edit back to an invalid `gh run view --json artifacts`-style field
+        # or flag is caught here instead of at release time (this is exactly
+        # the gap that let the original bug reach milestone-a: every other
+        # test mocked run_artifact_names away).
+        payload = '{"total_count": 0, "artifacts": []}'
+        with mock.patch.object(
+                resolve_rbf.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=payload, stderr="")) as m:
+            resolve_rbf.run_artifact_names(30675960267)
+        m.assert_called_once()
+        argv = m.call_args.args[0]
+        self.assertEqual(argv[0], "gh")
+        self.assertEqual(argv[1], "api")
+        self.assertNotIn("run", argv)  # not the broken `gh run view` form
+        self.assertNotIn("--json", argv)  # not the broken `--json artifacts` flag
+        endpoint = argv[2]
+        self.assertTrue(endpoint.startswith("repos/"))
+        self.assertIn("{owner}", endpoint)
+        self.assertIn("{repo}", endpoint)
+        self.assertIn("/actions/runs/30675960267/artifacts", endpoint)
+
+    def test_selects_older_match_when_newest_artifact_has_expired(self):
+        # End-to-end through resolve_run_id (not just run_artifact_names):
+        # the newest tree-matching run's maldita-rbf has expired, so an older
+        # tree-matching run with a live artifact must win -- the same
+        # newest-first walk used for the runner=linux dispatch trap.
+        old_sha = self.head_sha()
+        self.commit_docs_only()
+        new_sha = self.head_sha()
+        want = resolve_rbf.fpga_tree(self.dir)
+        runs = [{"databaseId": 99, "headSha": new_sha},
+                {"databaseId": 42, "headSha": old_sha}]
+
+        real_run = subprocess.run
+
+        def fake_gh_api(argv, **kwargs):
+            if argv[0] != "gh":
+                return real_run(argv, **kwargs)
+            run_id = int(argv[2].split("/actions/runs/")[1].split("/artifacts")[0])
+            if run_id == 99:
+                payload = ('{"artifacts": ['
+                          '{"name": "maldita-rbf", "expired": true}]}')
+            else:
+                payload = ('{"artifacts": ['
+                          '{"name": "maldita-rbf", "expired": false}]}')
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=payload, stderr="")
+
+        with mock.patch.object(resolve_rbf, "list_successful_runs",
+                               return_value=runs), \
+             mock.patch.object(resolve_rbf.subprocess, "run",
+                               side_effect=fake_gh_api):
+            run_id, built_sha, want_tree = resolve_rbf.resolve_run_id(self.dir)
+        self.assertEqual(run_id, 42)
+        self.assertEqual(built_sha, old_sha)
+        self.assertEqual(want_tree, want)
 
 
 if __name__ == "__main__":
