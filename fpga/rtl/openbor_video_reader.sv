@@ -864,6 +864,37 @@ always @(posedge ddr_clk) begin
                     synced <= 1'b1;
                     state <= ST_IDLE;
                 end
+                // [#15] RESTART GATE — a frame restart may only be dispatched during vblank.
+                // Both branches below re-anchor the scan to line 0 (display_line <= 0 ->
+                // ST_READ_LINE). The fill writes bank display_line[0] (lb_waddr, :562) and the
+                // display reads bank vcount[0] (:1050), so a line-0 fill dispatched inside
+                // active video is scanned out by the next EVEN row — the device symptom "row
+                // 214 shows row 0's pixels" (issue #15, findings 2026-07-31).
+                //
+                // How the FSM reaches here mid-frame: ST_LINE_DONE parks in ST_IDLE after the
+                // LAST fetch of a frame, and because the fetch runs one line ahead that park is
+                // in line V_ACTIVE-2's hblank (214), not vblank. ANY work ST_IDLE services from
+                // that park then walks ST_POLL_CTRL -> ST_WAIT_CTRL -> here while the display is
+                // still active: beacon_pending today, the deleted audio_wake path historically
+                // (which is why deleting the audio FSM in 7980785 dropped the device rate from
+                // ~100% to ~39% without fixing anything), any future ST_IDLE-anchored work
+                // tomorrow. Gate the RESTART, not the trigger.
+                //
+                // Blocking costs one wasted 1-qword ctrl read and consumes NOTHING (no
+                // prev_frame_counter / active_buffer / display_line update), so the pending
+                // frame is picked up by the normal path: new_frame_ddr latches
+                // new_frame_pending every frame (:540), ST_IDLE dispatches it at the boundary,
+                // and the JOY/SCANFRM chain re-reads a FRESH ctrl word here inside vblank. It
+                // cannot stall a frame — the restart still happens at the very next vblank.
+                //
+                // No-op on the normal path (verified, not assumed): new_frame pulses on the
+                // same clk_vid edge that raises vblank (openbor_video_timing.sv:143/162), and
+                // vblank_ddr is a 2-FF sync while new_frame_ddr is a 3-FF sync + edge detect,
+                // so vblank_ddr is already high whenever the boundary path arrives here — with
+                // 46 blanking lines of margin. Sim confirms unchanged fetch timing and
+                // anchors=0, i.e. the line-0 preload slack set just below is untouched.
+                else if (!vblank_ddr)
+                    state <= ST_IDLE;
                 else if (ctrl_word[31:2] != prev_frame_counter) begin
                     // New frame available
                     prev_frame_counter <= ctrl_word[31:2];
