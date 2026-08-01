@@ -279,12 +279,42 @@ def check_engine_freshness(engine, force):
     This is the exact 2026-07-27 failure: the local build/ artifact was three hours
     older than the merge that added native audio, so an --engine deploy would have
     silently shipped an engine WITHOUT the feature being tested.
+
+    When the reference commit time cannot be determined at all (submodule absent
+    AND sibling checkout absent/not-git), that is UNKNOWN, not fresh — refuse
+    unless --force, the same fail-closed treatment check_rbf_provenance already
+    gives an unprovable RBF. `stale = ctime is not None and mtime < ctime` used to
+    evaluate False in this case, silently reporting "fresh" without ever having
+    evaluated the condition.
     """
     src = GMNEXT
     sha, _ = git_head(src)
     ctime = last_code_commit_time(src)   # ignore docs-only commits — see the helper
     mtime = int(Path(engine).stat().st_mtime)
-    stale = ctime is not None and mtime < ctime
+    if ctime is None:
+        if not src.exists():
+            reason = f"{src} does not exist (neither the submodule nor the sibling checkout is present)"
+        elif sha is None:
+            reason = f"{src} exists but is not a usable git checkout (git rev-parse HEAD failed)"
+        else:
+            reason = f"{src} is a git checkout but `git log` returned no commit time (shallow clone or empty history?)"
+        msg = (f"cannot determine gmloader-next's HEAD commit time — staleness is "
+               f"UNKNOWN, not fresh\n"
+               f"       looked in: {src}\n"
+               f"       reason:    {reason}")
+        if force:
+            print(f"   !! {msg}  (--force: shipping anyway)")
+        else:
+            raise SystemExit(
+                f"FATAL: {msg}\n"
+                "       Fix: populate external/gmloader-next (submodule) or the "
+                "../gmloader-next sibling checkout, then re-run.\n"
+                "       Or:  re-run with --force to ship it deliberately.")
+        return {"commit": sha or "unknown",
+                "built": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
+                "md5": hashlib.md5(Path(engine).read_bytes()).hexdigest()[:12],
+                "note": "UNKNOWN (no reference commit time)"}
+    stale = mtime < ctime
     if stale:
         msg = (f"engine binary is OLDER than gmloader-next HEAD ({sha}) — STALE BUILD\n"
                f"       binary mtime : {time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))}\n"
