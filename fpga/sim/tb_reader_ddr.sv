@@ -98,7 +98,7 @@ module tb_reader_ddr;
     // the first ctrl read at ~165us, which captured that X into
     // prev_frame_counter and poisoned frame detection for the whole run.
     wire [31:0] ctrl_word;
-    integer i, qw, ln, xx;
+    integer i, qw, ln, xx, r_i, rows_missing;
     // active buffer pixel at STORAGE (x,y)
     function [15:0] bufpix(input integer act, input integer x, input integer y);
         reg [63:0] q;
@@ -286,13 +286,17 @@ module tb_reader_ddr;
     // line — a sim pacing artifact, not an orientation error. On correctly-paced lines the
     // linebuf[vcount%2] holds the line fetched for display_line=vcount (source vcount).
     reg orient_arm = 1'b0;
+    // [#15] per-row coverage: a row that is never checked is a blind spot, not a pass.
+    integer rows_seen [0:VACT-1];
     always @(posedge clk) begin
         if (!reset && orient_arm && ce_pix && tim_de && u_reader.frame_ready_vid
             && (u_reader.display_line == (tim_vc + 9'd1))
-            && u_reader.hcol < HACT && tim_vc < (VACT-1)) begin
+            && u_reader.hcol < HACT) begin
             // Display (col c, row d) must show framebuffer pixel (col c, row d) UNCHANGED:
             // comp_fb_dma publishes a top-down frame, so scanout must not re-order it. Both an
             // X reversal (col `FB_W-1-c) and a Y reversal (row `FB_H-1-d) fail this.
+            // [#15] the `tim_vc < VACT-1` exclusion is GONE: row 215 is the last ACTIVE line,
+            // not a vblank line, and rows 214/215 are exactly where the defect lives.
             if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc)) begin
                 if (orient_errs < 8) $display("  ORIENT MISMATCH screen(%0d,%0d) got=%h exp=%h (buf px %0d,%0d)",
                     u_reader.hcol, tim_vc, u_reader.cur_pix,
@@ -301,6 +305,23 @@ module tb_reader_ddr;
                 orient_errs = orient_errs + 1;
             end
             orient_checks = orient_checks + 1;
+            rows_seen[tim_vc] = rows_seen[tim_vc] + 1;
+        end
+    end
+
+    // ── (f) [#15] line-buffer bank collision ─────────────────────────────────────
+    // A fill must never write the bank the display is reading out of while active
+    // video is on. lb_waddr[7] is the fill bank ({display_line[0], beat_count}),
+    // tim_vc[0] is the read bank (linebuf[{vcount[0], hcol[8:2]}]). Ungated and
+    // free-running for the whole sim — a collision anywhere is a defect.
+    integer collide_errs = 0;
+    always @(posedge clk) begin
+        if (!reset && u_reader.lb_we && tim_de && (u_reader.lb_waddr[7] == tim_vc[0])) begin
+            if (collide_errs < 8)
+                $display("  LINEBUF COLLISION row=%0d bank=%0b beat=%0d display_line=%0d",
+                         tim_vc, u_reader.lb_waddr[7], u_reader.lb_waddr[6:0],
+                         u_reader.display_line);
+            collide_errs = collide_errs + 1;
         end
     end
 
@@ -331,12 +352,25 @@ module tb_reader_ddr;
         end
     endtask
 
+    // [#15] arm orientation checking across ONE complete active region (rows 0..VACT-1).
+    // new_frame fires at the last pixel of the last active line, so the window between two
+    // consecutive new_frame edges is exactly one frame of active video plus its vblank.
+    task check_full_frame;
+        begin
+            wait_frames(1);          // sit at a frame boundary (start of vblank)
+            orient_arm = 1'b1;
+            wait_frames(1);          // one complete active region
+            orient_arm = 1'b0;
+        end
+    endtask
+
     initial begin
         for (qw = 0; qw < NQW; qw = qw + 1) begin
             ln = qw / STRIDE; xx = (qw % STRIDE) * 4;
             mem0[qw] = {pix(0, xx+3, ln), pix(0, xx+2, ln), pix(0, xx+1, ln), pix(0, xx+0, ln)};
             mem1[qw] = {pix(1, xx+3, ln), pix(1, xx+2, ln), pix(1, xx+1, ln), pix(1, xx+0, ln)};
         end
+        for (r_i = 0; r_i < VACT; r_i = r_i + 1) rows_seen[r_i] = 0;
         model_active = 1'b0;
         repeat (8) @(posedge clk);
         reset <= 1'b0;
@@ -344,7 +378,7 @@ module tb_reader_ddr;
         // BUF0 (active=0): settle a few frames (sync + first full frame -> frame_ready), then
         // measure orientation on a STABLE frame (armed). addr/data run continuously (ungated).
         wait_frames(3);
-        orient_arm = 1'b1; wait_lines(25); orient_arm = 1'b0;
+        check_full_frame();
         $display("BUF0: addr_checks=%0d data_checks=%0d orient_checks=%0d addr_errs=%0d data_errs=%0d orient_errs=%0d active=%0b",
                  addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
         if (u_reader.active_buffer !== 1'b0) active_err = active_err + 1;
@@ -354,11 +388,29 @@ module tb_reader_ddr;
         model_active = 1'b1;
         wait (u_reader.active_buffer === 1'b1);
         wait_frames(3);
-        orient_arm = 1'b1; wait_lines(25); orient_arm = 1'b0;
+        check_full_frame();
         $display("BUF1: addr_checks=%0d data_checks=%0d orient_checks=%0d addr_errs=%0d data_errs=%0d orient_errs=%0d active=%0b",
                  addr_checks, data_checks, orient_checks, addr_errs, data_errs, orient_errs, u_reader.active_buffer);
         if (u_reader.active_buffer !== 1'b1) active_err = active_err + 1;
 
+        // [#15] every active row must have been orientation-checked. A row that the
+        // pacing gate skipped is a hole in the test, and rows 214/215 are precisely the
+        // rows the old 25-line window and the `tim_vc < VACT-1` exclusion left uncovered.
+        rows_missing = 0;
+        for (r_i = 0; r_i < VACT; r_i = r_i + 1)
+            if (rows_seen[r_i] == 0) begin
+                if (rows_missing < 8) $display("  ROW NEVER ORIENTATION-CHECKED: %0d", r_i);
+                rows_missing = rows_missing + 1;
+            end
+        if (rows_missing) begin
+            $display("RESULT: FAIL — %0d of %0d active rows were never checked", rows_missing, VACT);
+            $fatal;
+        end
+        if (collide_errs) begin
+            $display("RESULT: FAIL — %0d linebuf bank collisions (fill wrote the bank being displayed)",
+                     collide_errs);
+            $fatal;
+        end
         if (addr_checks < 30 || data_checks < 30 || orient_checks < 300) begin
             $display("RESULT: FAIL — too few checks (addr=%0d data=%0d orient=%0d)",
                      addr_checks, data_checks, orient_checks);
