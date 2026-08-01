@@ -183,7 +183,7 @@ module tb_reader_ddr;
     integer STALL_LEN = 0, STALL_ROW = -1, STALL_FRAME = 3;
     integer DEFER_LINE = -1, DEFER_CYC = 0;
     integer DROP_LINE  = -1, DROP_BEATS = 0;
-    integer EXTRA_LINE = -1, EXTRA_BEATS = 0, EXTRA_DELAY = 0;
+    integer EXTRA_LINE = -1, EXTRA_BEATS = 0, EXTRA_DELAY = 0, EXTRA_AT_DLINE = -1;
     integer MISROUTE_LINE = -1, MISROUTE_SRC = 0;
     integer INJ_FRAME = 5;   // all four injectors are ONE-SHOT, on this frame
     integer mon_frame = 0;   // monitor-side frame index (declared here: used by the model)
@@ -225,7 +225,13 @@ module tb_reader_ddr;
             end
 
             // ---- stray-beat emitter (has priority over the normal stream) ----
-            if (xtra_wait != 0) xtra_wait <= xtra_wait - 1;
+            // Release either after EXTRA_DELAY cycles, or (EXTRA_AT_DLINE >= 0) the
+            // moment the reader is sitting in ST_WAIT_LINE for that display_line —
+            // i.e. exactly "the stale beats land while display_line == 214".
+            if (xtra_wait != 0
+                && !(EXTRA_AT_DLINE >= 0 && u_reader.state == 5'd5
+                     && u_reader.display_line == 9'(EXTRA_AT_DLINE)))
+                xtra_wait <= (EXTRA_AT_DLINE >= 0) ? xtra_wait : xtra_wait - 1;
             else if (xtra_left != 0 && stall_cnt == 0) begin
                 r_dout       <= mem_read(xtra_addr + 29'(xtra_i));
                 r_dout_ready <= 1'b1;
@@ -290,7 +296,7 @@ module tb_reader_ddr;
                         xtra_addr  <= rd_addr_l;
                         xtra_i     <= 0;
                         xtra_left  <= EXTRA_BEATS;
-                        xtra_wait  <= EXTRA_DELAY;
+                        xtra_wait  <= (EXTRA_AT_DLINE >= 0) ? 1 : EXTRA_DELAY;
                     end
                 end
             end
@@ -708,6 +714,7 @@ module tb_reader_ddr;
         void'($value$plusargs("EXTRA_LINE=%d",  EXTRA_LINE));
         void'($value$plusargs("EXTRA_BEATS=%d", EXTRA_BEATS));
         void'($value$plusargs("EXTRA_DELAY=%d", EXTRA_DELAY));
+        void'($value$plusargs("EXTRA_AT_DLINE=%d", EXTRA_AT_DLINE));
         void'($value$plusargs("MISROUTE_LINE=%d", MISROUTE_LINE));
         void'($value$plusargs("MISROUTE_SRC=%d",  MISROUTE_SRC));
         void'($value$plusargs("INJ_FRAME=%d",   INJ_FRAME));
