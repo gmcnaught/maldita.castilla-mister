@@ -214,12 +214,26 @@ and `upload16` (`:58-60`) memcpy straight into it.
 of uncached stores per frame**.
 
 **[OBS/DER]** `mmap("/dev/mem", O_SYNC)` over the FPGA-reserved window maps as
-**Device memory, not write-combining**: ARM's `phys_mem_access_prot` only
-upgrades `O_SYNC` to `pgprot_writecombine` when `pfn_valid(pfn)` holds, and the
-0x3B000000 window is carved out of the kernel's map so it does not. Consequence:
-**no store merging, no burst formation — every store is its own AXI beat.** There
-is no flag to flip; write-combining is not reachable through `/dev/mem` for this
-region.
+**strongly-ordered memory, not write-combining**: ARM's `phys_mem_access_prot`
+only upgrades `O_SYNC` to `pgprot_writecombine` when `pfn_valid(pfn)` holds, and
+takes the `pgprot_noncached` branch otherwise. Consequence: **no store merging,
+no burst formation — every store is its own AXI beat.** There is no flag to
+flip; write-combining is not reachable through `/dev/mem` for this region.
+
+**[OBS] The `pfn_valid()` premise now has a device-side witness.** Main_MiSTer
+bounds-checks every core-visible address against `[0x20000000, 0x40000000)`
+(`vendor/Main_MiSTer/user_io.cpp:717`, `:921`, `:2794`) — the 512 MiB carved out
+of the DE10-Nano's 1 GiB for the fabric. Both `0x3A000000` and `0x3B000000` sit
+inside it, outside the kernel's memblock. **[DER]** So an `O_SYNC`
+vs. no-`O_SYNC` A/B over either region compares two *identical* mappings: the
+first branch is taken both times and the `O_SYNC` test is never reached. Any
+bandwidth figure produced by such an A/B measures nothing about `O_SYNC`.
+
+**[UNK]** `pgprot_noncached` on ARM is `L_PTE_MT_UNCACHED` (strongly-ordered),
+not merely unbuffered, so a hypothetical WC mapping could plausibly be several
+times faster. Not verified against the MiSTer kernel tree, which is not checked
+out here. *Decisive and cheap:* on device, `cat /proc/iomem` (is `0x3A000000`
+inside a "System RAM" range?) and `cat /proc/cmdline` (`mem=`).
 
 That makes it the one place a real DMA controller (the HPS PL330) would
 genuinely help — and it is **blocked by the same wall the f2h-IRQ review already
@@ -233,6 +247,35 @@ store today — BLITPROF's `raster` covers transform and cull, not the copy. One
 `clock_gettime` pair around `blt_push_tris`/`blt_trilist` costs nothing and
 settles whether 12.4 KiB of Device-memory stores is 30 µs or 300 µs. **If it is
 under ~100 µs, close this line permanently.**
+
+### 3.3a Scoping trap — the big noncached blit is on the path that does not ship
+
+**[OBS]** The largest single write into a noncached mapping in either repo is
+`NativeVideoWriter_WriteFrame`'s one-shot `memcpy` of `NV_FRAME_BYTES` =
+**124,416 B** (`native_video_writer.c:43`, `:108`), with a capture-and-convert
+variant moving RGBA 248,832 + RGB565 124,416 ≈ 373 KiB.
+
+**[OBS]** It does not run on the shipping path. `main.cpp:1094-1101` skips it
+explicitly: *"the 0x3A DDR writer is the software producer, unused on the fabric
+path."* Any per-frame cost derived from those byte counts belongs to
+`preset_sw` / the GL fallback, **not** to `backend_mfgpu`.
+
+**[DER] Where the fabric path *is* exposed** is `upload16`'s per-row memcpy on a
+texture-cache **miss**: a 512×512 RGB565 page is 512 KiB of strongly-ordered
+stores in a single frame. `texup = 0.0` in steady state
+(`bench-results/20260730-175503---preset_fabric.log`), so this is a **spike on
+room transitions, not a rate** — the shape of a hitch, not of a frame-rate loss.
+That is the one host-mapping cost on the shipping path worth a timer, and it is
+the same loop §3.2 would delete outright.
+
+**[OBS] Side catch.** `native_video_writer.c:123` credits its
+write-before-doorbell ordering to *"strongly-ordered device memory (O_SYNC +
+MAP_SHARED)"*. Per the analysis above the strong ordering comes from
+`pfn_valid()` being false, **not** from `O_SYNC` — the comment is correct by
+accident, and would silently stop being correct if that region ever entered the
+kernel's map. `raster_backend_mfgpu.cpp` (`mf_ctrl_barrier`) and
+`native_audio_writer.c:135-150` do not rely on this; they issue an explicit
+`__sync_synchronize()`. Only this one site does.
 
 ### 3.4 Already settled — do not re-open
 
@@ -324,6 +367,9 @@ the only one that addresses what §1.2 calls the number a player feels.
 - `findings/2026-07-30-port-review-native-simd-offload.md` §3.1 — the STAGE
   offload this document reframes.
 - `external/gmloader-next` @ `d6d97eb`: `raster_backend_mfgpu.cpp:902-903`,
-  `:1428-1430`, `:3194-3202`; `main.cpp:1086-1092`.
+  `:1428-1430`, `:3194-3202`; `main.cpp:1086-1092`, `:1094-1101`;
+  `native_video_writer.c:43`, `:108`, `:123`; `native_audio_writer.c:135-150`.
+- `vendor/Main_MiSTer/user_io.cpp:717`, `:921`, `:2794` — the
+  `[0x20000000, 0x40000000)` fabric window, the `pfn_valid()` witness in §3.3.
 - `mister-fpga-blitter` @ `c4407e4`: `host/blt_emitter.c:58-60`, `:561`;
   `refmodel/blitter_ref.h:285-290`.
