@@ -68,7 +68,7 @@ export GMLOADER_RASTER=mfgpu
 export LD_LIBRARY_PATH="$GAMEDIR/mesa:$GAMEDIR"
 
 # Optional bench-only override hook (perf diagnostics harness only — see
-# mister-gmloader scripts/mister_run.sh). Sourced IFF $GAMEDIR/bench.env
+# this repo's scripts/mister_run.sh). Sourced IFF $GAMEDIR/bench.env
 # exists; production launches never create that file, so this block is a
 # no-op and the log line below is byte-identical to before this hook existed.
 # Placed AFTER the hardcoded exports above so a staged bench.env can ADD

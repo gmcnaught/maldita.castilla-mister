@@ -4,7 +4,7 @@
 # 2) Every `backtick` path starting with a known repo prefix must exist
 #    relative to the MisterFPGA-Projects root.
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # mister-gmloader
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # maldita.castilla-mister
 PROJ="$(cd "$ROOT/.." && pwd)"                     # MisterFPGA-Projects
 TMP="${TMPDIR:-/tmp}/arch-docs-check.$$"
 mkdir -p "$TMP"

@@ -131,7 +131,7 @@
 // Default vectors are stream_quiet_f0 (mftrace-quiet.txt frame 0). To replay a
 // different capture, regenerate its vectors and recompile with the tag:
 //   make -f gen_tri_golden.mk gen_tri_stream
-//   ./gen_tri_stream ../../../mister-gmloader/docs/superpowers/findings/data/mftrace-quiet.txt 1 stream_quiet_f1
+//   ./gen_tri_stream ../../docs/superpowers/findings/data/mftrace-quiet.txt 1 stream_quiet_f1
 //   iverilog -g2012 -DSTREAM_VEC='"stream_quiet_f1"' -o /tmp/s.vvp \
 //     -I ../rtl -I ../rtl/jtframe -I ../sys -I . -y ../rtl -y ../rtl/jtframe \
 //     -y ../sys -y . -Y .sv -Y .v *_stub.sv tb_blitter_trilist_stream.sv && vvp /tmp/s.vvp

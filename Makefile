@@ -48,6 +48,11 @@ help: ## Show available targets
 # Toolchain is baked into the cached image; builds are incremental (build/
 # persists in the checkout). Host-native arm64 image, armhf is the cross
 # target — do NOT switch to an arm32v7 base image (see gmloader-next/CLAUDE.md).
+# This is an Apple-Silicon-host cross-build: arm64 runs host-native (fast, no
+# emulation) and cross-compiles to armhf. .github/workflows/release.yml's
+# `arm32v7/debian:bullseye-slim` is a DIFFERENT context (x86 GitHub runner,
+# QEMU-emulated arm32v7) where that base image is the correct choice, not an
+# inconsistency with this recipe — see the matching note there.
 
 build-image: ## Build the cached armhf cross-toolchain image (one-time)
 	cd $(GMDIR) && $(DOCKER) build -f Dockerfile.gmloader-build -t $(IMAGE) .

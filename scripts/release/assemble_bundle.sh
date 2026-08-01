@@ -34,6 +34,24 @@ RBF_SIZE=$(wc -c < "$RBF")
 file "$ENGINE" | grep "ELF 32-bit" | grep -q "ARM" \
     || fail "engine is not a 32-bit ARM ELF: $(file "$ENGINE")"
 
+# gmloader-next/CLAUDE.md: a bookworm base image produces GLIBC_2.34+ symbols
+# that MiSTer's Buildroot ld.so cannot resolve -- an unloadable engine with
+# every OTHER gate (ELF arch, MISTER_BUILD symbol) still green. The engine's
+# validated bullseye cross-build ("Max GLIBC 2.29 (ok)", CLAUDE.md line 109)
+# is the ceiling actually exercised on-device; assert it here so a future
+# base-image bump fails loudly instead of shipping a dead engine.
+GLIBC_CEILING="2.29"
+command -v strings >/dev/null 2>&1 \
+    || fail "strings not available -- cannot verify the engine's GLIBC ceiling"
+ENGINE_MAX_GLIBC=$(strings "$ENGINE" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+    | sed 's/^GLIBC_//' | sort -V | tail -1)
+[ -n "$ENGINE_MAX_GLIBC" ] \
+    || fail "no GLIBC_* symbol versions found in $ENGINE -- cannot verify glibc ceiling"
+if [ "$(printf '%s\n%s\n' "$GLIBC_CEILING" "$ENGINE_MAX_GLIBC" | sort -V | tail -1)" != "$GLIBC_CEILING" ]; then
+    fail "engine requires GLIBC_$ENGINE_MAX_GLIBC > ceiling GLIBC_$GLIBC_CEILING -- " \
+         "MiSTer's Buildroot cannot load this (see gmloader-next/CLAUDE.md 'Mesa (soft GL for MISTER_NATIVE_VIDEO)')"
+fi
+
 # --- stage the SD-card tree --------------------------------------------------
 BUNDLE="$OUT/bundle"
 rm -rf "$BUNDLE"

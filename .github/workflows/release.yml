@@ -24,7 +24,12 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  # Redundant workflow_dispatch dry runs are fine to collapse, but a tag push
+  # runs the actual `gh release create` publish step -- cancelling it
+  # mid-upload leaves a partially-published GitHub Release. So: cancel
+  # in-progress runs for everything EXCEPT a v* tag push, which is never
+  # cancelled once started.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
   resolve-rbf:
@@ -89,6 +94,14 @@ jobs:
           # build_mister_arm.sh expects the gmloader-next checkout at /src. It
           # runs no git commands, so mounting only the submodule dir is safe.
           # The script asserts MISTER_BUILD linkage before stripping.
+          #
+          # arm32v7/debian:bullseye-slim is correct HERE: this runner is x86,
+          # so the image runs under QEMU emulation regardless of base arch,
+          # and this recipe needs a native (non-cross) armhf toolchain inside
+          # it. The Makefile's local build path is the opposite case --
+          # Apple-Silicon host, host-native arm64 image cross-compiling to
+          # armhf, explicitly NOT this arm32v7 image (see the note beside
+          # `build-image` there) -- both are correct in their own context.
           docker run --rm --platform linux/arm/v7 \
             -v "$PWD/external/gmloader-next:/src" -w /src \
             arm32v7/debian:bullseye-slim \
