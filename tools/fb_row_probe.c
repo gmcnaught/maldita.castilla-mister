@@ -76,6 +76,14 @@ int main(int argc, char **argv)
         uint32_t c0 = *ctrl;
         const volatile uint8_t *buf = m + ((c0 & 1u) ? BUF1_OFF : BUF0_OFF);
 
+        // Casting away `volatile` for memcpy is deliberate, not an oversight.
+        // The source is plain DRAM (no MMIO read side effects), so a plain
+        // block copy is semantically fine, and the seqlock-style coherence
+        // guard only needs the two `ctrl` reads (genuinely volatile, above
+        // and below) to stay ordered around the copy - which they do, since
+        // memcpy is an opaque call the compiler cannot reorder across. Do not
+        // "fix" this by making the copies volatile/byte-wise; that would not
+        // change correctness and would just slow the copy down.
         memcpy(r0,   (const void *)(buf +   0 * ROW_BYTES), ROW_BYTES);
         memcpy(r213, (const void *)(buf + 213 * ROW_BYTES), ROW_BYTES);
         memcpy(r214, (const void *)(buf + 214 * ROW_BYTES), ROW_BYTES);
@@ -101,15 +109,62 @@ int main(int argc, char **argv)
 
     printf("\nsamples=%d usable=%d dup=%d torn=%d row0-blank=%d\n",
            samples, taken, dup, torn, blank0);
-    printf("VERDICT: %s\n",
-           (taken == 0)   ? "INCONCLUSIVE (no usable sample - row 0 was blank; "
-                            "re-run on a scene with content in the top row)"
-         : (dup == taken) ? "DDR-DUP (the duplicate is already in the DDR "
-                            "framebuffer -> producer side, go to Task 4)"
-         : (dup == 0)     ? "DDR-CLEAN (DDR has no duplicate -> created during "
-                            "scanout, go to Task 3)"
-                          : "MIXED (intermittent - record the counts on the "
-                            "issue before choosing a branch)");
+
+    // Minimum usable-sample count before a DUP/CLEAN call is reported as
+    // decisive. Below this, still report the determination (never suppress
+    // the measurement) but flag it low-confidence so the reader doesn't
+    // branch a whole task on a single lucky/unlucky frame.
+    const int MIN_USABLE = 8;
+    char verdict[512];
+
+    if (taken == 0) {
+        // taken==0 has three distinct root causes that must not be
+        // conflated: a blank row 0 (nothing to say about the bug), a torn
+        // control word (the tear guard itself is firing - a separate signal
+        // worth its own finding), or a mix of both. Reporting "row 0 was
+        // blank" when the real cause is tearing sends the next investigator
+        // chasing HUD visibility instead of the control word churning.
+        if (torn == samples) {
+            snprintf(verdict, sizeof(verdict),
+                "INCONCLUSIVE (0/%d usable - every sample was torn, i.e. the "
+                "control word changed mid-copy every time; row 0 blankness is "
+                "not the cause here - the control word is churning faster than "
+                "expected and that needs its own look before re-running)",
+                samples);
+        } else if (blank0 == samples) {
+            snprintf(verdict, sizeof(verdict),
+                "INCONCLUSIVE (0/%d usable - row 0 was blank in every sample; "
+                "re-run on a scene with content in the top row)", samples);
+        } else {
+            snprintf(verdict, sizeof(verdict),
+                "INCONCLUSIVE (0/%d usable - blank0=%d torn=%d, a mix of both "
+                "and neither alone; re-run on a scene with top-row content, "
+                "and note the tear count in case it's also worth investigating)",
+                samples, blank0, torn);
+        }
+    } else {
+        const char *conf = (taken < MIN_USABLE)
+            ? " [LOW-CONFIDENCE: below the 8-sample floor (MIN_USABLE=8); "
+              "re-run for more samples before branching a task on this]"
+            : "";
+        if (dup == taken) {
+            snprintf(verdict, sizeof(verdict),
+                "DDR-DUP (N=%d usable, %d/%d duplicated - the duplicate is "
+                "already in the DDR framebuffer -> producer side, go to "
+                "Task 4)%s", taken, dup, taken, conf);
+        } else if (dup == 0) {
+            snprintf(verdict, sizeof(verdict),
+                "DDR-CLEAN (N=%d usable, 0/%d duplicated - DDR has no "
+                "duplicate -> created during scanout, go to Task 3)%s",
+                taken, taken, conf);
+        } else {
+            snprintf(verdict, sizeof(verdict),
+                "MIXED (N=%d usable, %d/%d duplicated - intermittent; record "
+                "the counts on the issue before choosing a branch)%s",
+                taken, dup, taken, conf);
+        }
+    }
+    printf("VERDICT: %s\n", verdict);
 
     munmap((void *)m, MAP_LEN);
     close(fd);
