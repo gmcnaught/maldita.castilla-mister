@@ -117,11 +117,91 @@ class ResolveRbfTest(unittest.TestCase):
     def test_returns_run_sha_and_tree(self):
         sha = self.head_sha()
         with mock.patch.object(resolve_rbf, "list_successful_runs",
-                               return_value=[{"databaseId": 7, "headSha": sha}]):
+                               return_value=[{"databaseId": 7, "headSha": sha}]), \
+             mock.patch.object(resolve_rbf, "run_artifact_names",
+                               return_value=[resolve_rbf.RBF_ARTIFACT]):
             run_id, built_sha, want_tree = resolve_rbf.resolve_run_id(self.dir)
         self.assertEqual(run_id, 7)
         self.assertEqual(built_sha, sha)
         self.assertEqual(want_tree, resolve_rbf.fpga_tree(self.dir))
+
+    # --- artifact-aware selection (the runner=linux dispatch trap) --------
+    # A workflow_dispatch with runner=linux skips build-windows but still
+    # concludes "success", uploading only maldita-rbf-linux. If that run is
+    # newest and tree-matching, naive "first tree match wins" would pick a
+    # run `gh run download -n maldita-rbf` can never satisfy.
+    def test_selects_older_match_when_newest_lacks_the_artifact(self):
+        old_sha = self.head_sha()
+        self.commit_docs_only()
+        new_sha = self.head_sha()
+        want = resolve_rbf.fpga_tree(self.dir)
+        self.assertEqual(want, resolve_rbf.fpga_tree(self.dir, old_sha))
+        runs = [{"databaseId": 99, "headSha": new_sha},
+                {"databaseId": 42, "headSha": old_sha}]
+
+        def fake_artifacts(run_id):
+            # 99 = the linux-only dispatch (newest, tree-matches, no windows
+            # artifact); 42 = the older run that actually has it.
+            return [] if run_id == 99 else [resolve_rbf.RBF_ARTIFACT]
+
+        with mock.patch.object(resolve_rbf, "list_successful_runs",
+                               return_value=runs), \
+             mock.patch.object(resolve_rbf, "run_artifact_names",
+                               side_effect=fake_artifacts):
+            run_id, built_sha, want_tree = resolve_rbf.resolve_run_id(self.dir)
+        self.assertEqual(run_id, 42)
+        self.assertEqual(built_sha, old_sha)
+        self.assertEqual(want_tree, want)
+
+    def test_raises_naming_skipped_runs_when_none_carry_the_artifact(self):
+        old_sha = self.head_sha()
+        self.commit_docs_only()
+        new_sha = self.head_sha()
+        runs = [{"databaseId": 99, "headSha": new_sha},
+                {"databaseId": 42, "headSha": old_sha}]
+        with mock.patch.object(resolve_rbf, "list_successful_runs",
+                               return_value=runs), \
+             mock.patch.object(resolve_rbf, "run_artifact_names",
+                               return_value=["maldita-rbf-linux"]):
+            with self.assertRaises(resolve_rbf.RbfResolutionError) as cm:
+                resolve_rbf.resolve_run_id(self.dir)
+        msg = str(cm.exception)
+        self.assertIn("99", msg)
+        self.assertIn("42", msg)
+
+    def test_artifact_query_failure_raises_rather_than_silently_skipping(self):
+        sha = self.head_sha()
+        runs = [{"databaseId": 7, "headSha": sha}]
+
+        def boom(run_id):
+            raise resolve_rbf.RbfResolutionError(
+                "gh run view 7 --json artifacts failed -- boom")
+
+        with mock.patch.object(resolve_rbf, "list_successful_runs",
+                               return_value=runs), \
+             mock.patch.object(resolve_rbf, "run_artifact_names",
+                               side_effect=boom):
+            with self.assertRaises(resolve_rbf.RbfResolutionError) as cm:
+                resolve_rbf.resolve_run_id(self.dir)
+        self.assertIn("boom", str(cm.exception))
+
+    def test_run_artifact_names_raises_when_gh_query_fails(self):
+        with mock.patch.object(
+                resolve_rbf.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr="not authenticated")):
+            with self.assertRaises(resolve_rbf.RbfResolutionError) as cm:
+                resolve_rbf.run_artifact_names(1)
+        self.assertIn("not authenticated", str(cm.exception))
+
+    def test_run_artifact_names_parses_artifact_list(self):
+        payload = '{"artifacts": [{"name": "maldita-rbf"}, {"name": "quartus-reports"}]}'
+        with mock.patch.object(
+                resolve_rbf.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=payload, stderr="")):
+            names = resolve_rbf.run_artifact_names(1)
+        self.assertEqual(names, ["maldita-rbf", "quartus-reports"])
 
 
 if __name__ == "__main__":

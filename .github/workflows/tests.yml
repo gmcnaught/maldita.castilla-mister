@@ -1,0 +1,86 @@
+name: Tests
+
+# Runs the repo's dependency-free scripts/tests/ suites, which previously
+# executed only when a human remembered to run them by hand. Two of the three
+# are exactly the gates guarding what may be published:
+#
+#   test_check_quartus_gates.sh  GATING. Guards the 332148 (timing) / 276007
+#                                 (M10K) production gate that build-rbf.yml
+#                                 runs on every RBF build (fpga/scripts/
+#                                 check_quartus_gates.sh). A regression here
+#                                 means a bad bitstream could pass the real
+#                                 gate undetected.
+#   test_resolve_rbf.py          GATING. Guards scripts/lib/resolve_rbf.py,
+#                                 the artifact-selection logic release.yml and
+#                                 deploy.py --fetch-rbf both depend on to
+#                                 avoid shipping a stale RBF or one from a
+#                                 workflow_dispatch run that never built the
+#                                 Windows artifact.
+#   test_assemble_bundle.sh      GATING. Guards the release bundle's
+#                                 exhaustive manifest check AND the engine ELF
+#                                 arch / GLIBC-ceiling checks in
+#                                 scripts/release/assemble_bundle.sh --
+#                                 exactly what release.yml's publish step
+#                                 relies on. It exits 1 with no engine binary
+#                                 present (BY DESIGN, so a runner that checks
+#                                 only the exit code cannot report green on a
+#                                 no-op script) -- this workflow does not
+#                                 weaken that; instead the assemble-bundle-test
+#                                 job below BUILDS a real engine first, the
+#                                 same recipe release.yml's build-engine job
+#                                 uses, so the skip path is never exercised
+#                                 here.
+#
+# No added dependencies: system python3 (stdlib unittest) and bash only,
+# matching the "no pytest, no deps" rule in scripts/tests/.
+#
+# Note: scripts/tests/test_wire_constants.py is intentionally NOT run here --
+# it fails for a pre-existing, unrelated reason (missing
+# patches/mister/blitter/blitter_ref.h). See scripts/tests/ for that history;
+# fixing it is out of scope for this workflow.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  script-tests:
+    name: check_quartus_gates + resolve_rbf (dependency-free, no engine needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: fpga/scripts/check_quartus_gates.sh tests
+        run: bash scripts/tests/test_check_quartus_gates.sh
+
+      - name: scripts/lib/resolve_rbf.py tests
+        run: python3 scripts/tests/test_resolve_rbf.py
+
+  assemble-bundle-test:
+    name: assemble_bundle.sh (builds a real engine so the gate actually runs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build the ARM engine (same recipe as release.yml's build-engine)
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD/external/gmloader-next:/src" -w /src \
+            arm32v7/debian:bullseye-slim \
+            bash .github/scripts/build_mister_arm.sh
+
+      - name: scripts/release/assemble_bundle.sh tests
+        run: bash scripts/tests/test_assemble_bundle.sh
