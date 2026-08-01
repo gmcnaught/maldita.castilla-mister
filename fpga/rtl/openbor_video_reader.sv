@@ -952,11 +952,11 @@ always @(posedge ddr_clk) begin
                     // simply mirrors it again — which is exactly the whole-frame inversion
                     // seen on device.
                     //
-                    // Reversing here was also subtly wrong independent of the above: the
-                    // pivot uses this module's V_ACTIVE=240 while openbor_video_timing.sv
-                    // displays 224 lines, so display_line only reaches ~223 and the reversed
-                    // fetch showed FB rows 239..16 — a 16-row offset with rows 0-15 never
-                    // displayed. Forward addressing does not depend on the pivot at all.
+                    // Reversing here was also subtly wrong independent of the above: it
+                    // needs a pivot, and forward addressing does not. (The old text here
+                    // cited a V_ACTIVE=240-vs-224-displayed-lines mismatch; both are `FB_H
+                    // = 216 now — V_ACTIVE:206 and openbor_video_timing.sv:57 take the
+                    // same root — so that particular offset is structurally gone.)
                     ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // `FB_STRIDE_QW-beat burst
                     ddr_rd       <= 1'b1;
@@ -1069,11 +1069,10 @@ end
 reg  [8:0]  hcol;
 reg  [63:0] lb_q;
 
-// [device-fix: vertical (Y) flip] The frame renders upside-down on hardware — a GameMaker/OpenGL
-// Y-up vs framebuffer Y-down convention mismatch (uniform across borders/HUD/scene). The X axis
-// is CORRECT (sword stays on the left; columns forward). Un-flip on the DISPLAY side, Y ONLY: the
-// ST_READ_LINE fetch reads the reversed SOURCE line (239 - display_line). The pixel output here is
-// UNCHANGED (hcol forward: column 0 = leftmost, lane = hcol[1:0]) — do NOT reverse X.
+// The pixel output is FORWARD on both axes: column 0 = leftmost (lane = hcol[1:0]), row d = source
+// row d. The fetch is forward too — see the ST_READ_LINE comment for why the Y flip does NOT belong
+// here (it lives at its source, raster_backend_mfgpu.cpp's src_is_appsurf branch). The old text here
+// described a reversed `239 - display_line` fetch that this module has not done since 94fc48d.
 
 // vcount here is the native clk_vid timing counter (same domain as this read
 // port) -- no CDC needed. The ddr_clk fill side uses the gray-synced vcount_ddr.
