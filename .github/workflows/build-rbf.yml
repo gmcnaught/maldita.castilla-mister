@@ -23,12 +23,15 @@ on:
       # sim/ and docs/ don't affect the RBF -- skip the ~13min build for them.
       # fpga/scripts/ used to be excluded here too; it's gone now (moved to
       # scripts/ci/), so trigger scope matches tree scope for it. sim/ and
-      # docs/ do NOT: fpga_tree() (scripts/lib/resolve_rbf.py) hashes the
-      # WHOLE fpga/ tree, so an edit under fpga/sim/** or fpga/docs/** still
-      # moves the bitstream identity even though it produces no build --
-      # resolve_rbf.py then finds no matching run and deploy.py refuses until
-      # someone manually dispatches a build for the new tree hash. This is a
-      # live trap, not a hypothetical.
+      # docs/ now match too: fpga_tree() (scripts/lib/resolve_rbf.py,
+      # EXCLUDED_PREFIXES) hashes fpga/ with these same two prefixes removed,
+      # so an edit under fpga/sim/** or fpga/docs/** neither triggers a build
+      # nor moves the bitstream's identity -- trigger scope and tree scope
+      # match exactly. Keep it that way: change this list and
+      # EXCLUDED_PREFIXES together, or the trap comes straight back (an
+      # exclusion added to only one side either builds nothing for a change
+      # that DOES move the hash, or fails to hash a change that DOES get
+      # built).
       - '!fpga/sim/**'
       - '!fpga/docs/**'
       - '.github/workflows/build-rbf.yml'
