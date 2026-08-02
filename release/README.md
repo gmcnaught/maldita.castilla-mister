@@ -16,13 +16,19 @@ FPGA blitter core.
 
 ## Game data (required, not included)
 
-Get the free PortMaster release of Maldita Castilla and place:
+Maldita Castilla is freeware (Locomalito / Gryzor87) and the PortMaster port
+of it is public, so the data is free to obtain — it is just not shipped in
+this bundle. Source:
 
-- the APK at `games/gmloader/mygame.apk`
-  (rename `malditacastilla.apk` to `mygame.apk`)
-- game data at `games/gmloader/saves/game.droid` and
-  `games/gmloader/saves/options.ini` (created on first run if your APK
-  contains them)
+  https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla
+
+Place:
+
+- `malditacastilla.apk` at `games/gmloader/mygame.apk`
+  (rename it — `gmloader.json`'s `apk_path` expects that exact name)
+- `gamedata/game.droid` at `games/gmloader/saves/game.droid`
+- `gamedata/options.ini` at `games/gmloader/saves/options.ini`
+  (also created on first run if your APK contains it)
 
 `games/gmloader/APKs/README.txt` repeats these steps.
 

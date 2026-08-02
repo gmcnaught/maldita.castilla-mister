@@ -38,10 +38,15 @@ tagged `v*` release publishes:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `games/Maldita Castilla/_handler.sh` — the auto-launch dispatcher
    - `games/gmloader/` — the engine and its GL runtime
-2. Add the game data — it is **not** included. Get the free PortMaster release
-   of Maldita Castilla and place the APK at `games/gmloader/mygame.apk`
-   (rename `malditacastilla.apk` → `mygame.apk`; `gmloader.json` expects that
-   exact name). Save data lives in `games/gmloader/saves/`.
+2. Add the game data — it is **not** included here, but Maldita Castilla is
+   freeware (Locomalito / Gryzor87) and the PortMaster port is public. Source:
+   [`PortsMaster/PortMaster-New` →
+   `ports/maldita.castilla/maldita.castilla/`](https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla).
+   Take from it:
+   - `malditacastilla.apk` → `games/gmloader/mygame.apk` (rename it;
+     `gmloader.json`'s `apk_path` expects that exact name)
+   - `gamedata/game.droid` and `gamedata/options.ini` →
+     `games/gmloader/saves/` (which also holds your save data)
 3. Verify the copy against `sha256sums.txt` — FAT filesystems can silently
    truncate files on an interrupted copy.
 4. Load **MalditaCastilla** from the MiSTer OSD (`_Other` menu).
