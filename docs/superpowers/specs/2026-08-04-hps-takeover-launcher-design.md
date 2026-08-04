@@ -182,6 +182,44 @@ no OSD to change cores from — but with takeover disarmed, an engine started th
 way would keep running and fight whatever core the user loads next. The daemon
 path stays supported for that case.
 
+### 2a.0 Where a Scripts entry is allowed to live
+
+**[OBS]** The browser is `SelectFile(Selected_F[0], "SH", SCANO_DIR, …)`
+(`menu.cpp:6934`, `:7098`) and its home is the literal relative path `"Scripts"`
+(`menu.cpp:448`), resolved against `getRootDir()`. The confinement is explicit —
+a `selPath` that does not start with `Scripts` is reset to it
+(`menu.cpp:461-465`), so the subtree cannot be navigated out of and nothing
+else on the card is reachable from that menu.
+
+- **Subdirectories work.** `SCANO_DIR` is set, so directories are listed and
+  enterable (`file_io.cpp:1708-1712` skips every non-`_` directory when it is
+  not). `Scripts/Maldita Castilla/launch.sh` is valid, at the cost of one
+  keypress. We use the top level.
+- **The root is not always `/media/fat`.** `getRootDir()` →
+  `getStorageDir(device)` returns `/media/usb<N>` on a box booted with USB as
+  the root device (`config/device.bin`, resolved in `FindStorage`,
+  `file_io.cpp:1131-1141`, `:1223`). Either/or, not a second search path — so
+  `deploy.py` installing to `/media/fat/Scripts` is right for an SD-rooted box
+  and wrong for a USB-rooted one. **[UNK]** whether any target device is
+  USB-rooted; if one is, the install path has to follow `device.bin`.
+- **Filtering:** exactly one extension, `sh`, case-insensitive (the matcher
+  chops the extension string into 3-char groups and breaks after the first when
+  it is shorter, `file_io.cpp:1762-1776`). Files *and* directories whose name
+  begins with `.` are skipped (`:1705`, `:1716`) — which is how a helper script
+  hides from the menu while staying in the tree.
+
+**[DER]** Only the launcher belongs there. `_handler.sh` and
+`mister_takeover.sh` stay under `games/Maldita Castilla/`, reached by absolute
+path, deliberately out of the browser.
+
+**[OBS] A quirk that shapes the exit story:** cancelling a running script on the
+`popen` path runs `killall <d_name>` (`menu.cpp:7245-7248`) — i.e.
+`killall MalditaCastilla.sh`, which matches nothing, because the process is
+`bash`. OSD-Cancel therefore does not stop our launcher there. Moot once the
+takeover has killed MiSTer, and it does not apply to the default
+`fb_terminal=1`/agetty path, but it is one more reason the exit affordance has
+to be engine-side (plan Task 5.1) rather than the OSD.
+
 ### 2a.1 One more thing the source settles: MiSTer already pins itself to CPU1
 
 **[OBS]** `main.cpp:44-48`, verbatim: *"Always pin main worker process to core #1
