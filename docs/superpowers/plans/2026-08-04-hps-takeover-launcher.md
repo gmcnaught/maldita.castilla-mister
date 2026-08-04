@@ -255,6 +255,47 @@ gets its own A/B against the Phase 3 number.
 
 ---
 
+## Phase 4b — Cores-browser entry via a minimal `main=` wrapper (optional)
+
+Only if the Scripts-menu entry is not good enough on usability grounds. The
+Cores browser lists `.rbf`/`.mra`/`.mgl` only and `main=` is the sole per-core
+exec hook, so this is the one route to an `_Other/` entry without a resident
+watcher (design §2b). **Do not start this before Phase 3 is green** — it is a
+usability upgrade on a working system, not a prerequisite for one.
+
+### Task 4b.1: Rebuild the overlay around upstream's `main()`
+
+- [ ] **Delete `maldita_main.cpp` from the overlay.** Upstream `main.cpp` runs
+      verbatim; that is what makes the readiness contract correct by
+      construction rather than by review. This is the fix for both recorded
+      wrapper bugs.
+- [ ] Add one readiness-gated `fork()`/`exec()` of `_handler.sh` after
+      `user_io_init()` completes, as an in-place patch to a file already in the
+      overlay (`user_io.cpp`).
+- [ ] Drop `maldita_joy_shm.*`, `maldita_osd.*` and the respawn logic — all
+      superseded by the takeover (design §2b.1). Keep the overlay as close to
+      "upstream plus one fork" as it will go.
+- [ ] Re-verify the pinned upstream commit in `vendor/Main_MiSTer.UPSTREAM.md`
+      still applies cleanly.
+
+### Task 4b.2: Re-run the measurement that killed the last wrapper
+
+- [ ] 5× frame-1 wedge test on `.62`, same RBF and engine, against the stock-main
+      baseline. The reverted wrapper scored **3/5 wedges vs stock main 0/5**;
+      anything but 0/5 means the readiness contract is still not being honoured
+      and the wrapper goes back on the shelf.
+
+### Task 4b.3: Ship the entry
+
+- [ ] `_Other/Maldita Castilla.mgl` pointing at the dated RBF, so the visible
+      Cores-browser name is stable across builds.
+- [ ] `deploy.py` writes the `[Maldita Castilla] main=` line it currently
+      *comments out*, gated behind the same explicit flag as the takeover.
+- [ ] Confirm both entry points still work: Cores browser via `main=`, and the
+      Scripts launcher, without either interfering with the other.
+
+---
+
 ## Phase 5 — Make it shippable, or decide not to ship it
 
 ### Task 5.1: An exit path that does not need SSH

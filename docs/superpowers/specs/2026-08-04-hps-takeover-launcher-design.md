@@ -240,6 +240,88 @@ takeover at all.**
 
 ---
 
+## 2b. Entry points: the Cores browser needs `main=`, and that is less bad than it was
+
+*(Added after the "can the launcher live in `_Other/` instead of `Scripts/`?"
+question. All **[OBS]** from the same tree.)*
+
+**[OBS]** The Cores browser filters on `pFileExt = "RBFMRAMGL"`
+(`menu.cpp:438`) — `.rbf`, `.mra`, `.mgl`, plus `_`-prefixed directories.
+`ScanDirectory` handles only `DT_DIR` and `DT_REG` and `continue`s on anything
+else (`file_io.cpp:1710-1714`), so a **symlink is skipped outright** and a `.sh`
+cannot be smuggled in under another extension.
+
+**[OBS]** Exactly two config options can cause a program to run: `MAIN`
+(`cfg.cpp:140`) and `WAITMOUNT` (`:110`). There is no per-core "run this on
+load" hook.
+
+**[OBS] `main=` is a *replacement* by construction, not a shim point.** Two
+independent reasons:
+
+1. **The swap is decided by comparing paths against `/proc/self/exe`**
+   (`user_io.cpp:1469-1473`: `if (strcasecmp(getFullPath(cfg.main),
+   getappname()) && FileExists(main)) app_restart(path, xml, main)`;
+   `getappname()` is `readlink("/proc/self/exe")`, `fpga_io.cpp:608-618`).
+   **[DER]** So a thin shim that forks our handler and then execs stock MiSTer
+   would find `getappname()` back at `/media/fat/MiSTer`, differing from
+   `cfg.main` again — and be re-exec'd **forever**. The obvious cheap trick does
+   not work.
+2. **The swap happens at `user_io.cpp:1469`, before `video_init()` at `:1499`.**
+   Whatever binary `main=` names owns video init, the scaler coefficients, gamma
+   and everything downstream.
+
+**[OBS]** `WAITMOUNT` is interpolated into a `system()` string
+(`user_io.cpp:1461-1463`) and would technically execute anything a user put
+there. It is a shell-injection accident, not an interface. **Do not.**
+
+### 2b.1 Why the wrapper is now *smaller* than the one that was reverted
+
+**[OBS]** `vendor/Main_MiSTer/maldita_main.cpp` is 20 lines and ends in
+`return maldita_wrapper_run(argc, argv);` — it **replaced upstream `main()`
+outright**, hand-rolling the `FindStorage()` → `user_io_init()` →
+`scheduler_init()` → `scheduler_run()` sequence. That is the origin of both
+recorded bugs: the hand-rolled loop was the `#else` branch that is dead code
+(`USE_SCHEDULER` is unconditional), so the per-iteration
+`while (!is_fpga_ready(1)) fpga_wait_to_reset();` guard never ran; and the
+engine was spawned at `maldita_wrapper.cpp:143`, before the first readiness
+check at `:157`. **[DER]** Neither bug is inherent to `main=`. Both come from
+replacing `main()` instead of extending it.
+
+**[DER] The minimal correct shape, and it is genuinely small:**
+
+- **Do not overlay `main.cpp` at all.** Upstream's `main()` runs verbatim, so
+  the readiness contract, storage discovery and scheduler are upstream's problem
+  and stay correct by construction. Drop `maldita_main.cpp`.
+- **Add one readiness-gated `fork()`/`exec()` of `_handler.sh`** after
+  `user_io_init()` has completed. `user_io.cpp` and `input.cpp` are *already* in
+  the overlay list, so a surgical in-place patch is the established pattern here
+  — no new machinery.
+- **Delete most of the rest.** Under takeover, `maldita_joy_shm.*` (feats #0/#2)
+  and `maldita_osd.*` (feat #4) are superseded — there is no MiSTer to be input-
+  authoritative and no OSD to take T-bits from — and crash-respawn is replaced by
+  restore-on-exit. `maldita_wrapper.*` largely goes with them.
+
+**[DER] The takeover is what shrinks it.** The reverted wrapper had to coexist
+with the engine forever: supervise it, publish a joy mask, poll the OSD. A
+takeover wrapper only has to *be stock MiSTer until the engine is live*, and is
+then killed by §2's liveness gate. Its whole job is one fork at one correct
+moment.
+
+### 2b.2 Comparison
+
+| Entry point | Appears in | Trigger | Resident watcher | Cost |
+|---|---|---|---|---|
+| `Scripts/MalditaCastilla.sh` (§2a, **landed**) | Scripts menu | user selects it | **none** | not in the Cores browser |
+| `.rbf`/`.mgl` in `_Other/` + `Master_Daemon` (today) | **Cores browser** | daemon watches `/tmp/CORENAME` | Frontier's daemon | third-party dep; the dual-daemon/dual-engine hazard |
+| `.rbf`/`.mgl` in `_Other/` + `main=` | **Cores browser** | MiSTer execs our binary | **none** | we ship and re-sync a patched MiSTer build |
+
+**[DER]** `.mgl` is worth using either way: a stable `_Other/Maldita
+Castilla.mgl` pointing at the dated `MalditaCastilla_YYYYMMDD.rbf` keeps the
+visible entry's name stable across builds. `main=` keys off the core name from
+`CONF_STR`, which an MGL-triggered load produces identically, so the two compose.
+
+---
+
 ## 3. The blocking dependency: input dies with MiSTer
 
 **This is the one thing that makes the takeover a two-repo change rather than a
