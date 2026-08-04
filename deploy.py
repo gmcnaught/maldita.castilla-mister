@@ -545,6 +545,17 @@ def main():
         if takeover_src.exists():
             scp_verified(host, takeover_src, f"{HANDLER_DIR}/mister_takeover.sh")
             ssh(host, f"chmod 644 '{HANDLER_DIR}/mister_takeover.sh'", check=True)
+        # Daemon-free entry point. Appears in MiSTer's OSD under Scripts and
+        # does the core load itself, so Master_Daemon is not in the loop at
+        # all. Shipped unconditionally — installing it changes nothing until
+        # the user selects it.
+        launcher_src = REPO / "Scripts" / "MalditaCastilla.sh"
+        if launcher_src.exists():
+            print("   installing the daemon-free Scripts launcher")
+            ssh(host, "mkdir -p /media/fat/Scripts", check=True)
+            scp_verified(host, launcher_src, "/media/fat/Scripts/MalditaCastilla.sh")
+            ssh(host, "chmod 755 /media/fat/Scripts/MalditaCastilla.sh", check=True)
+
         if args.takeover:
             # Written here, not baked into _handler.sh, so arming survives a
             # handler redeploy and disarming is one file removal — including

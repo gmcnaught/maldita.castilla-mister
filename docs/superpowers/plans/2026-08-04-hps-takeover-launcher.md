@@ -54,7 +54,19 @@ for `mem_wc`).
 does not release the evdev grab, so input freezes exactly as it will under a
 real takeover — expect that, do not report it as a regression.
 
-### Task 0.2: Collateral observations, same session
+### Task 0.2: The cheap hypothesis, before the expensive one
+
+Source reading (design §2a.1) turned up that `Main_MiSTer` pins its main worker
+to **core 1** (`main.cpp:44-48`) and its offload thread to core 0 — and our
+audio pump is pinned to **core 1** too. The contention is a specific two-way
+fight, not diffuse load.
+
+- [ ] A/B the audio pump on core 0 vs core 1, MiSTer untouched. If most of the
+      `SIGSTOP` win arrives from moving one thread, that is a one-line change
+      against a multi-repo architectural one — take it first and re-baseline
+      the takeover against the new number.
+
+### Task 0.3: Collateral observations, same session
 
 - [ ] `top -b -n1` — MiSTer's steady-state CPU share.
 - [ ] `taskset -p $$` from inside `_handler.sh` — is the handler inheriting a
@@ -80,8 +92,12 @@ Implemented in this commit. Inert unless explicitly enabled.
       liveness gate, cpufreq, restore, re-entry guard.
 - [x] `games/Maldita Castilla/_handler.sh` — branch to the takeover runner when
       enabled; the `exec ./gmloader` path is unchanged when it is not.
-- [x] `deploy.py` — ship `mister_takeover.sh`; `--takeover` / `--no-takeover`
-      manage the on-device `takeover.env` marker.
+- [x] `Scripts/MalditaCastilla.sh` — the daemon-free entry point (design §2a):
+      `load_core` down `/dev/MiSTer_cmd`, wait for `/tmp/CORENAME`, `exec` the
+      existing handler.
+- [x] `deploy.py` — ship `mister_takeover.sh` and the Scripts launcher;
+      `--takeover` / `--no-takeover` manage the on-device `takeover.env` marker.
+- [x] `tools/mister-takeover/test_takeover.sh` — 18 host tests.
 
 ### Task 1.1: Review the restore contract against design §5
 
@@ -94,7 +110,27 @@ Implemented in this commit. Inert unless explicitly enabled.
       invocation within `MALDITA_TAKEOVER_REENTRY_S` of that stamp runs
       **without** takeover rather than looping.
 
-### Task 1.2: Dry-run the harness with the kill disabled
+### Task 1.2: Bring up the daemon-free launcher (takeover still disarmed)
+
+This is separable from the takeover and worth landing on its own — it is what
+removes `Master_Daemon` from the launch path.
+
+- [ ] From the MiSTer menu with the core NOT loaded: Scripts →
+      `MalditaCastilla` → confirm the core loads and the game runs. Check
+      `/media/fat/logs/MalditaCastilla/launch.log` for the step trace.
+- [ ] Repeat with the core ALREADY loaded — the launcher should skip
+      `load_core` and go straight to the handler.
+- [ ] Repeat with `fb_terminal=0` in `MiSTer.ini`. That is the `popen` path,
+      where our stdout is MiSTer's pipe and MiSTer `_exit(0)`s mid-load
+      (design §2a fact 4) — if the redirect-before-load is wrong, this is the
+      configuration that shows it as a SIGPIPE death.
+- [ ] Stop `Master_Daemon` entirely and confirm the launcher still works. That
+      is the whole point; if it needs the daemon, something is still wired to it.
+- [ ] Confirm the negative: with takeover disarmed, loading a different core
+      from the OSD leaves the engine running (the documented tradeoff). Record
+      what that actually looks like on screen.
+
+### Task 1.3: Dry-run the harness with the kill disabled
 
 - [ ] Deploy to `.62` with `MALDITA_TAKEOVER=1` and
       `MALDITA_TAKEOVER_DRYRUN=1` (logs every step, kills nothing).
@@ -167,8 +203,17 @@ not just over SSH:
 - [ ] handler is `kill -9`'d — the one path where the `trap` cannot run.
       **Document what state this leaves the box in**; if it is unrecoverable,
       that is a shipping blocker and needs a watchdog (Task 5.2).
-- [ ] Settles design §6.3: did the menu come back from the `MiSTer` re-exec
-      alone, or was the explicit core reload load-bearing?
+
+And the restore's two-step sequence specifically (design §5): the restarted
+MiSTer comes up **on our core**, and only the follow-up `load_core menu.rbf`
+gets the user to the menu.
+
+- [ ] Confirm the restarted MiSTer does come up rather than hitting
+      `is_fpga_ready(1)` false and quitting with "Bye bye".
+- [ ] Confirm the `menu.rbf` request lands and MiSTer `app_restart()`s into the
+      menu.
+- [ ] Confirm no path blocks on the FIFO write (a hang here is a hung box —
+      the guard is `pidof` + settle + `timeout`).
 
 ### Task 3.3: Prove the re-entry guard
 

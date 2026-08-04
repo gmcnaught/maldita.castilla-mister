@@ -134,6 +134,74 @@ successive increases means the host is submitting *and* the fabric is retiring.
 
 ---
 
+## 2a. Entry point: the daemon is not required either
+
+*(Added after reading `Main_MiSTer` @`3380931`, the commit
+`vendor/Main_MiSTer.UPSTREAM.md` pins. Everything in this section is **[OBS]**
+from that tree.)*
+
+The takeover removes MiSTer from the *running* system. It does not, on its own,
+remove `Master_Daemon` from the *launch* path — and that daemon is worth
+removing for its own sake. It is a third-party resident watcher, and it has cost
+us: two daemon instances each spawning a handler put **two `gmloader` processes
+on one fabric control block** (the dual-engine corruption), and `deploy.py`
+carries a page of `/proc`-walking code to kill strays and restart the daemon so
+it re-enumerates handlers.
+
+**Four facts from the source make a Scripts-menu entry a complete replacement:**
+
+1. **MiSTer runs Scripts entries without blocking its main loop.** With
+   `fb_terminal=1` (the default, `cfg.cpp:596`) it forks `agetty` on tty2 and
+   polls `waitpid(…, WNOHANG)` from `MENU_SCRIPTS_FB2` (`menu.cpp:3399-3405`);
+   with `fb_terminal=0` it `popen()`s the script and reads the pipe
+   `O_NONBLOCK` from `MENU_SCRIPTS1` (`menu.cpp:7206-7209`).
+2. **So `/dev/MiSTer_cmd` is still serviced while our script runs**
+   (`input.cpp:6227-6242`, the `pool[NUMDEV+1]` arm of the same poll).
+   `load_core <path>` is one of the commands it accepts. **A script can
+   therefore ask MiSTer to load our core and stay alive across it** — which is
+   the entire trick, and the thing that makes the daemon unnecessary.
+3. **`/tmp/CORENAME` is written by MiSTer, not by the daemon**
+   (`user_io.cpp:1171`). The daemon only *watches* it, so polling it ourselves
+   loses nothing.
+4. **`fpga_load_rbf()` ends in `app_restart()`** (`fpga_io.cpp:506`), which
+   double-forks, `execl`s a fresh MiSTer and `_exit(0)`s the old one. Our script
+   is therefore **orphaned onto init during the load**. Harmless — but under
+   `fb_terminal=0` our stdout *is* MiSTer's `popen` pipe, so anything written
+   after the load takes SIGPIPE. The launcher redirects to a log file before
+   issuing `load_core`.
+
+**[DER]** The launcher is thus: `load_core` → wait for `/tmp/CORENAME` →
+`exec` the existing `_handler.sh`. It deliberately reimplements none of the
+handler's launch contract (`GMLOADER_BLITTER=2` + `GMLOADER_RASTER=mfgpu`,
+`LD_LIBRARY_PATH`, the singleton guard) — every one of those has a device-hit
+failure behind it and one copy is enough.
+
+**The tradeoff, stated plainly:** without the daemon nobody kills the engine on
+a core change. That cannot arise on the takeover path — MiSTer is dead, there is
+no OSD to change cores from — but with takeover disarmed, an engine started this
+way would keep running and fight whatever core the user loads next. The daemon
+path stays supported for that case.
+
+### 2a.1 One more thing the source settles: MiSTer already pins itself to CPU1
+
+**[OBS]** `main.cpp:44-48`, verbatim: *"Always pin main worker process to core #1
+as core #0 is the hardware interrupt handler in Linux. This reduces idle latency
+in the main loop by about 6-7x."* Its offload thread goes to core #0
+(`offload.cpp:83`), and the OSD script path temporarily widens the main thread
+to `{0,1}` and re-pins it to `{1}` when the script ends (`menu.cpp:7194-7196`,
+`:7235-7236`).
+
+**[DER] So MiSTer is not spread across both cores — it is *concentrated on core
+1*, which is exactly where our audio pump is pinned**
+(`2026-07-27-gmloader-native-audio-design.md:121`: pump → core 1, main thread →
+core 0). The contention is not diffuse; it is a specific two-way fight between
+`Main_MiSTer`'s poll loop and the audio pump. That sharpens Phase 0's
+measurement (§6.1) and raises a much cheaper hypothesis worth testing first:
+**move the pump to core 0 and see how much of the win arrives without any
+takeover at all.**
+
+---
+
 ## 3. The blocking dependency: input dies with MiSTer
 
 **This is the one thing that makes the takeover a two-repo change rather than a
@@ -226,12 +294,29 @@ Non-negotiables, mirroring DreamSTer's `finally:`:
    timestamp stamp file that suppresses takeover for N seconds after a restore
    turns that into a single degraded (but playable, and exitable) session.
 
-**[UNK]** Whether re-exec'ing `/media/fat/MiSTer` reloads `menu.rbf` by itself,
-or whether the FPGA must be reloaded first as DreamSTer does. DreamSTer needs
-the explicit reload because polly2 is not a framework core and MiSTer cannot
-talk to it; our core *is* one, so MiSTer may come up on top of it and simply
-work. §6.3 settles it on device. Until it is settled, the restore path attempts
-the menu reload and continues regardless.
+**[OBS] Resolved from source (was §6.3): a fresh MiSTer does NOT load
+`menu.rbf`.** `main()` takes whatever core is already in the FPGA — there is no
+startup load and no core argument that triggers one (`main.cpp:62-73`;
+`app_restart`'s `argv[1]` is informational, naming the core it just loaded) —
+and it `exit(0)`s outright with *"GPI[31]==1 … Quitting. Bye bye…"* if
+`is_fpga_ready(1)` is false. **[DER]** So a bare re-exec brings MiSTer up *on
+our core, showing our OSD, with no engine behind it*: usable, but not where the
+user wants to be, and one bad fabric state away from a MiSTer that quits on
+sight.
+
+**[DER] And we do not need a bitstream loader to fix that.** DreamSTer ships
+`load_fpga_bitstream` because polly2 is not a framework core; ours is. The
+restore therefore goes: restart MiSTer → wait for it → `load_core menu.rbf` down
+the same FIFO everything else uses → MiSTer `app_restart()`s into the menu.
+
+**[OBS] One hazard that shapes the code:** MiSTer `unlink()`s and re-`mkfifo()`s
+`/dev/MiSTer_cmd` at startup and opens it `O_RDWR` (`input.cpp:5140-5143`). With
+MiSTer alive the node always has a reader and a write cannot block — but with
+MiSTer *dead*, or in the window between `pidof` succeeding and that `open()`,
+`open(O_WRONLY)` on a readerless FIFO **blocks forever**. This code runs inside
+an exit trap, so a block there is a hung box. Every FIFO write in this design is
+therefore gated on a liveness check, given a settle delay, and bounded by
+`timeout` where available.
 
 **[UNK]** How `Main_MiSTer` is supervised on this device — whether an init
 script respawns it (in which case `kill` starts a fight) or it is a one-shot
@@ -265,9 +350,17 @@ Run the §6.1 `SIGSTOP` for 60 s and watch for drift, resync or blanking. A
 `SIGSTOP` that visibly disturbs video is a red flag for the whole design; a
 clean one is strong (not conclusive) evidence that ascal/HDMI are set-and-forget.
 
-### 6.3 Does re-exec'ing `/media/fat/MiSTer` restore the menu on its own? (§5)
+### 6.3 ~~Does re-exec'ing `/media/fat/MiSTer` restore the menu on its own?~~
+
+**Answered from source — see §5.** No. The restore does restart-then-`load_core
+menu.rbf`. What remains for the device is whether that sequence *works* end to
+end (plan Task 3.2), not what the mechanism should be.
 
 ### 6.4 Is `Main_MiSTer` respawned by an init supervisor? (§5)
+
+Still open, and now the sharper question is what a supervisor would do to the
+*restore*: if something already respawns MiSTer, our restart is redundant but
+harmless, and the `load_core menu.rbf` step still lands.
 
 ### 6.5 Is `0x3B000000` inside a `/proc/iomem` "System RAM" range?
 
@@ -335,7 +428,7 @@ golden regeneration.
 
 | Repo | What |
 |---|---|
-| `maldita.castilla-mister` | takeover harness in the launch path (`games/Maldita Castilla/`), opt-in and default-off; `deploy.py` support; this design + its plan |
+| `maldita.castilla-mister` | takeover harness in the launch path (`games/Maldita Castilla/`), opt-in and default-off; the daemon-free `Scripts/MalditaCastilla.sh` entry point (§2a); `deploy.py` support; this design + its plan |
 | `gmloader-next` | forced input-transport selection (§3) — **blocking for a playable takeover**; later, the `mem_wc` mapping and barriers in `raster_backend_mfgpu.cpp` |
 | `mister-fpga-blitter` | nothing. The protocol does not move. |
 
@@ -345,6 +438,16 @@ golden regeneration.
   `Scripts/DreamSTer.sh:2123-2149` (parent detection), `:2150-2168` (kill),
   `:2175-2190` (restore), `:2210-2240` (launch, `insmod`, cpufreq),
   `:2244-2270` (`main()`, affinity, `finally`).
+- `MiSTer-devel/Main_MiSTer` @`3380931` (the commit `vendor/Main_MiSTer.UPSTREAM.md`
+  pins): `main.cpp:44-48` (main worker pinned to core 1) and `:62-73` (no
+  startup core load; `exit(0)` when the FPGA is not ready); `offload.cpp:83`
+  (offload thread on core 0); `menu.cpp:3399-3405` and `:7206-7209` (the two
+  non-blocking script paths), `:7194-7196`/`:7235-7236` (script-scoped affinity
+  widening); `input.cpp:5140-5143` (the FIFO is unlinked, re-created and opened
+  `O_RDWR`) and `:6227-6242` (the command dispatch, including `load_core`);
+  `user_io.cpp:1171` (`/tmp/CORENAME` is written here); `fpga_io.cpp:426-506`
+  (`fpga_load_rbf` → `app_restart`) and `:620-647` (`app_restart` double-forks
+  and `_exit(0)`s the caller); `cfg.cpp:596` (`fb_terminal` defaults to 1).
 - `gmcnaught/mamester` PR #5: `docs/dreamster-ddr-channel-review.md` (the
   `mem_wc` mechanism, the three ordering fixes, the `pfn_valid` argument);
   `docs/present-latency-and-cpu-offload.md` §1 (89.5 vs 540.5 MB/s).

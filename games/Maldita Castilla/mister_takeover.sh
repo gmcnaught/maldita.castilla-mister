@@ -59,14 +59,19 @@
 #   MALDITA_TAKEOVER_REENTRY_S    suppress takeover for this long after a
 #                                 restore, so a MiSTer that comes back up and
 #                                 reloads this core cannot loop (60)
+#   MALDITA_TAKEOVER_MENU_WAIT_S  how long the restore waits for the restarted
+#                                 MiSTer before giving up on the menu (20)
 #   MISTER_BIN                    the MiSTer main binary (/media/fat/MiSTer)
+#   MISTER_CMD_FIFO               MiSTer's command FIFO (/dev/MiSTer_cmd)
 
 : "${MALDITA_TAKEOVER:=0}"
 : "${MALDITA_TAKEOVER_DRYRUN:=0}"
 : "${MALDITA_TAKEOVER_GOVERNOR:=0}"
 : "${MALDITA_TAKEOVER_LIVENESS_S:=30}"
 : "${MALDITA_TAKEOVER_REENTRY_S:=60}"
+: "${MALDITA_TAKEOVER_MENU_WAIT_S:=20}"
 : "${MISTER_BIN:=/media/fat/MiSTer}"
+: "${MISTER_CMD_FIFO:=/dev/MiSTer_cmd}"
 
 # C_DONE, low word. The blitter control block is qword-addressed from
 # 0x3B000000 (C_SUBMIT=0 CMDCOUNT=1 TARGET=2 CLEAR=3 FLAGS=4 DONE=5 ...), so
@@ -286,12 +291,6 @@ tk_restore() {
     fi
 
     tk_log "restore: restarting MiSTer ($TAKEOVER_MISTER_EXE)"
-    # OPEN QUESTION (design §6.3): DreamSTer reloads menu.rbf with its own
-    # loader before this, because polly2 is not a framework core and MiSTer
-    # cannot talk to it. Ours IS a framework core, so MiSTer may come up on top
-    # of it and reload the menu itself. We have no loader binary here, and
-    # /dev/MiSTer_cmd has no reader with MiSTer dead — so the re-exec is the
-    # whole restore, and plan Task 3.2 is what settles whether that is enough.
     local dir
     dir="$(dirname "$TAKEOVER_MISTER_EXE")"
     if command -v setsid >/dev/null 2>&1; then
@@ -299,7 +298,51 @@ tk_restore() {
     else
         ( cd "$dir" && nohup "$TAKEOVER_MISTER_EXE" </dev/null >/dev/null 2>&1 & )
     fi
+
+    tk_restore_menu
     return 0
+}
+
+# Get the user back to the menu, not just back to a MiSTer.
+#
+# A fresh MiSTer does NOT load menu.rbf. main() takes whatever core is already
+# in the FPGA — there is no core argument and no startup load (main.cpp:62-73)
+# — and it `exit(0)`s outright with "GPI[31]==1 ... Quitting. Bye bye..." if
+# is_fpga_ready(1) is false. So the process we just restarted comes up on OUR
+# core, showing OUR OSD, with no engine behind it.
+#
+# DreamSTer solves this with its own load_fpga_bitstream binary, which it needs
+# anyway because polly2 is not a framework core. We do not need one: ask the
+# restarted MiSTer to load the menu the way everything else does, and it
+# app_restart()s into it (fpga_io.cpp:506).
+tk_restore_menu() {
+    local waited=0
+    while [ "$waited" -lt "$MALDITA_TAKEOVER_MENU_WAIT_S" ]; do
+        sleep 1
+        waited=$((waited + 1))
+        pidof MiSTer >/dev/null 2>&1 || continue
+        [ -p "$MISTER_CMD_FIFO" ] || continue
+
+        # MiSTer unlinks and re-mkfifos the node, then opens it O_RDWR, during
+        # input init (input.cpp:5140-5143). Between `pidof` succeeding and that
+        # open there is a window in which the FIFO has no reader — and
+        # open(O_WRONLY) on a readerless FIFO blocks FOREVER. This runs inside
+        # an exit trap, so a block here is a hung box. Settle, then bound the
+        # write if `timeout` exists.
+        sleep 2
+        tk_log "restore: MiSTer back after ${waited}s; requesting menu.rbf"
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 5 sh -c "echo 'load_core menu.rbf' > '$MISTER_CMD_FIFO'" \
+                || tk_log "restore: menu.rbf request timed out (core left loaded)"
+        else
+            echo "load_core menu.rbf" > "$MISTER_CMD_FIFO"
+        fi
+        return 0
+    done
+
+    tk_log "restore: MiSTer did not come back within ${MALDITA_TAKEOVER_MENU_WAIT_S}s" \
+           "— core left loaded"
+    return 1
 }
 
 # Signal path: stop the engine first, then restore. Master_Daemon's kill_child

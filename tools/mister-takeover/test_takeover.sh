@@ -29,14 +29,20 @@ bad()  { FAIL=$((FAIL + 1)); echo "  FAIL — $1"; }
 check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 
 TMP="$(mktemp -d)"
-# Guarded on BASHPID: bash runs an inherited EXIT trap when a SUBSHELL exits
-# too, and this script uses both command substitution and `takeover_run … &`.
-# Without the guard the first subshell to finish deletes $TMP out from under
-# the rest of the run.
+
+# The EXIT trap deliberately does NOT delete $TMP.
+#
+# This script spawns background jobs and the library under test sets its own
+# EXIT trap, and an inherited EXIT trap fires when a SUBSHELL exits as well as
+# when the script does. A `rm -rf "$TMP"` in here was observed deleting the
+# fixture mid-run — `bash -x` caught it as `++ rm -rf /tmp/tmp.XXXX` in the
+# middle of a case, after which every later assertion failed against a
+# directory that no longer existed. Reaping strays is idempotent and safe to
+# run from anywhere; deleting the fixture is not, so that happens exactly once,
+# on the last line of the script.
 cleanup() {
-    [ "$BASHPID" = "$$" ] || return 0
     pkill -P $$ sleep 2>/dev/null
-    rm -rf "$TMP"
+    pkill -P $$ cat 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -47,11 +53,30 @@ FAKE_MISTER_PIDS=""
 FAKE_C_DONE_MODE="static"
 FAKE_C_DONE_N=0
 
-pidof()   { [ "$1" = "MiSTer" ] && echo "$FAKE_MISTER_PIDS"; }
+# pidof reports only pids that are genuinely alive, so a killed fake MiSTer
+# really does disappear from it — the restore's "has MiSTer come back?" loop is
+# then a real test rather than a stubbed constant.
+pidof() {
+    [ "$1" = "MiSTer" ] || return 1
+    local p out=""
+    for p in $(cat "$TMP/mister.pids" 2>/dev/null); do
+        [ -d "/proc/$p" ] && out="$out $p"
+    done
+    [ -n "$out" ] || return 1
+    echo "$out"
+}
 readlink() { echo "$TMP/MiSTer"; }          # /proc/<pid>/exe for any pid
 taskset() { return 0; }                     # never repin the test runner
-setsid()  { echo "restarted:$*" >> "$TMP/restart.log"; }
-nohup()   { echo "restarted:$*" >> "$TMP/restart.log"; }
+
+# The restart stub also brings a NEW fake MiSTer up, which is what the real
+# re-exec does — without it the restore's menu.rbf step could never be reached.
+fake_restart() {
+    echo "restarted:$*" >> "$TMP/restart.log"
+    sleep 300 &
+    echo "$!" >> "$TMP/mister.pids"
+}
+setsid()  { fake_restart "$@"; }
+nohup()   { fake_restart "$@"; }
 
 # The counter is file-backed, not a variable: tk_c_done() is always called from
 # a command substitution, which is a subshell, so a variable increment here
@@ -74,22 +99,41 @@ busybox() {
 spawn_fake_mister() {
     sleep 300 &
     FAKE_MISTER_PIDS="$!"
+    echo "$FAKE_MISTER_PIDS" >> "$TMP/mister.pids"
 }
 
 # Fresh state for each case. Sourcing again resets the library's globals.
 reset_case() {
-    rm -f "$TMP/restart.log" "$TMP/stamp" "$TMP/cdone"
+    rm -f "$TMP/restart.log" "$TMP/stamp" "$TMP/cdone" "$TMP/mister.pids" \
+          "$TMP/cmd" "$TMP/cmd.out"
     : > "$TMP/restart.log"
     touch "$TMP/MiSTer" && chmod +x "$TMP/MiSTer"
+
+    # A real FIFO with a real reader: the restore's menu.rbf request goes
+    # through an actual open(O_WRONLY), which is the call that would hang the
+    # box if the guard around it were wrong. The previous reader is reaped
+    # first — it is blocked in open() on an inode nothing will ever write to,
+    # and would otherwise pile up one per case.
+    [ -n "${FIFO_READER_PID:-}" ] && kill "$FIFO_READER_PID" 2>/dev/null
+    mkfifo "$TMP/cmd"
+    cat "$TMP/cmd" > "$TMP/cmd.out" &
+    FIFO_READER_PID=$!
+
+    # takeover_run installs its own EXIT/INT/TERM traps in whatever shell calls
+    # it, so a foreground call replaces ours. Re-arm each case.
+    trap cleanup EXIT
 
     MALDITA_TAKEOVER=1
     MALDITA_TAKEOVER_DRYRUN=0
     MALDITA_TAKEOVER_GOVERNOR=0
     MALDITA_TAKEOVER_LIVENESS_S=3
     MALDITA_TAKEOVER_REENTRY_S=60
+    MALDITA_TAKEOVER_MENU_WAIT_S=6
     MISTER_BIN="$TMP/MiSTer"
+    MISTER_CMD_FIFO="$TMP/cmd"
     export MALDITA_TAKEOVER MALDITA_TAKEOVER_DRYRUN MALDITA_TAKEOVER_GOVERNOR
     export MALDITA_TAKEOVER_LIVENESS_S MALDITA_TAKEOVER_REENTRY_S MISTER_BIN
+    export MALDITA_TAKEOVER_MENU_WAIT_S MISTER_CMD_FIFO
 
     # shellcheck disable=SC1090
     . "$LIB"
@@ -164,6 +208,9 @@ grep -q "takeover complete" "$TMP/run.log" && r=yes || r=no
 check "  and logs the takeover" "$r" "yes"
 grep -q "^restarted:" "$TMP/restart.log" && r=yes || r=no
 check "engine exit restarts MiSTer" "$r" "yes"
+sleep 1
+grep -q "load_core menu.rbf" "$TMP/cmd.out" && r=yes || r=no
+check "  and asks the restarted MiSTer for menu.rbf" "$r" "yes"
 [ -f "$TMP/stamp" ] && r=yes || r=no
 check "  and stamps the re-entry guard" "$r" "yes"
 n="$(grep -c "^restarted:" "$TMP/restart.log")"
@@ -184,8 +231,12 @@ r=killed; [ -d "/proc/$MISTER_PID_UNDER_TEST" ] && r=alive
 check "dry run leaves MiSTer alive" "$r" "alive"
 grep -q "^restarted:" "$TMP/restart.log" && r=yes || r=no
 check "dry run does not restart MiSTer either" "$r" "no"
+grep -q "load_core" "$TMP/cmd.out" 2>/dev/null && r=yes || r=no
+check "dry run sends no command to the FIFO" "$r" "no"
 kill "$MISTER_PID_UNDER_TEST" 2>/dev/null
 
 echo
 echo "$PASS passed, $FAIL failed"
+cleanup
+rm -rf "$TMP"          # the one and only fixture delete — see the trap comment
 [ "$FAIL" -eq 0 ]
