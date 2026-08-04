@@ -1,0 +1,29 @@
+<mistergamedescription>
+	<rbf>_Other/MalditaCastilla</rbf>
+</mistergamedescription>
+<!--
+  Maldita Castilla - Cores-browser entry.
+  Installed by deploy.py to /media/fat/_Other/Maldita Castilla.mgl.
+
+  WHY THIS EXISTS: the RBF carries its build date in its name
+  (MalditaCastilla_YYYYMMDD.rbf), so the entry the user sees in the Cores
+  browser would change on every rebuild. This gives it one stable name.
+
+  WHY IT NEEDS NO DEPLOY-TIME REWRITING: the rbf tag is a PREFIX, not a path.
+  MiSTer's get_rbf() (support/arcade/mra_loader.cpp:1223-1296) resolves the
+  directory from the storage root, then scans it for .rbf files whose name
+  starts with that prefix AND whose next character is '.' or '_', keeping the
+  lexicographically greatest match. Since our names sort by date,
+  "_Other/MalditaCastilla" always resolves to the NEWEST installed build. Note
+  the missing .rbf extension is required, not an omission.
+
+  This on its own only LOADS THE CORE, exactly as selecting the RBF does. What
+  starts the engine is whichever trigger is installed: Master_Daemon watching
+  /tmp/CORENAME, or the `main=` hook (deploy.py, the main-wrapper flag), which
+  needs no daemon. See
+  docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md section 2b.
+
+  Comment placed AFTER the root element and free of double-hyphens: "- -" is
+  illegal inside an XML comment, and MiSTer parses this with a real SAX parser
+  (sxmlc), not a scanner that would forgive it.
+-->

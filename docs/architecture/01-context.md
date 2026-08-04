@@ -43,8 +43,8 @@ interface to the system beyond those two devices.
 `joystick_0`..`joystick_3` buses over `HPS_BUS`
 (`maldita.castilla-mister/fpga/Maldita.sv:33,265-269,282-293`). Separately, a
 vendored fork of MiSTer's own supervisor
-(`maldita.castilla-mister/vendor/Main_MiSTer/maldita_joy_shm.cpp`) writes a
-shared-memory contract that `external/gmloader-next/gmloader/mister/joy_shm_reader.cpp`
+(`maldita.castilla-mister/vendor/Main_MiSTer/maldita_joy_shm.cpp`, **deleted
+2026-08-04** — see below) wrote a shared-memory contract that `external/gmloader-next/gmloader/mister/joy_shm_reader.cpp`
 reads on the engine side (`mister_joy_shm.h`, `JoyShm_Init`/`JoyShm_ReadMask`).
 The FPGA also carries its own live path: `joystick_0`/`joystick_1` are wired
 into `openbor_video_reader`, which publishes them into the DDR3 ring each
@@ -102,6 +102,10 @@ crossed out-of-band, not during gameplay.
 - `external/gmloader-next/gmloader/mister/joy_shm_reader.cpp`,
   `maldita.castilla-mister/vendor/Main_MiSTer/maldita_joy_shm.cpp` —
   corroborate the joy-shm bridge named in the brief's canonical actor list.
+  The producer half was deleted on 2026-08-04 by the `main=` overlay rework
+  (`docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md` §2b.1):
+  the HPS takeover kills MiSTer, so there is no MiSTer-authoritative input to
+  publish. The engine-side reader is unchanged and still selectable.
 
 Repo pins: `external/gmloader-next` = `d585b38`; `maldita.castilla-mister` =
 `4ef1353` (milestone-a). `mister-fpga-blitter` (sibling, dev-only, not a

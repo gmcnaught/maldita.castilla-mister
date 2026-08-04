@@ -45,3 +45,6 @@ fpga/sim/gen_tri_stream
 # interpreter-version-specific.
 __pycache__/
 *.pyc
+
+# Host-native test binaries for the main= wrapper overlay
+tools/mister-wrapper/test/build/

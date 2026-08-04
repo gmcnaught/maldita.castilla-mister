@@ -45,15 +45,25 @@ when the core loads. This is the pattern the sibling Solarus core uses, and it
 leaves STOCK MiSTer main running so it keeps its FPGA-readiness contract
 (scheduler_co_poll's `while (!is_fpga_ready(1)) fpga_wait_to_reset();`).
 
-The previous mechanism — MiSTer.ini `main=/media/fat/games/gmloader/MiSTer_Maldita`
-— REPLACED MiSTer's main() and did not fully honour that contract (it spawns the
-engine at maldita_wrapper.cpp:143 before its first readiness check at :157, and
-hand-rolls main()'s `#else` branch, which is dead code since USE_SCHEDULER is
-unconditional). If a [Maldita Castilla] main= line is present, this deploy
-COMMENTS IT OUT. Reinstating the wrapper is deferred to a future plan.
+THREE ENTRY POINTS, all installed, only one of which needs a daemon:
+  1. Cores browser + Master_Daemon  — the default above.
+  2. Scripts menu (Scripts/MalditaCastilla.sh) — loads the core via
+     /dev/MiSTer_cmd itself, then execs the same handler. No daemon.
+  3. Cores browser + MiSTer.ini `main=` (--main-wrapper) — MiSTer execs our
+     MiSTer_Maldita build, which spawns the handler. No daemon, and it is the
+     only way to get a Cores-browser entry without one.
 
-The wrapper binary is still uploaded (harmless, unused by this path) so the
-future plan can re-enable it without a redeploy.
+`main=` was disabled on 2026-07-25 because the wrapper then REPLACED MiSTer's
+main() with a hand-rolled loop (the dead `#else` branch — USE_SCHEDULER is
+unconditional) that never ran the scheduler's per-iteration
+`while (!is_fpga_ready(1)) fpga_wait_to_reset();` guard, and spawned the engine
+before its first readiness check: 3/5 frame-1 wedges vs stock main 0/5.
+
+The 2026-08-04 overlay rework fixed the cause rather than the symptom — upstream
+main() and scheduler are now built verbatim and the entire local change is one
+call inserted AFTER scheduler_wait_fpga_ready() (vendor/Main_MiSTer/maldita_hook.cpp).
+It is still unproven on hardware, so `main=` is OPT-IN: without --main-wrapper an
+active main= line is commented out, as before.
 
 HPS TAKEOVER (2026-08-04, opt-in, default OFF): games/<CORENAME>/mister_takeover.sh
 ships alongside the handler and is INERT unless a takeover.env sits next to it.
@@ -432,6 +442,11 @@ def main():
                          "game runs, restored on exit")
     ap.add_argument("--no-takeover", action="store_true",
                     help="disarm the HPS takeover (removes the device's takeover.env)")
+    ap.add_argument("--main-wrapper", action="store_true",
+                    help="write the MiSTer.ini [Maldita Castilla] main= line, so selecting "
+                         "the core from the Cores browser starts the engine with no daemon. "
+                         "Without this flag an active main= line is COMMENTED OUT, because "
+                         "the wrapper is not yet device-proven.")
     args = ap.parse_args()
     if args.takeover and args.no_takeover:
         ap.error("--takeover and --no-takeover are mutually exclusive")
@@ -525,7 +540,7 @@ def main():
     scp_verified(host, engine, f"{GAMEDIR}/gmloader")
     scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
 
-    print("\n-- Uploading HPS wrapper binary (sha1-verified; UNUSED by the handler path) --")
+    print("\n-- Uploading HPS wrapper binary (sha1-verified; used only with --main-wrapper) --")
     scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
 
     # --- auto-launch: Master_Daemon handler (replaces the MiSTer.ini main= wrapper) ---
@@ -571,16 +586,48 @@ def main():
         elif args.no_takeover:
             print("   disarming the HPS takeover (removing takeover.env)")
             ssh(host, f"rm -f '{HANDLER_DIR}/takeover.env'")
-        # Disable a stale main= wrapper handoff: stock MiSTer main must stay resident so
-        # it keeps its FPGA-readiness contract. Device-measured 2026-07-25: wrapper 3/5
-        # frame-1 wedges vs stock main 0/5, same RBF and engine.
-        r = ssh(host, "grep -q '^main=/media/fat/games/gmloader/MiSTer_Maldita' /media/fat/MiSTer.ini "
+        # --- MiSTer.ini `main=` handoff -------------------------------------
+        # The absolute path matters: MiSTer's getFullPath() passes absolute
+        # paths through unchanged (file_io.cpp:154-166) and getappname() reads
+        # /proc/self/exe, so once the wrapper is running cfg.main and
+        # /proc/self/exe compare equal and the exec does not loop.
+        MAIN_LINE = "main=/media/fat/games/gmloader/MiSTer_Maldita"
+        backup = "cp /media/fat/MiSTer.ini /media/fat/MiSTer.ini.bak.$(date +%s); "
+        r = ssh(host, f"grep -q '^{MAIN_LINE}' /media/fat/MiSTer.ini "
                       "&& echo PRESENT || echo ABSENT")
-        if (r.stdout or "").strip() == "PRESENT":
+        active = (r.stdout or "").strip() == "PRESENT"
+
+        if args.main_wrapper:
+            # Safe to re-enable only because of the 2026-08-04 overlay rework:
+            # upstream main() and the scheduler now run verbatim and the whole
+            # local change is one call inserted AFTER scheduler_wait_fpga_ready().
+            # The readiness contract is honoured by the code that owns it. The
+            # 2026-07-25 measurement that disabled this (wrapper 3/5 frame-1
+            # wedges vs stock main 0/5) was against the old overlay, which
+            # replaced main() with a hand-rolled loop that never ran that guard.
+            # Still unproven on hardware — plan Task 4b.2 is the gate.
+            if active:
+                print("   main= wrapper handoff already active")
+            else:
+                print("   ! arming the main= wrapper handoff — the Cores-browser entry "
+                      "now starts the engine, with no daemon")
+                # Prefer un-commenting an existing line to appending, so repeated
+                # deploys cannot accumulate duplicate [Maldita Castilla] sections.
+                ssh(host, backup +
+                    f"if grep -q '^;{MAIN_LINE}' /media/fat/MiSTer.ini; then "
+                    f"  sed -i 's|^;{MAIN_LINE}.*|{MAIN_LINE}|' /media/fat/MiSTer.ini; "
+                    "else "
+                    f"  printf '\\n[{CORENAME}]\\n{MAIN_LINE}\\n' >> /media/fat/MiSTer.ini; "
+                    "fi", check=True)
+        elif active:
+            # Default, and deliberately NOT "leave it alone" the way --takeover
+            # is: the wrapper is not yet device-proven, so a deploy that does
+            # not ask for it disarms it.
             print("   ! MiSTer.ini has an active main= wrapper handoff — commenting it out")
-            ssh(host, "cp /media/fat/MiSTer.ini /media/fat/MiSTer.ini.bak.$(date +%s); "
-                      "sed -i 's|^main=/media/fat/games/gmloader/MiSTer_Maldita|"
-                      ";main=/media/fat/games/gmloader/MiSTer_Maldita  ; disabled by deploy.py|' "
+            print("     (pass --main-wrapper to keep it)")
+            ssh(host, backup +
+                      f"sed -i 's|^{MAIN_LINE}|"
+                      f";{MAIN_LINE}  ; disabled by deploy.py|' "
                       "/media/fat/MiSTer.ini", check=True)
         # The daemon enumerates handlers at startup, so a NEW handler needs a restart.
         #
@@ -660,6 +707,20 @@ def main():
     if rbf:
         print(f"\n-- Uploading RBF {rbf.name} (sha1-verified) --")
         scp_verified(host, rbf, f"/media/fat/_Other/{rbf.name}")
+
+        # Stable Cores-browser entry. The RBF carries its build date in its
+        # name, so without this the visible entry changes on every rebuild.
+        #
+        # Shipped verbatim, with no path rewriting: MiSTer's <rbf> tag is a
+        # PREFIX, not a filename. get_rbf() (support/arcade/mra_loader.cpp:1223)
+        # scans the directory for .rbf files starting with it whose next
+        # character is '.' or '_', and keeps the lexicographically greatest —
+        # so "_Other/MalditaCastilla" always resolves to the newest dated build
+        # on the device, including ones this deploy did not install.
+        mgl_src = REPO / "games" / CORENAME / f"{CORENAME}.mgl"
+        if mgl_src.exists():
+            print(f"   installing the Cores-browser entry '_Other/{CORENAME}.mgl'")
+            scp_verified(host, mgl_src, f"/media/fat/_Other/{CORENAME}.mgl")
 
     print("\n-- Fixing exec bit on the engine + wrapper --")
     ssh(host, f"chmod 755 {GAMEDIR}/gmloader {GAMEDIR}/MiSTer_Maldita", check=True)

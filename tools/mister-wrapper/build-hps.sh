@@ -98,19 +98,50 @@ selected_build_mode() {
     return 1
 }
 
+# Guard for the one hazard this overlay shape introduces.
+#
+# vendor/Main_MiSTer/scheduler.cpp is a COPY of upstream's, carrying one
+# inserted call. If upstream changes that file and nobody re-vendors it, the
+# build silently ships a stale scheduler that looks fine and is not — the worst
+# possible failure for a file whose whole job is the FPGA-readiness contract.
+#
+# The invariant that catches it is simple: our copy must be upstream plus
+# ADDED lines, never a changed or removed one. A drifted upstream shows up as a
+# removal in this diff and fails the build here, where the fix is obvious,
+# rather than on the device, where it is not.
+verify_overlay_is_additive() {
+    local rc=0 f upstream_tmp
+    upstream_tmp="$(mktemp -d)"
+    while read -r f; do
+        [ -n "${f}" ] || continue
+        # Only files that also exist upstream can drift; ours (maldita_*) cannot.
+        git -C "${BUILD_SRC_DIR}" cat-file -e "${UPSTREAM_COMMIT}:${f}" 2>/dev/null || continue
+        git -C "${BUILD_SRC_DIR}" show "${UPSTREAM_COMMIT}:${f}" > "${upstream_tmp}/base"
+        if diff "${upstream_tmp}/base" "${SOURCE_DIR}/${f}" | grep -q '^<'; then
+            echo "OVERLAY DRIFT: vendor/Main_MiSTer/${f} changes or drops upstream lines." >&2
+            echo "  The overlay must be upstream + additions only. Re-vendor it from" >&2
+            echo "  ${UPSTREAM_COMMIT} and re-apply the local insert:" >&2
+            diff "${upstream_tmp}/base" "${SOURCE_DIR}/${f}" | grep '^<' | head -20 >&2
+            rc=1
+        fi
+    done < "${OVERLAY_MANIFEST}"
+    rm -rf "${upstream_tmp}"
+    return "${rc}"
+}
+
 prepare_source() {
     mkdir -p "${OUTPUT_DIR}"
     rm -rf "${BUILD_SRC_DIR}"
 
     git clone --filter=blob:none --no-checkout "${UPSTREAM_URL}" "${BUILD_SRC_DIR}"
     git -C "${BUILD_SRC_DIR}" checkout "${UPSTREAM_COMMIT}"
+    verify_overlay_is_additive
     rsync -a --files-from="${OVERLAY_MANIFEST}" "${SOURCE_DIR}/" "${BUILD_SRC_DIR}/"
     # Apply menu patch. The Maldita Castilla patch file is currently a no-op
-    # (comments only, no hunks). --allow-empty lets git apply succeed without
-    # modifying menu.cpp -- the wrapper entry is already wired through
-    # maldita_main.cpp (which replaces upstream main.cpp via the Makefile
-    # $(filter-out main.cpp,...) clause). Future phases may re-introduce
-    # menu.cpp edits for wrapper-driven OSD.
+    # (comments only, no hunks); --allow-empty lets git apply succeed without
+    # modifying menu.cpp. Upstream main.cpp is BUILT (the Makefile no longer
+    # filters it out) -- the wrapper entry is one call inserted into
+    # scheduler.cpp, see vendor/Main_MiSTer/maldita_hook.cpp.
     git -C "${BUILD_SRC_DIR}" apply --allow-empty --whitespace=nowarn "${MENU_PATCH}"
     cp "${BUILD_MANIFEST}" "${BUILD_SRC_DIR}/Makefile.maldita"
 }

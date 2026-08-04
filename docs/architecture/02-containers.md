@@ -55,7 +55,7 @@ flowchart TB
     Framework -- "ascal -> HDMI" --> Display
 
     Gamepad -- "joystick_* (HPS_BUS)" --> Framework
-    MainMenu -. "writes (maldita_joy_shm.cpp)" .-> JoyShm
+    MainMenu -. "writes (maldita_joy_shm.cpp\nDELETED 2026-08-04)" .-> JoyShm
     JoyShm -. "reads (joy_shm_reader.cpp)" .-> Engine
 
     style HPS stroke-dasharray: 3 3
@@ -204,9 +204,16 @@ assignment).
 
 **Host joy-shm.** POSIX shared memory at `/dev/shm/maldita-joy`
 (`MALDITA_JOY_SHM_PATH`, `external/gmloader-next/gmloader/mister/mister_joy_shm.h:22`),
-written by the vendored `maldita.castilla-mister/vendor/Main_MiSTer/maldita_joy_shm.cpp`
-running inside MiSTer Main, read by
-`external/gmloader-next/gmloader/mister/joy_shm_reader.cpp`. **Discrepancy
+read by `external/gmloader-next/gmloader/mister/joy_shm_reader.cpp`.
+**The producer no longer exists (2026-08-04).** It was
+`vendor/Main_MiSTer/maldita_joy_shm.cpp`, running inside a patched MiSTer Main;
+the `main=` overlay rework deleted it along with the rest of the supervisor,
+because the HPS takeover supersedes MiSTer-authoritative input entirely — with
+MiSTer killed there is nothing to be authoritative, and the engine reads the
+pads directly (see
+`docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md` §2b.1 and
+§3). The engine-side reader is untouched and still wins the transport selection
+if anything ever publishes the segment; nothing in-tree does. **Discrepancy
 from the plan:** the canonical list files this under "DDR3 shared regions,"
 but it is Linux tmpfs, not FPGA-visible DDR3 — the FPGA has no path to it.
 It is the second of the two verified joystick channels named in
@@ -269,7 +276,8 @@ instance.
 - `maldita.castilla-mister/fpga/sys/sys_top.v` — `h2f_gp` hard-IP instance
   (`:281`), not otherwise traced.
 - `maldita.castilla-mister/vendor/Main_MiSTer/maldita_joy_shm.cpp` — joy-shm
-  writer.
+  writer. **Deleted 2026-08-04**; kept in this list because the engine-side
+  reader still names the contract.
 - `docs/architecture/01-context.md` — canonical actor names and the C1
   citations reused here for `hps_io`/`joystick_*` wiring.
 

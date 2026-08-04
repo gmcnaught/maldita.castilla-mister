@@ -1,5 +1,15 @@
 # Feature 1 — `MiSTer_Maldita` Wrapper / Engine Lifecycle Implementation Plan
 
+> **SUPERSEDED 2026-08-04 (partially).** The overlay this plan built —
+> `maldita_main.cpp` replacing upstream `main()`, plus `maldita_wrapper`,
+> `maldita_joy_shm` and `maldita_osd` — was removed by the `main=` rework in
+> `docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md` §2b.1.
+> Upstream `main()` is now built verbatim and the whole local change is one call
+> in `scheduler.cpp`. `maldita_child` survives (minus `PR_SET_PDEATHSIG`, which
+> the HPS takeover makes actively wrong). Kept as the record of why the
+> replace-`main()` shape failed: 3/5 frame-1 wedges vs stock main 0/5.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A patched Main_MiSTer fork, `MiSTer_Maldita`, that MiSTer selects via `MiSTer.ini` `main=`, which forks/execs `gmloadernext.armhf`, supervises it (respawn-on-crash with bounded retry then halt-and-preserve), and tears it down on core unload.

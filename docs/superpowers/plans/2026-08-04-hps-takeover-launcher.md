@@ -263,34 +263,47 @@ exec hook, so this is the one route to an `_Other/` entry without a resident
 watcher (design §2b). **Do not start this before Phase 3 is green** — it is a
 usability upgrade on a working system, not a prerequisite for one.
 
-### Task 4b.1: Rebuild the overlay around upstream's `main()`
+### Task 4b.1: Rebuild the overlay around upstream's `main()` — **LANDED**
 
-- [ ] **Delete `maldita_main.cpp` from the overlay.** Upstream `main.cpp` runs
-      verbatim; that is what makes the readiness contract correct by
-      construction rather than by review. This is the fix for both recorded
-      wrapper bugs.
-- [ ] Add one readiness-gated `fork()`/`exec()` of `_handler.sh` after
-      `user_io_init()` completes, as an in-place patch to a file already in the
-      overlay (`user_io.cpp`).
-- [ ] Drop `maldita_joy_shm.*`, `maldita_osd.*` and the respawn logic — all
-      superseded by the takeover (design §2b.1). Keep the overlay as close to
-      "upstream plus one fork" as it will go.
-- [ ] Re-verify the pinned upstream commit in `vendor/Main_MiSTer.UPSTREAM.md`
-      still applies cleanly.
+- [x] **Deleted `maldita_main.cpp`**, and removed the Makefile's
+      `$(filter-out main.cpp, …)` so upstream `main()` is built. The readiness
+      contract is now correct by construction rather than by review.
+- [x] One readiness-gated fork, hooked from `scheduler.cpp` immediately after
+      `scheduler_wait_fpga_ready()` — a 95-line vendored file rather than
+      `user_io.cpp`'s 4363.
+- [x] Dropped `maldita_joy_shm.*`, `maldita_osd.*`, `maldita_wrapper.*`,
+      `input.{cpp,h}`, `user_io.{cpp,h}` and the respawn logic. Overlay: 13
+      files / ~12 000 lines -> 5 files / ~350.
+- [x] `PR_SET_PDEATHSIG` removed from the child — it would kill the engine when
+      the takeover kills the wrapper. Regression-guarded by
+      `test_survives_parent_death()`, verified to fail with the flag restored.
+- [x] `MISTER_PROC_NAMES` in `mister_takeover.sh`, so the takeover recognises
+      `MiSTer_Maldita` and does not silently refuse to arm.
+- [x] `maldita_hook.cpp` honours the takeover restore stamp, suppressing the
+      *spawn* (not just the takeover) so a restore can reach the menu.
+- [x] `build-hps.sh` asserts the overlay is upstream + added lines only — the
+      guard against a silently stale vendored `scheduler.cpp`.
+- [x] `make -C tools/mister-wrapper/test` — host-native tests for the child.
 
-### Task 4b.2: Re-run the measurement that killed the last wrapper
+### Task 4b.2: Re-run the measurement that killed the last wrapper — **the gate**
+
+Everything above is unproven until this passes. Build first:
+`tools/mister-wrapper/build-hps.sh` (Docker armhf cross-build), then deploy with
+`--main-wrapper`.
 
 - [ ] 5× frame-1 wedge test on `.62`, same RBF and engine, against the stock-main
       baseline. The reverted wrapper scored **3/5 wedges vs stock main 0/5**;
       anything but 0/5 means the readiness contract is still not being honoured
       and the wrapper goes back on the shelf.
 
-### Task 4b.3: Ship the entry
+### Task 4b.3: Ship the entry — **LANDED (untested on device)**
 
-- [ ] `_Other/Maldita Castilla.mgl` pointing at the dated RBF, so the visible
-      Cores-browser name is stable across builds.
-- [ ] `deploy.py` writes the `[Maldita Castilla] main=` line it currently
-      *comments out*, gated behind the same explicit flag as the takeover.
+- [x] `_Other/Maldita Castilla.mgl` pointing at the dated RBF, so the visible
+      Cores-browser name is stable across builds. `deploy.py` rewrites its
+      `<rbf>` to whichever RBF it just installed.
+- [x] `deploy.py --main-wrapper` writes the `[Maldita Castilla] main=` line;
+      without the flag an active line is still commented out, because the
+      wrapper is not yet device-proven.
 - [ ] Confirm both entry points still work: Cores browser via `main=`, and the
       Scripts launcher, without either interfering with the other.
 

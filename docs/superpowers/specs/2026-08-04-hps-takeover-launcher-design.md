@@ -274,7 +274,12 @@ independent reasons:
 (`user_io.cpp:1461-1463`) and would technically execute anything a user put
 there. It is a shell-injection accident, not an interface. **Do not.**
 
-### 2b.1 Why the wrapper is now *smaller* than the one that was reverted
+### 2b.1 Why the wrapper is now *smaller* than the one that was reverted — **LANDED**
+
+*(Implemented 2026-08-04. The overlay went from 13 files / ~12 000 lines to
+5 files / ~350 lines. Nothing here has run on hardware; plan Task 4b.2 is the
+gate.)*
+
 
 **[OBS]** `vendor/Main_MiSTer/maldita_main.cpp` is 20 lines and ends in
 `return maldita_wrapper_run(argc, argv);` — it **replaced upstream `main()`
@@ -306,6 +311,45 @@ with the engine forever: supervise it, publish a joy mask, poll the OSD. A
 takeover wrapper only has to *be stock MiSTer until the engine is live*, and is
 then killed by §2's liveness gate. Its whole job is one fork at one correct
 moment.
+
+**What actually landed**, and the three things that were not obvious until the
+code was written:
+
+| | |
+|---|---|
+| Hook point | `scheduler.cpp`, one call immediately after `scheduler_wait_fpga_ready()`. Vendoring a **95-line** file instead of `user_io.cpp`'s 4363 is itself a win for re-syncing. |
+| Overlay | `scheduler.cpp`, `maldita_hook.{cpp,h}`, `maldita_child.{cpp,h}`. `input.{cpp,h}`, `user_io.{cpp,h}`, `maldita_main.cpp`, `maldita_wrapper.*`, `maldita_joy_shm.*`, `maldita_osd.*` and `mister_joy_shm.h` are gone. |
+| Makefile | `$(filter-out main.cpp, …)` **removed** — upstream `main()` is built. That single line is the difference between extending `main()` and replacing it. |
+
+1. **`PR_SET_PDEATHSIG` had to go, and that is a correctness fix, not tidying.**
+   The reverted wrapper set it on the engine child, which was right when the
+   wrapper supervised the engine for the whole session — and is exactly wrong
+   now, because the takeover *kills this process on purpose* a few seconds after
+   the engine comes up. A PDEATHSIG child dies with it. On the device that would
+   present as an engine crash, not a wrapper bug.
+   `test_survives_parent_death()` is the regression guard, and it has been
+   verified to fail with the flag restored.
+2. **The takeover could not see the wrapper.** `tk_find_mister` matched on the
+   process name `MiSTer`; under `main=` the resident process is
+   `MiSTer_Maldita`, so the takeover refused to arm and the session silently ran
+   without one. Hence `MISTER_PROC_NAMES`, carrying both names always — which
+   one is resident depends on how the user entered the core, and nothing on the
+   handler side can know that.
+3. **The restore needed a second guard, in C.** Restoring restarts MiSTer, which
+   loads a core; if it loads ours, `main=` re-execs the wrapper, which would
+   spawn the engine again and put the user straight back in the game they were
+   leaving — with the follow-up `load_core menu.rbf` never reaching them.
+   `maldita_hook.cpp` therefore reads the *same* restore stamp
+   `mister_takeover.sh` writes, with the same 60 s window, and suppresses the
+   **spawn** (the handler's own guard only suppresses the *takeover*).
+
+**The re-sync hazard this shape introduces, and its guard.**
+`vendor/Main_MiSTer/scheduler.cpp` is a *copy* of upstream's. If upstream
+changes that file and nobody re-vendors it, the build silently ships a stale
+scheduler — the worst possible failure for the file that owns the readiness
+contract. `build-hps.sh` now asserts the overlay is **upstream plus added lines
+only**: any removed or modified line fails the build, where the fix is obvious,
+rather than on the device, where it is not.
 
 ### 2b.2 Comparison
 

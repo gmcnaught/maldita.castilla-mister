@@ -63,6 +63,8 @@
 #                                 MiSTer before giving up on the menu (20)
 #   MISTER_BIN                    the MiSTer main binary (/media/fat/MiSTer)
 #   MISTER_CMD_FIFO               MiSTer's command FIFO (/dev/MiSTer_cmd)
+#   MISTER_PROC_NAMES             process names that count as "MiSTer"
+#                                 ("MiSTer MiSTer_Maldita")
 
 : "${MALDITA_TAKEOVER:=0}"
 : "${MALDITA_TAKEOVER_DRYRUN:=0}"
@@ -72,6 +74,15 @@
 : "${MALDITA_TAKEOVER_MENU_WAIT_S:=20}"
 : "${MISTER_BIN:=/media/fat/MiSTer}"
 : "${MISTER_CMD_FIFO:=/dev/MiSTer_cmd}"
+
+# Under the `main=` entry point the resident process is NOT called "MiSTer" —
+# MiSTer exec'd our wrapper build (MiSTer_Maldita), which is upstream main()
+# plus one hook. Without this list `pidof MiSTer` finds nothing and the takeover
+# refuses to arm with "could not identify a running MiSTer process", silently
+# giving a session with no takeover at all. Both names, always: which one is
+# resident depends on how the user entered the core, not on any setting we can
+# read from here.
+: "${MISTER_PROC_NAMES:=MiSTer MiSTer_Maldita}"
 
 # C_DONE, low word. The blitter control block is qword-addressed from
 # 0x3B000000 (C_SUBMIT=0 CMDCOUNT=1 TARGET=2 CLEAR=3 FLAGS=4 DONE=5 ...), so
@@ -105,22 +116,42 @@ tk_c_done() {
 
 tk_proc_alive() { [ -d "/proc/$1" ]; }
 
+# Every pid matching any name in MISTER_PROC_NAMES. Empty output + status 1 when
+# nothing is running.
+tk_mister_pids() {
+    local name pids out=""
+    for name in $MISTER_PROC_NAMES; do
+        pids="$(pidof "$name" 2>/dev/null)"
+        [ -n "$pids" ] && out="$out $pids"
+    done
+    [ -n "$out" ] || return 1
+    echo "$out"
+}
+
 # Find MiSTer, and verify it before trusting it. `pidof` matches on name alone;
 # /proc/<pid>/exe is what tells us we are about to kill the real binary and
 # gives us the path to restart it from. DreamSTer reads the same link off its
 # own parent — we cannot, because our parent is Master_Daemon, not MiSTer.
 tk_find_mister() {
-    local pids pid exe
-    pids="$(pidof MiSTer 2>/dev/null)"
-    [ -n "$pids" ] || return 1
+    local pids pid exe base name
+    pids="$(tk_mister_pids)" || return 1
 
     for pid in $pids; do
         exe="$(readlink "/proc/$pid/exe" 2>/dev/null)"
         exe="${exe% (deleted)}"
-        if [ -n "$exe" ] && [ "$(basename "$exe")" = "MiSTer" ]; then
-            TAKEOVER_MISTER_EXE="$exe"
-            break
-        fi
+        [ -n "$exe" ] || continue
+        base="$(basename "$exe")"
+        for name in $MISTER_PROC_NAMES; do
+            if [ "$base" = "$name" ]; then
+                # Restart the exe we actually killed, not a hardcoded path: under
+                # `main=` that is the wrapper, and restarting it is correct —
+                # it comes up, sees the restore stamp, does NOT spawn the engine,
+                # and behaves as stock MiSTer until the menu.rbf request below
+                # hands off to /media/fat/MiSTer through the same main= machinery.
+                TAKEOVER_MISTER_EXE="$exe"
+                break 2
+            fi
+        done
     done
     [ -n "$TAKEOVER_MISTER_EXE" ] || return 1
 
@@ -136,9 +167,16 @@ tk_should_take_over() {
     [ "$MALDITA_TAKEOVER" = "1" ] || return 1
 
     # Re-entry guard. Restoring MiSTer makes MiSTer load a core; if it loads
-    # THIS core, Master_Daemon fires the handler again and we would take over
-    # again — a loop that is very hard to break from the couch. One degraded
-    # (but playable, and exitable) session is the right answer.
+    # THIS core, the handler fires again (via Master_Daemon, or via the `main=`
+    # hook) and we would take over again — a loop that is very hard to break
+    # from the couch. One degraded (but playable, and exitable) session is the
+    # right answer.
+    #
+    # CONTRACT: vendor/Main_MiSTer/maldita_hook.cpp reads the SAME stamp with
+    # the same 60 s window, and there it suppresses the engine spawn entirely
+    # rather than just the takeover — which is what a restore actually needs,
+    # since an engine started during one would put the user straight back in the
+    # game they were leaving. Change the window here and change it there.
     if [ -f "$TAKEOVER_STAMP" ]; then
         local then_s now_s
         then_s="$(cat "$TAKEOVER_STAMP" 2>/dev/null)"
@@ -320,7 +358,7 @@ tk_restore_menu() {
     while [ "$waited" -lt "$MALDITA_TAKEOVER_MENU_WAIT_S" ]; do
         sleep 1
         waited=$((waited + 1))
-        pidof MiSTer >/dev/null 2>&1 || continue
+        tk_mister_pids >/dev/null 2>&1 || continue
         [ -p "$MISTER_CMD_FIFO" ] || continue
 
         # MiSTer unlinks and re-mkfifos the node, then opens it O_RDWR, during

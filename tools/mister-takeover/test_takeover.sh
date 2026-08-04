@@ -56,8 +56,10 @@ FAKE_C_DONE_N=0
 # pidof reports only pids that are genuinely alive, so a killed fake MiSTer
 # really does disappear from it — the restore's "has MiSTer come back?" loop is
 # then a real test rather than a stubbed constant.
+FAKE_MISTER_NAME="MiSTer"
+
 pidof() {
-    [ "$1" = "MiSTer" ] || return 1
+    [ "$1" = "$FAKE_MISTER_NAME" ] || return 1
     local p out=""
     for p in $(cat "$TMP/mister.pids" 2>/dev/null); do
         [ -d "/proc/$p" ] && out="$out $p"
@@ -131,6 +133,7 @@ reset_case() {
     MALDITA_TAKEOVER_MENU_WAIT_S=6
     MISTER_BIN="$TMP/MiSTer"
     MISTER_CMD_FIFO="$TMP/cmd"
+    FAKE_MISTER_NAME="MiSTer"
     export MALDITA_TAKEOVER MALDITA_TAKEOVER_DRYRUN MALDITA_TAKEOVER_GOVERNOR
     export MALDITA_TAKEOVER_LIVENESS_S MALDITA_TAKEOVER_REENTRY_S MISTER_BIN
     export MALDITA_TAKEOVER_MENU_WAIT_S MISTER_CMD_FIFO
@@ -180,6 +183,17 @@ echo "$(( $(date +%s) - 3600 ))" > "$TMP/stamp"
 tk_should_take_over >/dev/null 2>&1 && r=armed || r=refused
 check "arms when the re-entry stamp is old" "$r" "armed"
 check "  and records the MiSTer exe path" "$TAKEOVER_MISTER_EXE" "$TMP/MiSTer"
+kill "$FAKE_MISTER_PIDS" 2>/dev/null
+
+# Under the `main=` entry point the resident process is MiSTer_Maldita, not
+# MiSTer. Before MISTER_PROC_NAMES existed this refused to arm and the session
+# silently ran with no takeover at all.
+reset_case
+FAKE_MISTER_NAME="MiSTer_Maldita"
+spawn_fake_mister
+echo "$(( $(date +%s) - 3600 ))" > "$TMP/stamp"
+tk_should_take_over >/dev/null 2>&1 && r=armed || r=refused
+check "arms against the main= wrapper process name" "$r" "armed"
 kill "$FAKE_MISTER_PIDS" 2>/dev/null
 
 echo "== liveness gate =="
