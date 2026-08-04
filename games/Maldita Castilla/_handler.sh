@@ -28,6 +28,13 @@
 GAMEDIR="/media/fat/games/gmloader"     # engine payload (gmloader, mygame.apk, saves/)
 LOGDIR="/media/fat/logs/MalditaCastilla"
 
+# This script's own directory — where mister_takeover.sh and takeover.env live.
+# Resolved BEFORE the cd below, and only from $0, so it follows the handler
+# wherever the daemon found it rather than assuming the CONF_STR path.
+HANDLER_SELF="$0"
+case "$HANDLER_SELF" in /*) ;; *) HANDLER_SELF="$PWD/$HANDLER_SELF" ;; esac
+HANDLER_DIR="$(dirname "$HANDLER_SELF")"
+
 cd "$GAMEDIR" || exit 1
 mkdir -p "$LOGDIR"
 
@@ -90,7 +97,34 @@ if [ -f "$BENCH_ENV" ]; then
     BENCH_NOTE=" BENCH_ENV=sourced($BENCH_ENV)"
 fi
 
+# HPS takeover (opt-in, default OFF). takeover.env lives beside this script and
+# is the only thing that arms it; with no such file the two `.` sources below
+# are no-ops and the launch takes the same `exec` path it always did.
+#
+# Sourced AFTER bench.env deliberately: a bench run must be able to force
+# takeover off (MALDITA_TAKEOVER=0) for a measurement, and the last assignment
+# wins. Design: docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md
+TAKEOVER_NOTE=""
+if [ -f "$HANDLER_DIR/mister_takeover.sh" ]; then
+    [ -f "$HANDLER_DIR/takeover.env" ] && . "$HANDLER_DIR/takeover.env"
+    . "$HANDLER_DIR/mister_takeover.sh"
+    TAKEOVER_NOTE=" TAKEOVER=$MALDITA_TAKEOVER"
+fi
+
 echo "maldita handler: CORENAME='$(cat /tmp/CORENAME 2>/dev/null)' \
-BLITTER=$GMLOADER_BLITTER RASTER=$GMLOADER_RASTER${BENCH_NOTE}" > "$LOGDIR/maldita.log"
+BLITTER=$GMLOADER_BLITTER RASTER=$GMLOADER_RASTER${BENCH_NOTE}${TAKEOVER_NOTE}" > "$LOGDIR/maldita.log"
+
+# The takeover path cannot `exec`: this shell has to outlive the engine to run
+# the restore. Everything else about the launch is identical.
+# The redirect on the probe (rather than an unconditional `exec >>`) keeps the
+# non-takeover path's fds exactly as they were, while still capturing the
+# reason a takeover was refused — which is the only place that reason is
+# recorded. It is a plain function call, not a subshell, so the MiSTer pid/exe
+# it discovers survive into takeover_run.
+if [ -n "$TAKEOVER_NOTE" ] && tk_should_take_over >> "$LOGDIR/maldita.log" 2>&1; then
+    exec >> "$LOGDIR/maldita.log" 2>&1
+    takeover_run ./gmloader -c gmloader.json
+    exit $?
+fi
 
 exec ./gmloader -c gmloader.json >> "$LOGDIR/maldita.log" 2>&1

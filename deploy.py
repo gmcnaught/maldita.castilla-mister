@@ -55,6 +55,14 @@ COMMENTS IT OUT. Reinstating the wrapper is deferred to a future plan.
 The wrapper binary is still uploaded (harmless, unused by this path) so the
 future plan can re-enable it without a redeploy.
 
+HPS TAKEOVER (2026-08-04, opt-in, default OFF): games/<CORENAME>/mister_takeover.sh
+ships alongside the handler and is INERT unless a takeover.env sits next to it.
+Armed, it lets stock MiSTer main load the core and satisfy its readiness contract,
+waits for the engine to prove itself live on the fabric (C_DONE advancing), then
+kills MiSTer and restarts it on every exit path — the DreamSTer model, taken late.
+--takeover / --no-takeover manage that marker; neither flag leaves it untouched.
+Design: docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md.
+
 Usage:
   ./deploy.py                      RBF + engine + content (the moving pieces)
   ./deploy.py --no-rbf             engine + content only
@@ -408,7 +416,25 @@ def main():
                     help="download the CI RBF built from THIS repo's HEAD, then deploy it")
     ap.add_argument("--force", action="store_true",
                     help="ship artifacts that fail the provenance/staleness gate")
+    # ── HPS takeover (docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md)
+    # Default is NEITHER flag: the on-device takeover.env is left exactly as it
+    # is, so a redeploy never silently arms or disarms a device.
+    ap.add_argument("--takeover", action="store_true",
+                    help="arm the HPS takeover: once the engine proves live on the "
+                         "fabric, Main_MiSTer is killed and restarted on exit. NO "
+                         "GAMEPAD until gmloader-next lands GMLOADER_JOY=sdl — keep "
+                         "an SSH session open. Use .62, not production.")
+    ap.add_argument("--takeover-dryrun", action="store_true",
+                    help="with --takeover: run and log every takeover step but kill "
+                         "nothing and change no cpufreq setting")
+    ap.add_argument("--takeover-governor", action="store_true",
+                    help="with --takeover: performance governor + 1 GHz while the "
+                         "game runs, restored on exit")
+    ap.add_argument("--no-takeover", action="store_true",
+                    help="disarm the HPS takeover (removes the device's takeover.env)")
     args = ap.parse_args()
+    if args.takeover and args.no_takeover:
+        ap.error("--takeover and --no-takeover are mutually exclusive")
     host = args.host
     if args.engine_only:
         args.no_rbf = args.no_content = True
@@ -511,6 +537,29 @@ def main():
         ssh(host, f"mkdir -p '{HANDLER_DIR}' /media/fat/logs/MalditaCastilla", check=True)
         scp_verified(host, handler_src, f"{HANDLER_DIR}/_handler.sh")
         ssh(host, f"chmod 755 '{HANDLER_DIR}/_handler.sh'", check=True)
+
+        # HPS takeover harness — always shipped, INERT unless takeover.env arms
+        # it. The handler sources it from its own directory, so it has to land
+        # here rather than in GAMEDIR.
+        takeover_src = REPO / "games" / CORENAME / "mister_takeover.sh"
+        if takeover_src.exists():
+            scp_verified(host, takeover_src, f"{HANDLER_DIR}/mister_takeover.sh")
+            ssh(host, f"chmod 644 '{HANDLER_DIR}/mister_takeover.sh'", check=True)
+        if args.takeover:
+            # Written here, not baked into _handler.sh, so arming survives a
+            # handler redeploy and disarming is one file removal — including
+            # from a rescue SSH session on a box whose OSD is gone.
+            print("   ! arming the HPS takeover (MiSTer will be killed once the "
+                  "engine proves live)")
+            env = "MALDITA_TAKEOVER=1\n"
+            if args.takeover_dryrun:
+                env += "MALDITA_TAKEOVER_DRYRUN=1\n"
+            if args.takeover_governor:
+                env += "MALDITA_TAKEOVER_GOVERNOR=1\n"
+            ssh(host, f"printf '%s' '{env}' > '{HANDLER_DIR}/takeover.env'", check=True)
+        elif args.no_takeover:
+            print("   disarming the HPS takeover (removing takeover.env)")
+            ssh(host, f"rm -f '{HANDLER_DIR}/takeover.env'")
         # Disable a stale main= wrapper handoff: stock MiSTer main must stay resident so
         # it keeps its FPGA-readiness contract. Device-measured 2026-07-25: wrapper 3/5
         # frame-1 wedges vs stock main 0/5, same RBF and engine.
