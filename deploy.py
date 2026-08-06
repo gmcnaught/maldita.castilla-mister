@@ -66,6 +66,10 @@ the Cores browser now loads the bitstream and starts NO engine. Use the Scripts
 entry, or arm --main-wrapper. Nothing tears the engine down on a core change
 any more either — that was the daemon's kill_child.
 
+--main-wrapper / --no-main-wrapper are STICKY: neither flag leaves the device's
+main= line exactly as it is, so a deploy for an unrelated reason cannot turn a
+user's chosen entry point off under them.
+
 `main=` was disabled on 2026-07-25 because the wrapper then REPLACED MiSTer's
 main() with a hand-rolled loop (the dead `#else` branch — USE_SCHEDULER is
 unconditional) that never ran the scheduler's per-iteration
@@ -77,8 +81,8 @@ main() and scheduler are now built verbatim and the entire local change is one
 call inserted AFTER scheduler_wait_fpga_ready() (vendor/Main_MiSTer/maldita_hook.cpp).
 Device-measured 2026-08-05 on .62 (daemon stopped, one engine): 0/5 frame-1
 wedges, ~59fps, rendering correct — the gate the 2026-07-25 revert set. It stays
-OPT-IN pending a run on the production rig: without --main-wrapper an active
-main= line is commented out, as before.
+OPT-IN -- it is not armed unless you ask for it -- but once armed it STAYS
+armed; use --no-main-wrapper to turn it off.
 
 HPS TAKEOVER (2026-08-04, opt-in, default OFF): games/<CORENAME>/mister_takeover.sh
 ships alongside launch.sh and is INERT unless a takeover.env sits next to it.
@@ -93,6 +97,10 @@ Usage:
   ./deploy.py --no-rbf             engine + content only
   ./deploy.py --no-content         RBF + engine only (skip the 49MB game.droid)
   ./deploy.py --engine-only        just the gmloader binary + gmloader.json
+  ./deploy.py --no-engine          launch path only (launch.sh, Scripts entry, MGL,
+                                   wrapper, main=/takeover markers) — leaves the
+                                   device's engine binary alone, and skips its
+                                   staleness gate with it
   ./deploy.py --with-runtime DIR   also push mesa/ + libGLES_sw.so + lib/ from DIR
   ./deploy.py --host 1.2.3.4       override device IP
 
@@ -432,6 +440,11 @@ def main():
     ap.add_argument("--no-rbf", action="store_true", help="skip the FPGA core RBF")
     ap.add_argument("--no-content", action="store_true",
                     help="skip the APK + 49MB game.droid + options.ini")
+    ap.add_argument("--no-engine", action="store_true",
+                    help="skip the gmloader binary (and its staleness gate). For "
+                         "launch-path-only deploys — installing launch.sh, the Scripts "
+                         "entry or --main-wrapper on a device whose engine is already "
+                         "newer than the local build.")
     ap.add_argument("--engine-only", action="store_true",
                     help="just the gmloader binary + gmloader.json (implies --no-rbf --no-content)")
     ap.add_argument("--with-runtime", type=Path, metavar="DIR",
@@ -458,14 +471,25 @@ def main():
                          "game runs, restored on exit")
     ap.add_argument("--no-takeover", action="store_true",
                     help="disarm the HPS takeover (removes the device's takeover.env)")
+    # Sticky, like --takeover: neither flag leaves the device's main= line as it
+    # is. It used to disarm on every deploy that did not ask for it, on the
+    # grounds that the wrapper was not device-proven -- it now is (0/5 frame-1
+    # wedges on .62, twice), and silent disarming meant any later deploy for an
+    # unrelated reason turned the user's chosen entry point off under them.
     ap.add_argument("--main-wrapper", action="store_true",
                     help="write the MiSTer.ini [Maldita Castilla] main= line, so selecting "
                          "the core from the Cores browser starts the engine with no daemon. "
-                         "Without this flag an active main= line is COMMENTED OUT, because "
-                         "the wrapper is not yet device-proven.")
+                         "Sticky: a later deploy without this flag leaves it armed.")
+    ap.add_argument("--no-main-wrapper", action="store_true",
+                    help="comment out the MiSTer.ini main= line (back to the Scripts entry "
+                         "as the only launch route)")
     args = ap.parse_args()
     if args.takeover and args.no_takeover:
         ap.error("--takeover and --no-takeover are mutually exclusive")
+    if args.no_engine and args.engine_only:
+        ap.error("--no-engine and --engine-only are mutually exclusive")
+    if args.main_wrapper and args.no_main_wrapper:
+        ap.error("--main-wrapper and --no-main-wrapper are mutually exclusive")
     host = args.host
     if args.engine_only:
         args.no_rbf = args.no_content = True
@@ -474,7 +498,7 @@ def main():
     engine = args.engine
     wrapper = args.wrapper
     gmjson = JSON_DEFAULT
-    need = [engine, wrapper, gmjson]
+    need = [wrapper, gmjson] if args.no_engine else [engine, wrapper, gmjson]
     if not args.no_content:
         need += [APK_DEFAULT, DROID_DEFAULT, OPTIONS_DEFAULT]
     missing = [p for p in need if not p.exists()]
@@ -508,7 +532,7 @@ def main():
                       "      fetch the one matching HEAD with: ./deploy.py --fetch-rbf")
     if rbf is not None:
         rbf_info = check_rbf_provenance(rbf, args.force)
-    engine_info = check_engine_freshness(engine, args.force)
+    engine_info = None if args.no_engine else check_engine_freshness(engine, args.force)
 
     runtime = None
     if args.with_runtime:
@@ -527,14 +551,18 @@ def main():
         print(f"  │        commit {rbf_info['commit']}  sha1 {rbf_info['sha1']}  [{rbf_info['note']}]")
     else:
         print("  │ RBF    (not shipping — core on device stays as-is)")
-    print(f"  │ ENGINE {Path(engine).name}")
-    print(f"  │        gmloader-next {engine_info['commit']}  built {engine_info['built']}  "
-          f"md5 {engine_info['md5']}  [{engine_info['note']}]")
+    if engine_info:
+        print(f"  │ ENGINE {Path(engine).name}")
+        print(f"  │        gmloader-next {engine_info['commit']}  built {engine_info['built']}  "
+              f"md5 {engine_info['md5']}  [{engine_info['note']}]")
+    else:
+        print("  │ ENGINE (not shipping — binary on device stays as-is)")
     print("  └" + "─" * 60)
     # A partial deploy is legitimate (bisecting, A/B) but it is ALSO how the halves
     # drift apart, so name the risk instead of letting it pass silently.
-    if args.no_rbf or args.no_content:
-        skipped = [n for n, s in (("RBF", args.no_rbf), ("content", args.no_content)) if s]
+    if args.no_rbf or args.no_content or args.no_engine:
+        skipped = [n for n, s in (("RBF", args.no_rbf), ("content", args.no_content),
+                                  ("engine", args.no_engine)) if s]
         print(f"\n  !! PARTIAL DEPLOY — not shipping: {', '.join(skipped)}")
         print("     The engine and RBF are a matched pair with no runtime handshake;")
         print("     whatever is already on the device for the skipped half stays put.")
@@ -543,18 +571,25 @@ def main():
     # ── Stop the running engine so its binary can be replaced ─────────────────
     # No pkill on device busybox; match `gmloader -c` in ps ([g] keeps grep off
     # itself). Then remove the old binary (FAT can't overwrite a still-open exe).
-    print("-- Stopping running gmloader --")
-    ssh(host, "for p in $(ps -o pid,args 2>/dev/null | grep '[g]mloader -c' | awk '{print $1}'); do "
-              "kill -9 \"$p\" 2>/dev/null; done; sleep 1; "
-              f"rm -f {GAMEDIR}/gmloader; true")
+    # Skipped with --no-engine: the binary is not being replaced, so there is no
+    # reason to kill a running session or delete an executable we are keeping.
+    if not args.no_engine:
+        print("-- Stopping running gmloader --")
+        ssh(host, "for p in $(ps -o pid,args 2>/dev/null | grep '[g]mloader -c' | awk '{print $1}'); do "
+                  "kill -9 \"$p\" 2>/dev/null; done; sleep 1; "
+                  f"rm -f {GAMEDIR}/gmloader; true")
 
     print("\n-- Creating remote dirs --")
     ssh(host, f"mkdir -p {GAMEDIR}/saves {GAMEDIR}/lib/armeabi-v7a {GAMEDIR}/mesa "
               "/media/fat/_Other", check=True)
 
-    print("\n-- Uploading engine binary + gmloader.json (sha1-verified) --")
-    scp_verified(host, engine, f"{GAMEDIR}/gmloader")
-    scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
+    if args.no_engine:
+        print("\n-- Skipping engine binary (--no-engine); shipping gmloader.json only --")
+        scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
+    else:
+        print("\n-- Uploading engine binary + gmloader.json (sha1-verified) --")
+        scp_verified(host, engine, f"{GAMEDIR}/gmloader")
+        scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
 
     print("\n-- Uploading HPS wrapper binary (sha1-verified; used only with --main-wrapper) --")
     scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
@@ -630,6 +665,34 @@ def main():
         elif args.no_takeover:
             print("   disarming the HPS takeover (removing takeover.env)")
             ssh(host, f"rm -f '{HANDLER_DIR}/takeover.env'")
+        # Stable Cores-browser entry. The RBF name changes on every build, so
+        # without this the visible entry moves around.
+        #
+        # Installed HERE, with the launch path, and NOT under `if not no_rbf`:
+        # the MGL is a launch-path artifact, not an RBF one. Gating it on the
+        # RBF meant `--main-wrapper --no-rbf` armed the wrapper and shipped no
+        # entry for it to be reached from.
+        #
+        # Shipped verbatim, with no path rewriting: MiSTer's <rbf> tag is a
+        # PREFIX, not a filename. get_rbf() (support/arcade/mra_loader.cpp:1223)
+        # scans _Other for .rbf files starting with it whose next character is
+        # '.' or '_', and keeps the LEXICOGRAPHICALLY GREATEST match.
+        #
+        # CAUTION, and it is not what the original note here claimed: greatest
+        # is only "newest" while the names sort chronologically. This project
+        # now builds COMMIT-HASH names (MalditaCastilla_2509573,
+        # MalditaCastilla_a723aa5, ...), and hashes do not sort by date —
+        # _a723aa5 (Jul 30) sorts above _2509573 (Jul 31). So the MGL resolves
+        # to an ARBITRARY installed build, and any hand-named one
+        # (MalditaCastilla_issue15fix) outranks every hex name forever. Keep
+        # one build in _Other/ if you care which one runs, or select the .rbf
+        # directly instead of the MGL.
+        mgl_src = REPO / "games" / CORENAME / f"{CORENAME}.mgl"
+        if mgl_src.exists():
+            print(f"   installing the Cores-browser entry '_Other/{CORENAME}.mgl'")
+            ssh(host, "mkdir -p /media/fat/_Other", check=True)
+            scp_verified(host, mgl_src, f"/media/fat/_Other/{CORENAME}.mgl")
+
         # --- MiSTer.ini `main=` handoff -------------------------------------
         # The absolute path matters: MiSTer's getFullPath() passes absolute
         # paths through unchanged (file_io.cpp:154-166) and getappname() reads
@@ -663,12 +726,8 @@ def main():
                     "else "
                     f"  printf '\\n[{CORENAME}]\\n{MAIN_LINE}\\n' >> /media/fat/MiSTer.ini; "
                     "fi", check=True)
-        elif active:
-            # Default, and deliberately NOT "leave it alone" the way --takeover
-            # is: the wrapper is not yet device-proven, so a deploy that does
-            # not ask for it disarms it.
-            print("   ! MiSTer.ini has an active main= wrapper handoff — commenting it out")
-            print("     (pass --main-wrapper to keep it)")
+        elif args.no_main_wrapper and active:
+            print("   disarming the main= wrapper handoff — commenting it out")
             ssh(host, backup +
                       f"sed -i 's|^{MAIN_LINE}|"
                       f";{MAIN_LINE}  ; disabled by deploy.py|' "
@@ -718,22 +777,11 @@ def main():
         print(f"\n-- Uploading RBF {rbf.name} (sha1-verified) --")
         scp_verified(host, rbf, f"/media/fat/_Other/{rbf.name}")
 
-        # Stable Cores-browser entry. The RBF carries its build date in its
-        # name, so without this the visible entry changes on every rebuild.
-        #
-        # Shipped verbatim, with no path rewriting: MiSTer's <rbf> tag is a
-        # PREFIX, not a filename. get_rbf() (support/arcade/mra_loader.cpp:1223)
-        # scans the directory for .rbf files starting with it whose next
-        # character is '.' or '_', and keeps the lexicographically greatest —
-        # so "_Other/MalditaCastilla" always resolves to the newest dated build
-        # on the device, including ones this deploy did not install.
-        mgl_src = REPO / "games" / CORENAME / f"{CORENAME}.mgl"
-        if mgl_src.exists():
-            print(f"   installing the Cores-browser entry '_Other/{CORENAME}.mgl'")
-            scp_verified(host, mgl_src, f"/media/fat/_Other/{CORENAME}.mgl")
 
     print("\n-- Fixing exec bit on the engine + wrapper --")
-    ssh(host, f"chmod 755 {GAMEDIR}/gmloader {GAMEDIR}/MiSTer_Maldita", check=True)
+    targets = f"{GAMEDIR}/MiSTer_Maldita" if args.no_engine \
+        else f"{GAMEDIR}/gmloader {GAMEDIR}/MiSTer_Maldita"
+    ssh(host, f"chmod 755 {targets}", check=True)
 
     print("\n-- Deployed tree --")
     r = ssh(host, f"ls -la {GAMEDIR}/ {GAMEDIR}/saves/ 2>/dev/null | head -40; "

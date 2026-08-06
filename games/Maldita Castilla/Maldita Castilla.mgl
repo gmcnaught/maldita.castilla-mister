@@ -13,9 +13,17 @@
   MiSTer's get_rbf() (support/arcade/mra_loader.cpp:1223-1296) resolves the
   directory from the storage root, then scans it for .rbf files whose name
   starts with that prefix AND whose next character is '.' or '_', keeping the
-  lexicographically greatest match. Since our names sort by date,
-  "_Other/MalditaCastilla" always resolves to the NEWEST installed build. Note
-  the missing .rbf extension is required, not an omission.
+  lexicographically greatest match. Note the missing .rbf extension is
+  required, not an omission.
+
+  WHICH BUILD THAT ACTUALLY SELECTS. Greatest is only "newest" while the names
+  sort chronologically, and ours no longer do: builds are named by COMMIT HASH
+  (MalditaCastilla_2509573, MalditaCastilla_a723aa5, ...), so _a723aa5 built
+  Jul 30 sorts ABOVE _2509573 built Jul 31. A hand-named build such as
+  MalditaCastilla_issue15fix outranks every hex name indefinitely, since 'i'
+  sorts above every hex digit. This entry therefore resolves to an arbitrary
+  installed build, not the newest one. Keep a single build in _Other/ if you
+  care which one runs, or select the .rbf directly and skip this entry.
 
   This on its own only LOADS THE CORE, exactly as selecting the RBF does. What
   starts the engine is whichever trigger is installed: Master_Daemon watching
