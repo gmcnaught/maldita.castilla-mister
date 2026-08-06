@@ -3,12 +3,12 @@
 # mister_run.sh — drive the gmloader core on a real MiSTer over SSH, for
 # autonomous perf-tuning A/B runs from a dev machine.
 #
-# Launch is via the Master_Daemon handler, never by hand: a hand launch
-# measures a different halt point (33 vs 21) and an interactive shell masks
-# the LD_LIBRARY_PATH requirement the handler exports. Concretely: this
+# Launch is via launch.sh, never by hand: a hand launch measures a different
+# halt point (33 vs 21) and an interactive shell masks the LD_LIBRARY_PATH
+# requirement launch.sh exports. Concretely: this
 # script stages diag knobs as scripts/../bench.env on the device, triggers
-# `load_core` on /dev/MiSTer_cmd, and lets games/Maldita Castilla/_handler.sh
-# (maldita.castilla-mister) spawn the engine and source that file. It uses
+# `load_core` on /dev/MiSTer_cmd, then runs games/Maldita Castilla/launch.sh
+# (maldita.castilla-mister) to spawn the engine and source that file. It uses
 # scripts/gmloader_diag.sh on the device ONLY to resolve CLI-style diag flags
 # to GMLOADER_* env vars (via --dry-run — it is never executed to launch the
 # engine directly), times the run from here, tears it down, and pulls the
@@ -17,25 +17,30 @@
 #   ./mister_run.sh deploy                         # push gmloader_diag.sh to the MiSTer
 #   ./mister_run.sh bench --secs 20 --preset sw    # timed daemon-path run, auto-collect + summarize
 #   ./mister_run.sh bench --secs 20 --preset fabric --prof --trace
-#   ./mister_run.sh launch --preset gl             # stream a daemon-path run live (Ctrl-C stops it)
+#   ./mister_run.sh launch --preset gl             # stream a run live (Ctrl-C stops it)
 #   ./mister_run.sh stop                           # kill engine PID(s) + clear any staged bench.env
 #   ./mister_run.sh pull-log                        # scp the device log here
 #
 # Host + paths (override via env or flags):
 #   MISTER_HOST   default root@192.168.20.81
-#   GMDIR         default /media/fat/games/gmloader   (must match the diag script and _handler.sh)
+#   GMDIR         default /media/fat/games/gmloader   (must match the diag script and launch.sh)
 #
 set -u
 
 HOST="${MISTER_HOST:-root@192.168.20.81}"
 GMDIR="${GMDIR:-/media/fat/games/gmloader}"
 REMOTE_DIAG="/media/fat/Scripts/gmloader_diag.sh"
-# The daemon launch path logs to the handler's own log, NOT gmloader_diag.sh's
-# /tmp/gmloader.log (that path is only used by a hand launch, which this
-# script no longer performs for bench/launch).
+# launch.sh logs to its own log, NOT gmloader_diag.sh's /tmp/gmloader.log
+# (that path is only used by a hand launch, which this script no longer
+# performs for bench/launch).
 REMOTE_LOG="/media/fat/logs/MalditaCastilla/maldita.log"
 REMOTE_BENCH_ENV="$GMDIR/bench.env"
 RBF_GLOB="/media/fat/_Other/MalditaCastilla_*.rbf"
+# Must equal the RBF's CONF_STR setname (fpga/Maldita.sv) — MiSTer writes it to
+# /tmp/CORENAME, and it is the directory launch.sh lives under.
+CORENAME="${CORENAME:-Maldita Castilla}"
+# The engine launcher. NOT _handler.sh — see load_core_and_wait.
+LAUNCHER="${LAUNCHER:-/media/fat/games/$CORENAME/launch.sh}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_DIAG="$HERE/gmloader_diag.sh"
 OUTDIR="${OUTDIR:-$HERE/../bench-results}"
@@ -56,7 +61,7 @@ SCENE=""
 # --capture START:FRAMES (Phase 3 Stage A) — stage the engine's
 # GMLOADER_MFGPU_TRACE draw-stream capture for a bounded frame window and pull
 # the result back. The frame numbers are the engine's own g_frame_no (counted
-# from engine start, i.e. from the daemon spawn, NOT from bench start), so a
+# from engine start, i.e. from the launch.sh spawn, NOT from bench start), so a
 # window has to be calibrated against a log/screenshot anchor for the scene of
 # interest — see docs/superpowers/findings/ for the calibrated values. That
 # counter is 1-based (it is incremented as each frame opens, so the first frame
@@ -106,20 +111,20 @@ trap cleanup_ssh_ctl EXIT
 
 usage() {
   cat <<EOF
-mister_run.sh — remote-drive gmloader on a MiSTer for perf A/B, via the
-Master_Daemon handler (never a hand launch).
+mister_run.sh — remote-drive gmloader on a MiSTer for perf A/B, via
+launch.sh (never a hand launch).
 
 COMMANDS
   deploy                 scp gmloader_diag.sh -> $REMOTE_DIAG (chmod +x)
                           — used only to resolve diag flags to env, not to launch.
   bench [--secs N] [--scene NAME] [--capture START:FRAMES] [--env K=V] ARGS
-                         timed unattended daemon-path run; ARGS resolve to
+                         timed unattended run; ARGS resolve to
                          GMLOADER_* env staged as bench.env (e.g. --preset sw
-                         --prof) for _handler.sh to source. Asserts exactly one
+                         --prof) for launch.sh to source. Asserts exactly one
                          engine on every sample, aborting the run otherwise.
                          Collects + summarizes.
   launch [--scene NAME] ARGS
-                         stream a live daemon-path run (foreground); Ctrl-C ends it.
+                         stream a live run (foreground); Ctrl-C ends it.
   Both bench and launch retry through the known frame-1 fabric wedge
   (log signature: "submit timeout") up to $MAX_WEDGE_ATTEMPTS total attempts before
   aborting; a retried run prints "wedge: retry K/$MAX_WEDGE_ATTEMPTS" and the summary
@@ -134,7 +139,7 @@ COMMANDS
                          stage GMLOADER_MFGPU_TRACE for engine frames
                          [START, START+FRAMES) into $REMOTE_TRACE on the
                          device. bench pulls it back next to its log, BEFORE
-                         teardown (same daemon-respawn race as the log).
+                         teardown (same respawn race as the log).
                          START/FRAMES are engine frame numbers (g_frame_no,
                          from engine start), not seconds.
   --env KEY=VAL (bench|launch, repeatable)
@@ -185,7 +190,7 @@ teardown() {
   devpid_kill SSH || kill_rc=$?
   # joy_script (if a --scene run started one) — same busybox bracket trick as
   # devpid_kill: "[.]/joy_script" matches the running process, not this grep,
-  # not _handler.sh. Left running, it would keep the shm mapping open across
+  # not launch.sh. Left running, it would keep the shm mapping open across
   # runs and re-latch the SAME stale mask on the next launch even after the
   # rm below, since a live writer can recreate/rewrite the path between the
   # rm and the next reader's open().
@@ -226,9 +231,11 @@ do_stop() {
 }
 
 # assert_sole_engine <label> — abort the run unless exactly one engine is up.
-# Called per SAMPLE, not once per run: the Master_Daemon can spawn a second
-# engine at any point, and a mid-run second instance silently corrupts the
-# control block (see lib/device_pids.sh). Prints "[assert] LABEL: engine
+# Called per SAMPLE, not once per run: a second engine at any point silently
+# corrupts the control block (see lib/device_pids.sh). The Master_Daemon route
+# that used to spawn one is gone as of 2026-08-05, but the assertion stays —
+# a stale _handler.sh on the device brings it straight back, and this is the
+# check that catches it. Prints "[assert] LABEL: engine
 # count = N" on success — later tasks grep bench output for this per sample.
 assert_sole_engine() {
   local n
@@ -282,8 +289,8 @@ build_bench_env() {
 
 # stage_bench_env [ARGS...] — write the resolved diag env to the device as
 # bench.env (or remove any stale copy if there is nothing to stage), so
-# _handler.sh's optional hook can source it on the NEXT daemon-triggered
-# launch. Must run before load_core: the handler reads bench.env once, at
+# launch.sh's optional hook can source it on the NEXT launch. Must run
+# before load_core: launch.sh reads bench.env once, at
 # launch, and this harness removes it again during teardown (do_stop) so a
 # stale file can never silently steer a later production run.
 stage_bench_env() {
@@ -330,7 +337,7 @@ stage_bench_env() {
 # ORDERING IS LOAD-BEARING (see joy_script.c / input.cpp:307-319): the shm
 # transport latches on the engine's FIRST input poll and is never
 # re-evaluated, so the driver's magic word must already be valid the moment
-# the Master_Daemon handler spawns the engine. No-op (returns 0) if name is
+# launch.sh spawns the engine. No-op (returns 0) if name is
 # empty — callers always call this unconditionally so the daemon path stays
 # a plain production launch when no scene is requested.
 stage_scene() {
@@ -360,8 +367,20 @@ stage_scene() {
 
 # load_core_and_wait [timeout-secs] — discover the newest RBF under
 # /media/fat/_Other on the device, trigger `load_core` on /dev/MiSTer_cmd,
-# and wait for the Master_Daemon handler to spawn exactly one engine. This
-# IS the daemon launch path; nothing here execs gmloader directly.
+# wait for the core to come up, then start the engine via launch.sh and wait
+# for exactly one engine process.
+#
+# Until 2026-08-05 this was purely the daemon path: write load_core and let
+# Master_Daemon's _handler.sh spawn the engine. That name is gone (it was the
+# daemon's discovery predicate, and a daemon spawning alongside an entry point
+# put two engines on one fabric control block), so nothing watches
+# /tmp/CORENAME on our behalf any more and the launch has to be explicit.
+#
+# This mirrors Scripts/MalditaCastilla.sh rather than calling it, because the
+# harness picks the RBF itself (by mtime, see below) and the Scripts entry
+# picks its own. Detached with setsid + closed stdio so the SSH call returns
+# instead of blocking for the whole run — the same reason stage_scene
+# backgrounds joy_script.
 load_core_and_wait() {
   local timeout="${1:-30}"
   local rbf
@@ -376,7 +395,27 @@ load_core_and_wait() {
   echo "[load-core] $rbf"
   SSH "echo 'load_core $rbf' > /dev/MiSTer_cmd"
 
-  echo "[load-core] waiting up to ${timeout}s for the Master_Daemon handler to spawn the engine..."
+  # The core load app_restart()s MiSTer, so this waits out a process
+  # replacement, not just a bitstream write.
+  local core_waited=0
+  while [ "$core_waited" -lt "$timeout" ]; do
+    [ "$(SSH "cat /tmp/CORENAME 2>/dev/null" || true)" = "$CORENAME" ] && break
+    sleep 1
+    core_waited=$((core_waited + 1))
+  done
+  if [ "$core_waited" -ge "$timeout" ]; then
+    echo "[load-core] ABORT: core '$CORENAME' did not come up within ${timeout}s" >&2
+    return 1
+  fi
+  echo "[load-core] core up after ${core_waited}s; starting the engine via $LAUNCHER"
+  SSH "test -x '$LAUNCHER'" || {
+    echo "[load-core] ABORT: $LAUNCHER missing on $HOST — redeploy (./deploy.py)" >&2
+    return 1
+  }
+  SSH "( setsid '$LAUNCHER' </dev/null >/dev/null 2>&1 & )" \
+    || { echo "[load-core] ABORT: could not start $LAUNCHER on $HOST" >&2; return 1; }
+
+  echo "[load-core] waiting up to ${timeout}s for the engine to come up..."
   local waited=0
   while [ "$waited" -lt "$timeout" ]; do
     if devpid_assert_one SSH >/dev/null 2>&1; then
@@ -533,11 +572,11 @@ do_bench() {
     sleep 1
   done
 
-  # Pull the log BEFORE teardown: the Master_Daemon respawns the engine within
-  # seconds of the kill (while CORENAME still names Maldita) and the fresh
-  # handler rotates maldita.log -> maldita.prev.log, racing this scp. Two runs
-  # on 2026-07-29 lost their log to that race and had to be recovered from the
-  # .prev file by hand.
+  # Pull the log BEFORE teardown. Ordering kept deliberately after the
+  # 2026-08-05 daemon removal: a respawn used to rotate maldita.log ->
+  # maldita.prev.log within seconds of the kill and race this scp (two runs on
+  # 2026-07-29 lost their log that way). Nothing respawns now, but a device
+  # with a stale _handler.sh still does, and the safe order costs nothing.
   scp -o BatchMode=yes "$HOST:$REMOTE_LOG" "$local_log" >/dev/null 2>&1 || {
     echo "[bench] no remote log at $REMOTE_LOG" >&2; do_stop; exit 1; }
   # Belt-and-braces on top of launch_with_wedge_guard's pre-sampling

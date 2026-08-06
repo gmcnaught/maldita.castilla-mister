@@ -39,3 +39,12 @@ fpga/sim/vectors/stream_quiet_f2_*.hex
 fpga/sim/vectors/stream_arrival_*.hex
 # host-built stream-replay golden generator (Mach-O/ELF; rebuilt by gen_tri_golden.mk)
 fpga/sim/gen_tri_stream
+
+# Python bytecode cache. deploy.py imports scripts/lib/, so any `./deploy.py`
+# run (even --help) drops a __pycache__ here; it is regenerable and
+# interpreter-version-specific.
+__pycache__/
+*.pyc
+
+# Host-native test binaries for the main= wrapper overlay
+tools/mister-wrapper/test/build/

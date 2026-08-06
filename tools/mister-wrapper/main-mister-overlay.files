@@ -1,14 +1,5 @@
-maldita_main.cpp
-maldita_wrapper.cpp
-maldita_wrapper.h
+scheduler.cpp
+maldita_hook.cpp
+maldita_hook.h
 maldita_child.cpp
 maldita_child.h
-maldita_joy_shm.cpp
-maldita_joy_shm.h
-maldita_osd.cpp
-maldita_osd.h
-mister_joy_shm.h
-input.cpp
-input.h
-user_io.cpp
-user_io.h

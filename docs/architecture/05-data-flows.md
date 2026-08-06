@@ -208,7 +208,7 @@ sequenceDiagram
 
     rect rgb(238,238,238)
     Note over Main,SHM: channel B - joy_shm, silent opt-in override
-    Main->>SHM: maldita_joy_shm.cpp writes joy_mask[2]
+    Main->>SHM: maldita_joy_shm.cpp writes joy_mask[2] (DELETED 2026-08-04)
     UI->>SHM: JoyShm_ReadMask mmap PROT_READ
     end
 

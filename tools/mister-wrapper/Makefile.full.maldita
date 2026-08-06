@@ -1,8 +1,14 @@
-# Sonic Mania MiSTer HPS wrapper Makefile.
+# Maldita Castilla MiSTer HPS wrapper Makefile.
 #
-# Forked from 3sx-mister/tools/mister-wrapper/Makefile.full.3s-arm.
-# Produces binary name MiSTer_SonicMania (no space, no hyphen; matches MiSTer
-# HPS wrapper convention and works regardless of shell quoting).
+# Forked from 3sx-mister/tools/mister-wrapper/Makefile.full.3s-arm via
+# sonic-mania-mister. Produces MiSTer_Maldita (no space, no hyphen; matches the
+# MiSTer HPS wrapper convention and works regardless of shell quoting).
+#
+# NOTE: upstream main.cpp is BUILT, not filtered out. That is the whole point of
+# the 2026-08-04 overlay rework — see maldita_hook.cpp's header. The reverted
+# wrapper filtered main.cpp out and supplied maldita_main.cpp instead, which
+# hand-rolled the dead `#else` branch of main() and therefore never ran the
+# scheduler's per-iteration FPGA-readiness guard.
 # makefile to fail if any command in pipe is failed.
 SHELL = /bin/bash -o pipefail
 
@@ -42,7 +48,7 @@ C_SRC =   $(wildcard *.c) \
           $(wildcard ./lib/libchdr/*.c) \
           lib/libco/arm.c
 
-CPP_SRC = $(filter-out main.cpp,$(wildcard *.cpp)) \
+CPP_SRC = $(wildcard *.cpp) \
           $(wildcard ./lib/serial_server/library/*.cpp) \
           $(wildcard ./support/*/*.cpp)
 

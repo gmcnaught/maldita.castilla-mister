@@ -168,7 +168,8 @@ plainly: joy-shm is "explicit opt-in; wins when a producer is running",
 joy-ddr is "the default path" (`input.cpp:322-325`). So: **joy-ddr
 (`joy_ddr_reader.cpp`) is what ships/runs by default**; joy-shm
 (`joy_shm_reader.cpp`) silently takes over only when a Main_MiSTer-side
-shm producer (`maldita_joy_shm.cpp`, per `02-containers.md`) happens to be
+shm producer (`maldita_joy_shm.cpp`, per `02-containers.md`; deleted
+2026-08-04, so nothing in-tree publishes it any more) happens to be
 running and publishes the shm file before the first frame. Both write into
 the same native `yoyo_gamepads[4]` array (`gamepad.cpp:10` — an
 engine-owned array, not a runner symbol) via the shared
