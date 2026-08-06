@@ -48,3 +48,13 @@ __pycache__/
 
 # Host-native test binaries for the main= wrapper overlay
 tools/mister-wrapper/test/build/
+
+# Out-of-tree kernel module build output (tools/mister-mem-wc/). A local build
+# is kernel-version-specific; the committed objects live in prebuilt/, named by
+# vermagic, and are NOT matched by these patterns.
+tools/mister-mem-wc/*.ko
+tools/mister-mem-wc/*.mod
+tools/mister-mem-wc/*.mod.c
+tools/mister-mem-wc/.*.cmd
+tools/mister-mem-wc/Module.symvers
+tools/mister-mem-wc/modules.order

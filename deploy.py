@@ -430,6 +430,51 @@ def scp_verified(host, src, dst, retries=3):
     raise SystemExit(f"FATAL: {dst} failed sha1 verification after {retries} tries")
 
 
+def install_mem_wc(host):
+    """Ship the write-combining /dev/mem driver + its loader, if one matches.
+
+    The engine maps the fabric window's rings and SRC heap through /dev/mem_wc
+    when it can (raster_backend_mfgpu.cpp, mf_map_wc_overlay) and falls back to
+    the strongly-ordered /dev/mem when it cannot. Nothing below is fatal:
+    shipping no module leaves today's behaviour exactly intact.
+
+    The .ko is KERNEL-KEYED, and that is the whole reason this is a function
+    rather than one more scp_verified line. An out-of-tree module carries the
+    vermagic of the tree it was built against, so the wrong one does not
+    misbehave — it simply refuses to insmod, on the device, inside a launcher
+    that deliberately swallows errors, where the only evidence is a dmesg line
+    nobody reads. Matching `uname -r` here turns that into a message at deploy
+    time, next to the decision the user can actually act on.
+    """
+    kdir = REPO / "tools" / "mister-mem-wc"
+    loader_src = REPO / "games" / CORENAME / "mem_wc_load.sh"
+    if not loader_src.exists():
+        return
+
+    krel = ssh(host, "uname -r").stdout.strip()
+    ko = kdir / "prebuilt" / f"mem_wc-{krel}.ko"
+
+    print("\n-- Write-combining DDR mapping (mem_wc) --")
+    if ko.exists():
+        scp_verified(host, ko, f"{HANDLER_DIR}/mem_wc.ko")
+        ssh(host, f"chmod 644 '{HANDLER_DIR}/mem_wc.ko'", check=True)
+        print(f"   module for kernel {krel} installed")
+    else:
+        # Leave any previously-shipped .ko alone rather than removing it: it may
+        # be the right one for a kernel this checkout has no prebuilt for.
+        have = sorted(p.name for p in (kdir / "prebuilt").glob("*.ko"))
+        print(f"   ! no prebuilt module for kernel {krel} "
+              f"(have: {', '.join(have) or 'none'})")
+        print(f"   ! DDR stays strongly-ordered (~80 MB/s vs ~814). Build one: "
+              f"{kdir.relative_to(REPO)}/README.md")
+
+    # The loader ships either way — it is a no-op without a .ko next to it, and
+    # shipping it unconditionally keeps the device from ending up with a stale
+    # copy that hardcodes a different window.
+    scp_verified(host, loader_src, f"{HANDLER_DIR}/mem_wc_load.sh")
+    ssh(host, f"chmod 644 '{HANDLER_DIR}/mem_wc_load.sh'", check=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=HOST)
@@ -639,6 +684,9 @@ def main():
         if takeover_src.exists():
             scp_verified(host, takeover_src, f"{HANDLER_DIR}/mister_takeover.sh")
             ssh(host, f"chmod 644 '{HANDLER_DIR}/mister_takeover.sh'", check=True)
+
+        install_mem_wc(host)
+
         # Daemon-free entry point. Appears in MiSTer's OSD under Scripts and
         # does the core load itself, so Master_Daemon is not in the loop at
         # all. Shipped unconditionally — installing it changes nothing until

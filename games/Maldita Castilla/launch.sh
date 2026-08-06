@@ -130,6 +130,12 @@ fi
 echo "maldita handler: CORENAME='$(cat /tmp/CORENAME 2>/dev/null)' \
 BLITTER=$GMLOADER_BLITTER RASTER=$GMLOADER_RASTER${BENCH_NOTE}${TAKEOVER_NOTE}" > "$LOGDIR/maldita.log"
 
+# Write-combining for the fabric window (rings + SRC texture heap). Sourced
+# AFTER the header echo above, which truncates the log with `>`. Entirely
+# optional: the engine falls back to the strongly-ordered /dev/mem mapping on
+# its own, so this can only cost frame rate. See mem_wc_load.sh.
+[ -f "$HANDLER_DIR/mem_wc_load.sh" ] && . "$HANDLER_DIR/mem_wc_load.sh"
+
 # The takeover path cannot `exec`: this shell has to outlive the engine to run
 # the restore. Everything else about the launch is identical.
 # The redirect on the probe (rather than an unconditional `exec >>`) keeps the
