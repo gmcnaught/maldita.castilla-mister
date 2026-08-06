@@ -44,12 +44,15 @@ which sets up its environment (BLITTER/RASTER, LD_LIBRARY_PATH, the takeover)
 and execs it. Stock MiSTer main stays running and keeps its FPGA-readiness
 contract (scheduler_co_poll's `while (!is_fpga_ready(1)) fpga_wait_to_reset();`).
 
-TWO ENTRY POINTS, both installed, NEITHER using a daemon:
-  1. Scripts menu (Scripts/MalditaCastilla.sh) — loads the core via
-     /dev/MiSTer_cmd itself, then execs launch.sh. This is the DEFAULT route.
-  2. Cores browser + MiSTer.ini `main=` (--main-wrapper) — MiSTer execs our
-     MiSTer_Maldita build, which forks launch.sh after the readiness check. The
-     only way to get a Cores-browser entry that also starts the engine.
+TWO ENTRY POINTS, both installed AND BOTH ARMED BY DEFAULT, neither using a
+daemon:
+  1. Cores browser + MiSTer.ini `main=` — MiSTer execs our MiSTer_Maldita
+     build, which forks launch.sh after the readiness check. The only way to
+     get a Cores-browser entry that also starts the engine, so it is the route
+     that has to work without anyone being told about it. --no-main-wrapper
+     opts out.
+  2. Scripts menu (Scripts/MalditaCastilla.sh) — loads the core via
+     /dev/MiSTer_cmd itself, then execs launch.sh.
 
 WHAT CHANGED, AND THE COST. Until 2026-08-05 the default was a third route:
 MiSTer Frontier's Master_Daemon watching /tmp/CORENAME and running
@@ -61,14 +64,17 @@ processes land on one fabric control block (measured .62 2026-08-05: Scripts
 and we do not own it, so the deconflict is on our side: install as launch.sh,
 and DELETE any _handler.sh found on the device.
 
-The cost is real and intended: WITHOUT --main-wrapper, selecting the core from
-the Cores browser now loads the bitstream and starts NO engine. Use the Scripts
-entry, or arm --main-wrapper. Nothing tears the engine down on a core change
-any more either — that was the daemon's kill_child.
+Removing the daemon removed a launch route, and on 2026-08-06 shipping that
+with `main=` still opt-in produced a device that looked broken: .81 had been
+relying on the daemon, the deploy deleted its _handler.sh, and selecting the
+core from the Cores browser then loaded the bitstream and started NO engine —
+gmloader procs 0, no maldita.log written at all, C_SUBMIT stuck at 0, and the
+reader's stale-frame watchdog blanking the screen. A black screen after a
+successful deploy cannot be told apart from a broken build, so `main=` is now
+ARMED BY DEFAULT and --no-main-wrapper is the opt-out.
 
---main-wrapper / --no-main-wrapper are STICKY: neither flag leaves the device's
-main= line exactly as it is, so a deploy for an unrelated reason cannot turn a
-user's chosen entry point off under them.
+Still true, and still deliberate: nothing tears the engine down on a core
+change any more — that was the daemon's kill_child.
 
 `main=` was disabled on 2026-07-25 because the wrapper then REPLACED MiSTer's
 main() with a hand-rolled loop (the dead `#else` branch — USE_SCHEDULER is
@@ -80,9 +86,9 @@ The 2026-08-04 overlay rework fixed the cause rather than the symptom — upstre
 main() and scheduler are now built verbatim and the entire local change is one
 call inserted AFTER scheduler_wait_fpga_ready() (vendor/Main_MiSTer/maldita_hook.cpp).
 Device-measured 2026-08-05 on .62 (daemon stopped, one engine): 0/5 frame-1
-wedges, ~59fps, rendering correct — the gate the 2026-07-25 revert set. It stays
-OPT-IN -- it is not armed unless you ask for it -- but once armed it STAYS
-armed; use --no-main-wrapper to turn it off.
+wedges, ~59fps, rendering correct — the gate the 2026-07-25 revert set. That
+gate being met is what makes arming it by default defensible; the black-screen
+deploy above is what makes it necessary.
 
 HPS TAKEOVER (2026-08-04, opt-in, default OFF): games/<CORENAME>/mister_takeover.sh
 ships alongside launch.sh and is INERT unless a takeover.env sits next to it.
@@ -516,18 +522,19 @@ def main():
                          "game runs, restored on exit")
     ap.add_argument("--no-takeover", action="store_true",
                     help="disarm the HPS takeover (removes the device's takeover.env)")
-    # Sticky, like --takeover: neither flag leaves the device's main= line as it
-    # is. It used to disarm on every deploy that did not ask for it, on the
-    # grounds that the wrapper was not device-proven -- it now is (0/5 frame-1
-    # wedges on .62, twice), and silent disarming meant any later deploy for an
-    # unrelated reason turned the user's chosen entry point off under them.
+    # ON BY DEFAULT. With Master_Daemon out of the launch path, this is the only
+    # thing that makes a Cores-browser core load start the engine, and a deploy
+    # that leaves the core selectable but dead is a broken deploy -- see the
+    # arming block for the .81 measurement that changed this. --main-wrapper is
+    # kept as an accepted no-op so existing scripts and muscle memory still work.
     ap.add_argument("--main-wrapper", action="store_true",
-                    help="write the MiSTer.ini [Maldita Castilla] main= line, so selecting "
-                         "the core from the Cores browser starts the engine with no daemon. "
-                         "Sticky: a later deploy without this flag leaves it armed.")
+                    help="(default, kept for compatibility) write the MiSTer.ini "
+                         "[Maldita Castilla] main= line, so selecting the core from the "
+                         "Cores browser starts the engine with no daemon")
     ap.add_argument("--no-main-wrapper", action="store_true",
-                    help="comment out the MiSTer.ini main= line (back to the Scripts entry "
-                         "as the only launch route)")
+                    help="OPT OUT: comment out the MiSTer.ini main= line, leaving the "
+                         "Scripts entry as the only launch route. A Cores-browser load "
+                         "will then start no engine and the screen stays black.")
     args = ap.parse_args()
     if args.takeover and args.no_takeover:
         ap.error("--takeover and --no-takeover are mutually exclusive")
@@ -636,7 +643,7 @@ def main():
         scp_verified(host, engine, f"{GAMEDIR}/gmloader")
         scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
 
-    print("\n-- Uploading HPS wrapper binary (sha1-verified; used only with --main-wrapper) --")
+    print("\n-- Uploading HPS wrapper binary (sha1-verified; this is MiSTer.ini's MAIN) --")
     scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
 
     # --- launcher install, and the Master_Daemon deconflict --------------------
@@ -752,15 +759,35 @@ def main():
                       "&& echo PRESENT || echo ABSENT")
         active = (r.stdout or "").strip() == "PRESENT"
 
-        if args.main_wrapper:
-            # Safe to re-enable only because of the 2026-08-04 overlay rework:
-            # upstream main() and the scheduler now run verbatim and the whole
-            # local change is one call inserted AFTER scheduler_wait_fpga_ready().
-            # The readiness contract is honoured by the code that owns it. The
-            # 2026-07-25 measurement that disabled this (wrapper 3/5 frame-1
-            # wedges vs stock main 0/5) was against the old overlay, which
-            # replaced main() with a hand-rolled loop that never ran that guard.
-            # Still unproven on hardware — plan Task 4b.2 is the gate.
+        # ARMED BY DEFAULT since 2026-08-06, and the reason is a deploy that
+        # bricked the entry point. Removing _handler.sh took Master_Daemon out
+        # of the launch path, which was the point — but on a device that had
+        # been relying on the daemon it left NOTHING able to start the engine:
+        # the Scripts entry has to be selected by hand, and `main=` shipped
+        # disarmed. Selecting the core from the Cores browser loaded the
+        # bitstream, no engine ran, C_SUBMIT stayed 0, and the reader's
+        # stale-frame watchdog blanked the screen. Measured on .81 the first
+        # time this deploy reached it: gmloader procs 0, no maldita.log at all.
+        #
+        # A black screen after a successful deploy is indistinguishable from a
+        # broken build to anyone who was not in the room when the launch path
+        # changed, so the default has to leave the core launchable the way it
+        # has always been launched — from the Cores browser. --no-main-wrapper
+        # is the opt-out for a device that wants the Scripts entry only.
+        #
+        # Safe to arm only because of the 2026-08-04 overlay rework: upstream
+        # main() and the scheduler now run verbatim and the whole local change
+        # is one call inserted AFTER scheduler_wait_fpga_ready(), so the
+        # readiness contract is honoured by the code that owns it. The
+        # 2026-07-25 measurement that disabled this (wrapper 3/5 frame-1 wedges
+        # vs stock main 0/5) was against the old overlay, which replaced main()
+        # with a hand-rolled loop that never ran that guard; the reworked one
+        # measured 0/5 on .62.
+        #
+        # The wrapper binary is shipped unconditionally a few lines above and
+        # deploy.py refuses to run without it, so arming this can never point
+        # MiSTer at a missing MAIN.
+        if not args.no_main_wrapper:
             if active:
                 print("   main= wrapper handoff already active")
             else:

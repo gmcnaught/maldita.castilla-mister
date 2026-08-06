@@ -31,28 +31,47 @@ _mwc_ko="$HANDLER_DIR/mem_wc.ko"
 _mwc_base=0x3B000000       # MF_DEV_PHYS_BASE  (raster_backend_mfgpu.cpp)
 _mwc_size=0x01000000       # MF_DEV_MAP_SIZE, 16 MiB
 
-if [ -f "$_mwc_ko" ]; then
-    # A module left loaded by ANOTHER core is the common case, not an edge case:
-    # mamester loads the same driver restricted to 0x3A000000+4MiB, and a
-    # previous session's instance survives its core being unloaded. That
-    # allowlist excludes our window, so /dev/mem_wc existing does NOT mean it
-    # will accept our mmap -- it would return -EPERM and the engine would fall
-    # back for no reason. Reload it with our range if nothing else holds it;
-    # rmmod fails safely (refcount) if something does.
-    if [ -e /dev/mem_wc ]; then
-        rmmod mem_wc 2>/dev/null
-    fi
-    if [ ! -e /dev/mem_wc ]; then
-        insmod "$_mwc_ko" phys_base=$_mwc_base phys_size=$_mwc_size 2>/dev/null
-    fi
+# NEVER rmmod A MODULE WE DID NOT LOAD. This script used to reload an
+# already-present mem_wc with our window, on the reasoning that mamester loads
+# the same driver restricted to 0x3A000000+4MiB, that instance survives its core
+# being unloaded, and its allowlist would make our mmap return -EPERM.
+#
+# That reload HUNG .81 on 2026-08-06, hard enough to need a power cycle. The
+# evidence: maldita.log contained only launch.sh's header line and none of the
+# lines below, and the last kernel message was "mem_wc: unloaded" -- so the
+# rmmod succeeded and the box did not survive what followed.
+#
+# The reasoning was wrong in one specific place. `lsmod` showed refcount 0, and
+# I read that as "nobody is using it". It only means "nobody has the device node
+# OPEN". file_operations.owner holds a module reference for the lifetime of the
+# FILE DESCRIPTOR, not of the mapping: a process that mmaps /dev/mem_wc and then
+# closes the fd leaves a live remap_pfn_range VMA behind with no reference
+# keeping the module loaded. Unloading under that is a dangling VMA.
+#
+# .62 never showed it because it has never run another core's instance to
+# unload -- the "it worked on the test rig" that made this look safe.
+#
+# So: load it only when nothing else has. If a foreign instance is present, our
+# mmap gets -EPERM and mf_map_wc_overlay() falls back to the strongly-ordered
+# mapping on its own. That costs upload bandwidth on a machine that recently ran
+# mamester. It cannot hang anyone, and that is the whole trade.
+if [ -f "$_mwc_ko" ] && [ ! -e /dev/mem_wc ]; then
+    insmod "$_mwc_ko" phys_base=$_mwc_base phys_size=$_mwc_size 2>/dev/null
+    _mwc_ours=1
 fi
 
-if [ -e /dev/mem_wc ]; then
-    echo "mem_wc: loaded ($(dmesg | grep -c 'mem_wc: loaded') load events)" \
-        >> "$LOGDIR/maldita.log" 2>/dev/null
+# Three outcomes, deliberately distinguished. "present, not ours" is the one
+# that matters: the engine will log strongly-ordered and the reason is here,
+# not in the engine.
+if [ ! -e /dev/mem_wc ]; then
+    _mwc_note="unavailable -- DDR stays strongly-ordered"
+elif [ "$_mwc_ours" = 1 ]; then
+    _mwc_note="loaded for [$_mwc_base, +$_mwc_size)"
 else
-    echo "mem_wc: not available -- DDR stays strongly-ordered" \
-        >> "$LOGDIR/maldita.log" 2>/dev/null
+    _mwc_note="already loaded by something else -- leaving it alone; if its \
+allowlist excludes our window the engine falls back to strongly-ordered"
 fi
+echo "mem_wc: $_mwc_note" >> "$LOGDIR/maldita.log" 2>/dev/null
+unset _mwc_ours _mwc_note
 
 unset _mwc_ko _mwc_base _mwc_size

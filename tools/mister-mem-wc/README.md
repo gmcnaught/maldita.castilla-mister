@@ -180,12 +180,28 @@ restricted to this core's own window:
 insmod mem_wc.ko phys_base=0x3B000000 phys_size=0x01000000
 ```
 
-That loader **reloads an already-present module** rather than reusing it, and
-that is not paranoia: mamester loads this same driver restricted to
-`0x3A000000+4MiB`, and a previous session's instance survives its core being
-unloaded. `/dev/mem_wc` existing therefore does not mean it will accept our
-window — with the wrong allowlist the `mmap` returns `EPERM` and the engine
-falls back for no reason. `rmmod` fails safely if anything still holds it.
+That loader **never unloads a module it did not load**, and this is the one
+rule in this directory that was learned the hard way. It originally reloaded an
+already-present instance with our window, reasoning that mamester loads this
+same driver restricted to `0x3A000000+4MiB`, that instance outlives its core,
+and its allowlist would make our `mmap` return `EPERM`.
+
+That reload **hung `.81` on 2026-08-06**, hard enough to need a power cycle.
+`maldita.log` held only the launcher's header line, and the last kernel message
+was `mem_wc: unloaded`.
+
+The mistake was reading `lsmod`'s refcount 0 as "nobody is using it". It means
+"nobody has the device node **open**". `file_operations.owner` holds a module
+reference for the lifetime of the *file descriptor*, not of the mapping — a
+process that `mmap`s `/dev/mem_wc` and closes the fd leaves a live
+`remap_pfn_range` VMA with nothing keeping the module loaded. Unloading under
+that leaves a dangling VMA. `.62` never reproduced it because it has never had
+another core's instance to unload.
+
+So the loader `insmod`s only when `/dev/mem_wc` is absent. A foreign instance
+means our `mmap` gets `EPERM` and `mf_map_wc_overlay()` falls back to
+strongly-ordered by itself: upload bandwidth lost on a machine that recently ran
+mamester, and nothing worse.
 
 Manually:
 
