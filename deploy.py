@@ -585,11 +585,15 @@ def main():
         # failure. A daemon mid-flight needs no further handling — its dispatch
         # and respawn arms both re-test the path, so the deletion takes effect
         # on its next poll.
+        # Demand a positive GONE rather than "not PRESENT": a dropped ssh returns
+        # empty stdout, which would satisfy a not-PRESENT test while having
+        # verified nothing at all. Fail closed.
         r = ssh(host, f"rm -f '{HANDLER_DIR}/_handler.sh'; "
                       f"test -e '{HANDLER_DIR}/_handler.sh' && echo PRESENT || echo GONE")
-        if (r.stdout or "").strip().endswith("PRESENT"):
-            sys.exit(f"FATAL: could not remove {HANDLER_DIR}/_handler.sh — "
-                     "Master_Daemon would spawn a second engine on core load.")
+        if (r.stdout or "").strip().splitlines()[-1:] != ["GONE"]:
+            sys.exit(f"FATAL: could not confirm {HANDLER_DIR}/_handler.sh is gone "
+                     f"(got {(r.stdout or '')!r}) — Master_Daemon would spawn a "
+                     "second engine on core load.")
         print("   Master_Daemon deconflict: no _handler.sh under "
               f"'{HANDLER_DIR}' (daemon left untouched)")
 
