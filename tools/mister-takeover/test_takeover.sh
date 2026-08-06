@@ -225,11 +225,35 @@ check "engine exit restarts MiSTer" "$r" "yes"
 sleep 1
 grep -q "load_core menu.rbf" "$TMP/cmd.out" && r=yes || r=no
 check "  and asks the restarted MiSTer for menu.rbf" "$r" "yes"
+
 [ -f "$TMP/stamp" ] && r=yes || r=no
 check "  and stamps the re-entry guard" "$r" "yes"
 n="$(grep -c "^restarted:" "$TMP/restart.log")"
 tk_restore >/dev/null 2>&1                   # second call must do nothing
 check "restore is idempotent" "$(grep -c '^restarted:' "$TMP/restart.log")" "$n"
+
+# The restore must RETRY the menu request, not settle-and-hope. `pidof` finds
+# the restarted process seconds before it services the command FIFO — under the
+# `main=` wrapper it has scheduler_wait_fpga_ready() to clear first — and the
+# single-attempt version lost that race on .62 2026-08-05, leaving the user on
+# our core. Here the FIFO starts with NO reader and only gets one part way
+# through the budget — 14 s in, far outside any one bounded attempt's own
+# window, so only genuine re-attempts can land the request.
+reset_case; spawn_fake_mister
+kill "$FIFO_READER_PID" 2>/dev/null; FIFO_READER_PID=""
+: > "$TMP/cmd.out"
+MALDITA_TAKEOVER_MENU_WAIT_S=30
+TAKEOVER_ARMED=1
+TAKEOVER_MISTER_EXE="$TMP/MiSTer"
+( sleep 14; cat "$TMP/cmd" > "$TMP/cmd.out" ) &
+LATE_READER_PID=$!
+tk_restore_menu > "$TMP/late.log" 2>&1 && r=yes || r=no
+check "restore keeps retrying until the FIFO has a reader" "$r" "yes"
+sleep 1
+grep -q "load_core menu.rbf" "$TMP/cmd.out" && r=yes || r=no
+check "  and the late reader receives menu.rbf" "$r" "yes"
+kill "$LATE_READER_PID" 2>/dev/null
+kill "$MISTER_PID_UNDER_TEST" 2>/dev/null
 
 echo "== dry run =="
 
@@ -247,6 +271,17 @@ grep -q "^restarted:" "$TMP/restart.log" && r=yes || r=no
 check "dry run does not restart MiSTer either" "$r" "no"
 grep -q "load_core" "$TMP/cmd.out" 2>/dev/null && r=yes || r=no
 check "dry run sends no command to the FIFO" "$r" "no"
+# A dry run must NOT arm the re-entry guard. It stamped before the DRYRUN
+# early-return until 2026-08-05, so the documented "--takeover-dryrun first,
+# then --takeover" sequence silently refused the real takeover for 60 s
+# (device-hit on .62). Both the shell guard and maldita_hook.cpp's
+# restore_in_progress() read this file.
+[ -f "$TAKEOVER_STAMP" ] && r=yes || r=no
+check "dry run does not stamp the re-entry guard" "$r" "no"
+# ...and therefore a real takeover straight after a dry run still arms.
+MALDITA_TAKEOVER_DRYRUN=0
+tk_should_take_over >/dev/null 2>&1 && r=armed || r=refused
+check "a real takeover is not blocked by a preceding dry run" "$r" "armed"
 kill "$MISTER_PID_UNDER_TEST" 2>/dev/null
 
 echo

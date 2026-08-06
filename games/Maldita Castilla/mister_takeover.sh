@@ -59,8 +59,11 @@
 #   MALDITA_TAKEOVER_REENTRY_S    suppress takeover for this long after a
 #                                 restore, so a MiSTer that comes back up and
 #                                 reloads this core cannot loop (60)
-#   MALDITA_TAKEOVER_MENU_WAIT_S  how long the restore waits for the restarted
-#                                 MiSTer before giving up on the menu (20)
+#   MALDITA_TAKEOVER_MENU_WAIT_S  total budget for the restore to get the
+#                                 menu.rbf request accepted, retrying (45).
+#                                 Was 20 with a single attempt; the `main=`
+#                                 wrapper needs longer before it services the
+#                                 command FIFO.
 #   MISTER_BIN                    the MiSTer main binary (/media/fat/MiSTer)
 #   MISTER_CMD_FIFO               MiSTer's command FIFO (/dev/MiSTer_cmd)
 #   MISTER_PROC_NAMES             process names that count as "MiSTer"
@@ -71,7 +74,7 @@
 : "${MALDITA_TAKEOVER_GOVERNOR:=0}"
 : "${MALDITA_TAKEOVER_LIVENESS_S:=30}"
 : "${MALDITA_TAKEOVER_REENTRY_S:=60}"
-: "${MALDITA_TAKEOVER_MENU_WAIT_S:=20}"
+: "${MALDITA_TAKEOVER_MENU_WAIT_S:=45}"
 : "${MISTER_BIN:=/media/fat/MiSTer}"
 : "${MISTER_CMD_FIFO:=/dev/MiSTer_cmd}"
 
@@ -321,12 +324,22 @@ tk_restore() {
         return 0
     fi
 
-    date +%s > "$TAKEOVER_STAMP" 2>/dev/null   # feeds the re-entry guard
-
+    # A dry run must not stamp. It never killed MiSTer, so there is no restore
+    # to guard against re-entering — and the stamp is read by TWO consumers that
+    # would both misfire: tk_should_take_over refuses to arm inside the window,
+    # and maldita_hook.cpp's restore_in_progress() suppresses the engine spawn
+    # outright. The documented sequence is `deploy.py --takeover --takeover-dryrun`
+    # first and `--takeover` once it looks right, which put the real takeover
+    # inside the 60 s window and silently refused it (device-hit .62 2026-08-05:
+    # "SKIP — a restore happened 11s ago"). Checked BEFORE the stamp write, not
+    # after.
     if [ "$MALDITA_TAKEOVER_DRYRUN" = "1" ]; then
-        tk_log "restore: DRYRUN — MiSTer was never killed, not restarting it"
+        tk_log "restore: DRYRUN — MiSTer was never killed, not restarting it" \
+               "(and not stamping the re-entry guard)"
         return 0
     fi
+
+    date +%s > "$TAKEOVER_STAMP" 2>/dev/null   # feeds the re-entry guard
 
     tk_log "restore: restarting MiSTer ($TAKEOVER_MISTER_EXE)"
     local dir
@@ -354,32 +367,49 @@ tk_restore() {
 # restarted MiSTer to load the menu the way everything else does, and it
 # app_restart()s into it (fpga_io.cpp:506).
 tk_restore_menu() {
-    local waited=0
+    local waited=0 announced=0
+
+    # MiSTer unlinks and re-mkfifos the node, then opens it O_RDWR, during input
+    # init (input.cpp:5140-5143). Between `pidof` succeeding and that open there
+    # is a window with NO reader on the FIFO — and open(O_WRONLY) on a readerless
+    # FIFO blocks FOREVER. This runs inside an exit trap, so a block here is a
+    # hung box; every attempt is bounded by `timeout`.
+    #
+    # RETRY, do not settle-and-hope. This was one fixed 2 s settle followed by a
+    # single attempt, which is long enough for stock MiSTer and NOT long enough
+    # for the `main=` wrapper: that process has to clear
+    # scheduler_wait_fpga_ready() before it reaches input init, so `pidof` finds
+    # it seconds before it can service the FIFO. Device-hit on .62 2026-08-05 —
+    # "menu.rbf request timed out (core left loaded)", leaving the user on our
+    # core with no engine, while the identical write by hand a minute later
+    # succeeded immediately. Keep attempting until it lands or the budget runs
+    # out, and only claim success when a write actually succeeded.
     while [ "$waited" -lt "$MALDITA_TAKEOVER_MENU_WAIT_S" ]; do
         sleep 1
         waited=$((waited + 1))
         tk_mister_pids >/dev/null 2>&1 || continue
         [ -p "$MISTER_CMD_FIFO" ] || continue
 
-        # MiSTer unlinks and re-mkfifos the node, then opens it O_RDWR, during
-        # input init (input.cpp:5140-5143). Between `pidof` succeeding and that
-        # open there is a window in which the FIFO has no reader — and
-        # open(O_WRONLY) on a readerless FIFO blocks FOREVER. This runs inside
-        # an exit trap, so a block here is a hung box. Settle, then bound the
-        # write if `timeout` exists.
-        sleep 2
-        tk_log "restore: MiSTer back after ${waited}s; requesting menu.rbf"
-        if command -v timeout >/dev/null 2>&1; then
-            timeout 5 sh -c "echo 'load_core menu.rbf' > '$MISTER_CMD_FIFO'" \
-                || tk_log "restore: menu.rbf request timed out (core left loaded)"
-        else
-            echo "load_core menu.rbf" > "$MISTER_CMD_FIFO"
+        if [ "$announced" = "0" ]; then
+            tk_log "restore: MiSTer back after ${waited}s; requesting menu.rbf"
+            announced=1
         fi
-        return 0
+
+        if ! command -v timeout >/dev/null 2>&1; then
+            # No bounded write available. One unbounded attempt is all this can
+            # safely be — a retry loop of blocking opens cannot be interrupted.
+            echo "load_core menu.rbf" > "$MISTER_CMD_FIFO"
+            return 0
+        fi
+        if timeout 3 sh -c "echo 'load_core menu.rbf' > '$MISTER_CMD_FIFO'"; then
+            tk_log "restore: menu.rbf requested after ${waited}s"
+            return 0
+        fi
+        # No reader yet. Loop and try again rather than giving up on the menu.
     done
 
-    tk_log "restore: MiSTer did not come back within ${MALDITA_TAKEOVER_MENU_WAIT_S}s" \
-           "— core left loaded"
+    tk_log "restore: could not hand MiSTer the menu.rbf request within" \
+           "${MALDITA_TAKEOVER_MENU_WAIT_S}s — core left loaded, OSD still usable"
     return 1
 }
 

@@ -99,8 +99,19 @@ else
     # dead the node still exists with no reader and open(O_WRONLY) blocks
     # FOREVER, which would hang this script with no way out but a power cycle.
     # Hence the liveness check rather than a bare echo.
+    # Both process names, for the same reason mister_takeover.sh carries
+    # MISTER_PROC_NAMES: under the `main=` handoff the resident process is
+    # MiSTer_Maldita, not MiSTer, and a bare `pidof MiSTer` would find nothing
+    # and abort a launch that would have worked.
     [ -p /dev/MiSTer_cmd ] || die "/dev/MiSTer_cmd missing — is MiSTer running?"
-    pidof MiSTer >/dev/null 2>&1 || die "no MiSTer process to service /dev/MiSTer_cmd"
+    mister_alive() {
+        local n
+        for n in MiSTer MiSTer_Maldita; do
+            pidof "$n" >/dev/null 2>&1 && return 0
+        done
+        return 1
+    }
+    mister_alive || die "no MiSTer process to service /dev/MiSTer_cmd"
 
     echo "launcher: load_core $RBF"
     echo "load_core $RBF" > /dev/MiSTer_cmd
