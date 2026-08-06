@@ -9,7 +9,8 @@ rasterisation.
 | path | what it is |
 |---|---|
 | `fpga/` | the MiSTer core — Quartus project, RTL, and the blitter fabric |
-| `games/Maldita Castilla/` | the core's `_handler.sh` launcher |
+| `games/Maldita Castilla/` | the core's `launch.sh` engine launcher |
+| `Scripts/MalditaCastilla.sh` | the Scripts-menu entry that starts the game |
 | `external/gmloader-next` | submodule: the gmloader engine and its MiSTer port |
 | `deploy.py` | deploy to a device, with provenance gates |
 | `scripts/` | bench, diagnostic and release tooling |
@@ -36,7 +37,8 @@ tagged `v*` release publishes:
 1. Download the `.zip` and extract it over the root of your MiSTer SD card
    (`/media/fat/`). It adds:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
-   - `games/Maldita Castilla/_handler.sh` — the auto-launch dispatcher
+   - `Scripts/MalditaCastilla.sh` — the Scripts-menu launcher
+   - `games/Maldita Castilla/launch.sh` — the engine launcher it runs
    - `games/gmloader/` — the engine and its GL runtime
 2. Add the game data — it is **not** included here, but Maldita Castilla is
    freeware (Locomalito / Gryzor87) and the PortMaster port is public. Source:
@@ -49,12 +51,15 @@ tagged `v*` release publishes:
      `games/gmloader/saves/` (which also holds your save data)
 3. Verify the copy against `sha256sums.txt` — FAT filesystems can silently
    truncate files on an interrupted copy.
-4. Load **MalditaCastilla** from the MiSTer OSD (`_Other` menu).
+4. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**.
 
-Auto-launch on core load requires Frontier's **Master_Daemon** on the device:
-it watches the loaded core's name and runs `games/Maldita Castilla/_handler.sh`.
-Without it the core loads but the game does not start. The bundle's own
-`README.md` repeats these steps and covers manual launch for troubleshooting.
+Launch from the **Scripts** menu, not the Cores menu: selecting the core alone
+loads the bitstream and starts no engine. No daemon is involved, and a leftover
+`games/Maldita Castilla/_handler.sh` from an older release must be deleted —
+Frontier's **Master_Daemon** discovers cores by exactly that filename, and a
+daemon firing alongside the Scripts entry on the same core load puts two engines
+on one FPGA control block. The bundle's own `README.md` repeats these steps and
+covers manual launch for troubleshooting.
 
 To update an existing install, copy just the release's `.rbf` into `_Other/`
 (replacing the old one) if the engine has not changed; otherwise re-extract the

@@ -42,7 +42,8 @@ readable read-only at its existing URLs.
 
 ## Out of scope here
 - Build & deploy: `Makefile`, `deploy.py` (tree-hash-gated RBF fetch).
-- Device process model: Master_Daemon/handler exec chain, single-engine invariant.
+- Device process model: launcher exec chain (`Scripts/MalditaCastilla.sh` or the
+  `main=` hook -> `games/Maldita Castilla/launch.sh`), single-engine invariant.
 - Bench harness: `scripts/mister_run.sh`, wedge gates, sim lockstep.
 
 ## Conventions

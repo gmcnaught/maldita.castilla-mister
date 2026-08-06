@@ -50,7 +50,10 @@ namespace {
  * the handler lives under. */
 constexpr const char *kCoreName = "Maldita Castilla";
 
-constexpr const char *kHandler = "/media/fat/games/Maldita Castilla/_handler.sh";
+/* NOT _handler.sh: that name is Master_Daemon's discovery predicate, and a
+ * daemon that also spawns it races this fork onto one fabric control block.
+ * See games/Maldita Castilla/launch.sh's header. */
+constexpr const char *kHandler = "/media/fat/games/Maldita Castilla/launch.sh";
 constexpr const char *kLogDir  = "/media/fat/logs/MalditaCastilla";
 constexpr const char *kLogPath = "/media/fat/logs/MalditaCastilla/wrapper.log";
 

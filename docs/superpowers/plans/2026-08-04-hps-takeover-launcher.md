@@ -90,11 +90,12 @@ Implemented in this commit. Inert unless explicitly enabled.
 
 - [x] `games/Maldita Castilla/mister_takeover.sh` — parent detection, kill,
       liveness gate, cpufreq, restore, re-entry guard.
-- [x] `games/Maldita Castilla/_handler.sh` — branch to the takeover runner when
-      enabled; the `exec ./gmloader` path is unchanged when it is not.
+- [x] `games/Maldita Castilla/launch.sh` (renamed from `_handler.sh`
+      2026-08-05, see Phase 1b) — branch to the takeover runner when enabled;
+      the `exec ./gmloader` path is unchanged when it is not.
 - [x] `Scripts/MalditaCastilla.sh` — the daemon-free entry point (design §2a):
-      `load_core` down `/dev/MiSTer_cmd`, wait for `/tmp/CORENAME`, `exec` the
-      existing handler.
+      `load_core` down `/dev/MiSTer_cmd`, wait for `/tmp/CORENAME`, `exec`
+      `launch.sh`.
 - [x] `deploy.py` — ship `mister_takeover.sh` and the Scripts launcher;
       `--takeover` / `--no-takeover` manage the on-device `takeover.env` marker.
 - [x] `tools/mister-takeover/test_takeover.sh` — 18 host tests.
@@ -115,20 +116,41 @@ Implemented in this commit. Inert unless explicitly enabled.
 This is separable from the takeover and worth landing on its own — it is what
 removes `Master_Daemon` from the launch path.
 
-- [ ] From the MiSTer menu with the core NOT loaded: Scripts →
-      `MalditaCastilla` → confirm the core loads and the game runs. Check
-      `/media/fat/logs/MalditaCastilla/launch.log` for the step trace.
+**Superseded in part by Phase 1b:** this task assumed the daemon could stay
+installed and simply not be used. It cannot — see the design addendum. The
+launcher is renamed off the daemon's discovery predicate, so "does it still work
+with the daemon stopped" is no longer the question; "does the daemon still see
+us at all" is.
+
+- [x] Scripts → `MalditaCastilla` with the core NOT loaded: core loads, engine
+      runs, `launch.log` carries the step trace (`.62`, 2026-08-05).
+- [x] Stop `Master_Daemon` entirely and confirm the launcher still works —
+      verified, and now the permanent arrangement rather than a test case.
 - [ ] Repeat with the core ALREADY loaded — the launcher should skip
-      `load_core` and go straight to the handler.
+      `load_core` and go straight to `launch.sh`.
 - [ ] Repeat with `fb_terminal=0` in `MiSTer.ini`. That is the `popen` path,
       where our stdout is MiSTer's pipe and MiSTer `_exit(0)`s mid-load
       (design §2a fact 4) — if the redirect-before-load is wrong, this is the
-      configuration that shows it as a SIGPIPE death.
-- [ ] Stop `Master_Daemon` entirely and confirm the launcher still works. That
-      is the whole point; if it needs the daemon, something is still wired to it.
+      configuration that shows it as a SIGPIPE death. **Not yet run.**
 - [ ] Confirm the negative: with takeover disarmed, loading a different core
       from the OSD leaves the engine running (the documented tradeoff). Record
       what that actually looks like on screen.
+
+### Task 1b: Rename off `Master_Daemon`'s discovery predicate — **LANDED**
+
+Forced by device measurement; full rationale in the design addendum.
+
+- [x] `_handler.sh` → `launch.sh`, with both callers
+      (`Scripts/MalditaCastilla.sh`, `maldita_hook.cpp`) updated.
+- [x] `deploy.py` installs `launch.sh` and **hard-fails** if it cannot delete a
+      device's `_handler.sh`; it no longer kills/restarts the daemon at all.
+- [x] `scripts/mister_run.sh` — was relying on the daemon to spawn the engine
+      after its own `load_core`, so it would have benched nothing. Now waits for
+      `/tmp/CORENAME` and starts `launch.sh` itself.
+- [x] Release bundle ships `Scripts/MalditaCastilla.sh` (otherwise the bundle
+      contains a launcher nothing can invoke); both manifests updated.
+- [x] Verified on `.62` with the daemon RUNNING: Scripts entry yields exactly
+      **one** engine, where the pre-rename build yielded two.
 
 ### Task 1.3: Dry-run the harness with the kill disabled
 

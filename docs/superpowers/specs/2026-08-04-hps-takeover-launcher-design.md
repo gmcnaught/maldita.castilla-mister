@@ -622,3 +622,74 @@ golden regeneration.
   (the wrapper design this supersedes);
   `docs/superpowers/plans/2026-07-29-maldita-60fps-phase2-host-lever.md`
   (the 27.3 ms period and `C_DONE` as ground truth).
+
+---
+
+## Addendum, 2026-08-05: the daemon cannot coexist, so the launcher is renamed
+
+Device testing on `.62` invalidated one assumption in §2a/§2b.2: that the three
+entry points could all be installed side by side, with the daemon route simply
+being the one you did not use. They cannot coexist. This section records what
+was measured and what changed; the sections above are left as written.
+
+### What was measured
+
+`Master_Daemon` discovers hybrid cores by **one filesystem predicate and
+nothing else** — `discover_cores()` tests `-f "$dir/_handler.sh"` and the
+dispatch loop tests `-x` on the same path. There is no config file, no
+registry, and no way to opt a core out from the daemon's side.
+
+Consequently the daemon and a daemon-free entry point are triggered by the
+*same event* — the core load — and both spawn a launcher:
+
+| Path | Runs | Engines | `C_DONE` |
+|---|---|---|---|
+| Scripts entry, daemon running | 2/2 | **2** | `0x23E → 0x224` (backwards) |
+| `main=`, daemon running | 5/5 | **2** | `0x1F9 → 0x196` (backwards) |
+| `main=`, daemon stopped | 5/5 | 1 | tracks `C_SUBMIT`, ~59 fps |
+
+Two engines on one control block is the documented dual-engine corruption. The
+`ps | grep` singleton guard in the launcher cannot prevent it: both launchers
+reach that check before either has `exec`'d, so both see nothing and both
+proceed. It is check-then-act, not mutual exclusion.
+
+The daemon's **respawn-on-child-exit** arm makes it worse than a startup race.
+It re-launches whenever its child exits *while the core is unchanged*, which is
+exactly the state a takeover restore produces: the restarted MiSTer comes up on
+our core (§5), the daemon respawns the launcher, and only the follow-up
+`load_core menu.rbf` stops it. Observed on `.62`: the takeover session's own
+`maldita.log` was rotated away by that respawned launcher. §5's re-entry stamp
+suppresses the *takeover* but not the *spawn* on this path — only
+`maldita_hook.cpp` has a spawn guard.
+
+### The decision
+
+`Master_Daemon` is third-party and not ours to change, so the deconflict is on
+our side: **stay out of its discovery**. The launcher ships as `launch.sh`, and
+`deploy.py` deletes any `_handler.sh` on the device (hard-failing if it cannot,
+since a survivor is silent until it corrupts a frame).
+
+This is a mode switch, not free coexistence, and it retires the daemon row of
+§2b.2's table outright. Accepted costs:
+
+- **A Cores-browser core load starts no engine** unless `main=` is armed. The
+  Scripts entry becomes the default route.
+- **Nothing tears the engine down on a core change** — that was the daemon's
+  `kill_child`. Irrelevant under takeover (no MiSTer, no OSD); with the takeover
+  disarmed, leaving the core leaves the engine running.
+
+The alternative considered and rejected was an ownership marker written before
+`load_core` and checked by the launcher. It is genuinely race-free (the marker
+write happens-before `load_core`, which happens-before the `/tmp/CORENAME`
+write, which happens-before the daemon's poll), but it preserves neither the
+respawn problem nor the restore interaction, so it fixes less for similar
+effort.
+
+### Consumers updated
+
+`scripts/mister_run.sh` depended on the daemon to spawn the engine after its own
+`load_core` ("this IS the daemon launch path; nothing here execs gmloader
+directly") and would otherwise have launched nothing. It now waits for
+`/tmp/CORENAME` and starts `launch.sh` itself. The release bundle gained
+`Scripts/MalditaCastilla.sh`, without which a bundle install would have shipped
+a launcher with nothing able to invoke it.

@@ -1,36 +1,45 @@
 #!/bin/bash
 #
-# Maldita Castilla auto-launch handler — invoked by MiSTer's Master_Daemon
-# (Frontier) when the Maldita FPGA core loads. The daemon watches /tmp/CORENAME
-# and routes a loaded core by name ("Maldita Castilla", from the RBF's CONF_STR
-# setname, fpga/Maldita.sv:270) -> games/Maldita Castilla/_handler.sh.
+# Maldita Castilla engine launcher. Sets up the engine's environment and execs
+# it. Invoked by exactly one of the two entry points that own the launch:
 #
-# WHY THIS EXISTS (2026-07-25): this replaces the MiSTer.ini `main=` wrapper
-# (MiSTer_Maldita) as the auto-launch mechanism. A `main=` binary REPLACES
-# MiSTer's main() and therefore inherits all of its obligations to the core —
-# notably the scheduler's per-iteration `while (!is_fpga_ready(1))
-# fpga_wait_to_reset();` guard (scheduler.cpp scheduler_co_poll). The wrapper
-# hand-rolls the `#else` branch of main(), which is DEAD CODE (USE_SCHEDULER is
-# defined unconditionally in scheduler.h:4), and it spawns the engine at
-# maldita_wrapper.cpp:143 BEFORE its first readiness check at :157.
+#   Scripts/MalditaCastilla.sh   the Scripts-menu entry, which loads the core
+#                                itself and then execs this
+#   vendor/Main_MiSTer/maldita_hook.cpp   the `main=` wrapper, which forks this
+#                                after scheduler_wait_fpga_ready()
 #
-# This handler is the pattern the sibling Solarus core uses (solarus-mister
-# games/Solarus/_handler.sh) and that this project used before the wrapper:
-# stock MiSTer main keeps running and keeps its FPGA-readiness contract, and the
-# engine is launched as an ordinary child process. The daemon kills this child
-# on a core change, so no supervise loop is needed here.
+# WHY IT IS NOT CALLED `_handler.sh` (2026-08-05). MiSTer Frontier's
+# Master_Daemon discovers "hybrid cores" purely by testing for an executable
+# /media/fat/games/<CORENAME>/_handler.sh — there is no config file and no
+# registry (Master_Daemon.sh, discover_cores() and the dispatch loop). Under
+# that name the daemon spawns this script on every /tmp/CORENAME change AND
+# respawns it whenever its child exits, which collides head-on with either
+# entry point above: both are triggered by the same core load, both run the
+# `ps | grep` singleton check before either has exec'd, and both launch. That
+# puts TWO gmloader processes on one fabric control block — the documented
+# dual-engine corruption, measured on .62 2026-08-05 as C_DONE running
+# BACKWARDS (0x23E -> 0x224). The daemon is a third-party script we do not own,
+# so we deconflict from our side by staying out of its discovery: deploy.py
+# installs this as launch.sh and DELETES any /media/fat/games/<CORENAME>/
+# _handler.sh it finds.
 #
-# TRADEOFF: features the wrapper provided are NOT available via this path —
-# OSD Reset (feat #4), the joystick SHM bridge (feat #2), and crash-respawn.
-# Reinstating the wrapper is deferred to a future plan; if it returns, it must
-# first satisfy main()'s contract (readiness before spawn, scheduler_init).
+# CONSEQUENCE, and it is deliberate: nothing watches /tmp/CORENAME for us any
+# more. Selecting the core from the Cores browser loads the bitstream and
+# starts NO engine unless the `main=` handoff is armed (deploy.py
+# --main-wrapper). Nothing tears the engine down on a core change either — the
+# daemon used to do that via kill_child. Under the HPS takeover that cannot
+# arise (no MiSTer, no OSD to change cores from); with the takeover disarmed,
+# leaving the core while the engine runs leaves it running.
+#
+# TRADEOFF unchanged from the daemon era: OSD Reset (feat #4), the joystick SHM
+# bridge (feat #2) and crash-respawn are NOT available on this path.
 
 GAMEDIR="/media/fat/games/gmloader"     # engine payload (gmloader, mygame.apk, saves/)
 LOGDIR="/media/fat/logs/MalditaCastilla"
 
 # This script's own directory — where mister_takeover.sh and takeover.env live.
-# Resolved BEFORE the cd below, and only from $0, so it follows the handler
-# wherever the daemon found it rather than assuming the CONF_STR path.
+# Resolved BEFORE the cd below, and only from $0, so it follows this script
+# wherever its caller found it rather than assuming the CONF_STR path.
 HANDLER_SELF="$0"
 case "$HANDLER_SELF" in /*) ;; *) HANDLER_SELF="$PWD/$HANDLER_SELF" ;; esac
 HANDLER_DIR="$(dirname "$HANDLER_SELF")"
@@ -38,11 +47,16 @@ HANDLER_DIR="$(dirname "$HANDLER_SELF")"
 cd "$GAMEDIR" || exit 1
 mkdir -p "$LOGDIR"
 
-# Singleton guard. If a previous engine is still alive (a stale child, or — as
-# seen 2026-07-25 — TWO Master_Daemon instances each spawning a handler), a
-# second gmloader fights the first for the fabric and exits 255, which the
-# daemon answers by respawning: a tight destructive loop that also rotates this
-# log away every iteration. Reap any survivor before starting ours.
+# Singleton guard. If a previous engine is still alive, a second gmloader
+# fights the first for the fabric and exits 255. Reap any survivor before
+# starting ours.
+#
+# This is check-then-act and therefore NOT a mutual exclusion: two launchers
+# started by the same core load both reach this point before either has exec'd,
+# both see nothing, and both proceed. That race is why staying out of
+# Master_Daemon's discovery (see the header) is the actual fix rather than a
+# tighter guard here. What this still catches is the sequential case — a stale
+# engine from a previous session, or a second run of the Scripts entry.
 # NOTE: busybox has NO pkill — use killall.
 if ps w | grep -q "[g]mloader -c"; then
     echo "maldita handler: reaping a pre-existing gmloader before relaunch" >&2
@@ -69,9 +83,11 @@ export GMLOADER_RASTER=mfgpu
 # closure cannot resolve its own deps and the engine dies during EGL init:
 #   MESA-LOADER: failed to open swrast: libtinfo.so.6: cannot open shared object file
 #   gmloader/main.cpp:652: eglInitialize failed (eglGetError=0x3001)
-# which exits 255 -> Master_Daemon respawns -> tight loop (device-hit 2026-07-25).
-# Running the handler from an interactive shell MASKS this, because a login shell
-# already has a usable LD_LIBRARY_PATH — always test via the daemon, not by hand.
+# which exits 255 (device-hit 2026-07-25, when Master_Daemon still respawned on
+# that exit and turned it into a tight loop).
+# Running this from an interactive shell MASKS the bug, because a login shell
+# already has a usable LD_LIBRARY_PATH — always test through a real entry point
+# (the Scripts menu or the main= handoff), not by hand over SSH.
 export LD_LIBRARY_PATH="$GAMEDIR/mesa:$GAMEDIR"
 
 # Optional bench-only override hook (perf diagnostics harness only — see

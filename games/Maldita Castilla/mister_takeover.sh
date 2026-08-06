@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# HPS takeover harness — sourced by _handler.sh.
+# HPS takeover harness — sourced by launch.sh.
 #
 # Moves the engine from "guest process on a machine Main_MiSTer owns" to "owner
 # of the HPS", modelled on skmp/DreamSTer (Scripts/DreamSTer.sh), which kills
@@ -10,7 +10,7 @@
 # Plan:   docs/superpowers/plans/2026-08-04-hps-takeover-launcher.md
 #
 # THIS FILE IS INERT UNLESS EXPLICITLY ENABLED. With MALDITA_TAKEOVER unset (the
-# default, and what deploy.py installs unless --takeover is passed) _handler.sh
+# default, and what deploy.py installs unless --takeover is passed) launch.sh
 # takes the same `exec ./gmloader` path it always did. That is deliberate: the
 # non-takeover path is the A/B baseline for every measurement, and it is the
 # only path on which `/dev/MiSTer_cmd screenshot` works — this project's most
@@ -48,7 +48,7 @@
 
 # ── Configuration ────────────────────────────────────────────────────────────
 # All knobs come from the environment, and takeover.env (installed next to
-# _handler.sh by `deploy.py --takeover`) is the intended place to set them.
+# launch.sh by `deploy.py --takeover`) is the intended place to set them.
 #
 #   MALDITA_TAKEOVER=1            arm the takeover (default: off)
 #   MALDITA_TAKEOVER_DRYRUN=1     run every step and log it, but kill nothing
@@ -414,7 +414,7 @@ takeover_run() {
     fi
 
     # No-op until gmloader-next lands the forced transport (plan Phase 2). Set
-    # here and not in _handler.sh so it is impossible for the takeover to run
+    # here and not in launch.sh so it is impossible for the takeover to run
     # without it once the engine understands it.
     export GMLOADER_JOY=sdl
 

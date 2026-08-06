@@ -38,20 +38,33 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
     libGLES_sw.so       = mesa libGLESv2.so.2                    <- runtime (opt-in)
   /media/fat/_Other/MalditaCastilla_*.rbf                        <- RBF
 
-AUTO-LAUNCH (changed 2026-07-25): the engine is started by MiSTer's Master_Daemon
-(Frontier), which watches /tmp/CORENAME and runs
-  /media/fat/games/Maldita Castilla/_handler.sh
-when the core loads. This is the pattern the sibling Solarus core uses, and it
-leaves STOCK MiSTer main running so it keeps its FPGA-readiness contract
-(scheduler_co_poll's `while (!is_fpga_ready(1)) fpga_wait_to_reset();`).
+AUTO-LAUNCH (changed 2026-08-05): the engine is started by
+  /media/fat/games/Maldita Castilla/launch.sh
+which sets up its environment (BLITTER/RASTER, LD_LIBRARY_PATH, the takeover)
+and execs it. Stock MiSTer main stays running and keeps its FPGA-readiness
+contract (scheduler_co_poll's `while (!is_fpga_ready(1)) fpga_wait_to_reset();`).
 
-THREE ENTRY POINTS, all installed, only one of which needs a daemon:
-  1. Cores browser + Master_Daemon  — the default above.
-  2. Scripts menu (Scripts/MalditaCastilla.sh) — loads the core via
-     /dev/MiSTer_cmd itself, then execs the same handler. No daemon.
-  3. Cores browser + MiSTer.ini `main=` (--main-wrapper) — MiSTer execs our
-     MiSTer_Maldita build, which spawns the handler. No daemon, and it is the
-     only way to get a Cores-browser entry without one.
+TWO ENTRY POINTS, both installed, NEITHER using a daemon:
+  1. Scripts menu (Scripts/MalditaCastilla.sh) — loads the core via
+     /dev/MiSTer_cmd itself, then execs launch.sh. This is the DEFAULT route.
+  2. Cores browser + MiSTer.ini `main=` (--main-wrapper) — MiSTer execs our
+     MiSTer_Maldita build, which forks launch.sh after the readiness check. The
+     only way to get a Cores-browser entry that also starts the engine.
+
+WHAT CHANGED, AND THE COST. Until 2026-08-05 the default was a third route:
+MiSTer Frontier's Master_Daemon watching /tmp/CORENAME and running
+games/<CORENAME>/_handler.sh. That route cannot coexist with either of the two
+above — the daemon's only discovery predicate is the FILE NAME _handler.sh, so
+the same core load triggers both it and the entry point, and two gmloader
+processes land on one fabric control block (measured .62 2026-08-05: Scripts
+2/2 runs, main= 5/5, C_DONE running backwards). Master_Daemon is third-party
+and we do not own it, so the deconflict is on our side: install as launch.sh,
+and DELETE any _handler.sh found on the device.
+
+The cost is real and intended: WITHOUT --main-wrapper, selecting the core from
+the Cores browser now loads the bitstream and starts NO engine. Use the Scripts
+entry, or arm --main-wrapper. Nothing tears the engine down on a core change
+any more either — that was the daemon's kill_child.
 
 `main=` was disabled on 2026-07-25 because the wrapper then REPLACED MiSTer's
 main() with a hand-rolled loop (the dead `#else` branch — USE_SCHEDULER is
@@ -62,11 +75,13 @@ before its first readiness check: 3/5 frame-1 wedges vs stock main 0/5.
 The 2026-08-04 overlay rework fixed the cause rather than the symptom — upstream
 main() and scheduler are now built verbatim and the entire local change is one
 call inserted AFTER scheduler_wait_fpga_ready() (vendor/Main_MiSTer/maldita_hook.cpp).
-It is still unproven on hardware, so `main=` is OPT-IN: without --main-wrapper an
-active main= line is commented out, as before.
+Device-measured 2026-08-05 on .62 (daemon stopped, one engine): 0/5 frame-1
+wedges, ~59fps, rendering correct — the gate the 2026-07-25 revert set. It stays
+OPT-IN pending a run on the production rig: without --main-wrapper an active
+main= line is commented out, as before.
 
 HPS TAKEOVER (2026-08-04, opt-in, default OFF): games/<CORENAME>/mister_takeover.sh
-ships alongside the handler and is INERT unless a takeover.env sits next to it.
+ships alongside launch.sh and is INERT unless a takeover.env sits next to it.
 Armed, it lets stock MiSTer main load the core and satisfy its readiness contract,
 waits for the engine to prove itself live on the fabric (C_DONE advancing), then
 kills MiSTer and restarts it on every exit path — the DreamSTer model, taken late.
@@ -116,10 +131,11 @@ REPO = Path(__file__).resolve().parent            # maldita.castilla-mister
 SIBLINGS = REPO.parent                            # ~/MisterFPGA-Projects
 GAMEDIR = "/media/fat/games/gmloader"
 
-# ── Auto-launch (Master_Daemon handler path, replaces the main= wrapper) ───────
-# The daemon watches /tmp/CORENAME and runs games/<CORENAME>/_handler.sh, so this
-# MUST match the RBF's CONF_STR setname exactly (fpga/Maldita.sv:270) — including
-# the space.
+# ── Auto-launch (launch.sh, driven by the Scripts entry or the main= hook) ─────
+# Both entry points hardcode /media/fat/games/<CORENAME>/launch.sh, and the
+# `main=` hook additionally compares user_io_get_core_name() against this
+# string, so it MUST match the RBF's CONF_STR setname exactly
+# (fpga/Maldita.sv:270) — including the space.
 CORENAME    = "Maldita Castilla"
 HANDLER_DIR = f"/media/fat/games/{CORENAME}"
 
@@ -543,15 +559,39 @@ def main():
     print("\n-- Uploading HPS wrapper binary (sha1-verified; used only with --main-wrapper) --")
     scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
 
-    # --- auto-launch: Master_Daemon handler (replaces the MiSTer.ini main= wrapper) ---
-    # The daemon routes /tmp/CORENAME -> /media/fat/games/<CORENAME>/_handler.sh, so the
-    # directory name MUST equal the CONF_STR setname exactly ("Maldita Castilla").
-    handler_src = REPO / "games" / CORENAME / "_handler.sh"
+    # --- launcher install, and the Master_Daemon deconflict --------------------
+    # The directory name MUST equal the CONF_STR setname exactly ("Maldita
+    # Castilla") — the `main=` hook and the Scripts entry both hardcode that path.
+    #
+    # The FILE name must NOT be _handler.sh. That is Master_Daemon's entire
+    # discovery predicate (Master_Daemon.sh: discover_cores() tests
+    # `-f "$dir/_handler.sh"`, the dispatch loop tests `-x`), and there is no
+    # config file to opt out of. Under that name the daemon spawns the launcher
+    # on every /tmp/CORENAME change and respawns it whenever its child exits,
+    # both of which collide with the two entry points that now own the launch.
+    # We do not own Master_Daemon, so we deconflict from our side: install as
+    # launch.sh, and delete any _handler.sh already on the device.
+    handler_src = REPO / "games" / CORENAME / "launch.sh"
     if handler_src.exists():
-        print(f"\n-- Installing auto-launch handler for '{CORENAME}' --")
+        print(f"\n-- Installing engine launcher for '{CORENAME}' --")
         ssh(host, f"mkdir -p '{HANDLER_DIR}' /media/fat/logs/MalditaCastilla", check=True)
-        scp_verified(host, handler_src, f"{HANDLER_DIR}/_handler.sh")
-        ssh(host, f"chmod 755 '{HANDLER_DIR}/_handler.sh'", check=True)
+        scp_verified(host, handler_src, f"{HANDLER_DIR}/launch.sh")
+        ssh(host, f"chmod 755 '{HANDLER_DIR}/launch.sh'", check=True)
+
+        # Remove ourselves from the daemon's discovery. Not best-effort: a
+        # survivor means the daemon still spawns a second engine onto the same
+        # fabric control block on the next core load, which shows up as C_DONE
+        # running backwards rather than as anything that looks like a deploy
+        # failure. A daemon mid-flight needs no further handling — its dispatch
+        # and respawn arms both re-test the path, so the deletion takes effect
+        # on its next poll.
+        r = ssh(host, f"rm -f '{HANDLER_DIR}/_handler.sh'; "
+                      f"test -e '{HANDLER_DIR}/_handler.sh' && echo PRESENT || echo GONE")
+        if (r.stdout or "").strip().endswith("PRESENT"):
+            sys.exit(f"FATAL: could not remove {HANDLER_DIR}/_handler.sh — "
+                     "Master_Daemon would spawn a second engine on core load.")
+        print("   Master_Daemon deconflict: no _handler.sh under "
+              f"'{HANDLER_DIR}' (daemon left untouched)")
 
         # HPS takeover harness — always shipped, INERT unless takeover.env arms
         # it. The handler sources it from its own directory, so it has to land
@@ -572,7 +612,7 @@ def main():
             ssh(host, "chmod 755 /media/fat/Scripts/MalditaCastilla.sh", check=True)
 
         if args.takeover:
-            # Written here, not baked into _handler.sh, so arming survives a
+            # Written here, not baked into launch.sh, so arming survives a
             # handler redeploy and disarming is one file removal — including
             # from a rescue SSH session on a box whose OSD is gone.
             print("   ! arming the HPS takeover (MiSTer will be killed once the "
@@ -629,55 +669,21 @@ def main():
                       f"sed -i 's|^{MAIN_LINE}|"
                       f";{MAIN_LINE}  ; disabled by deploy.py|' "
                       "/media/fat/MiSTer.ini", check=True)
-        # The daemon enumerates handlers at startup, so a NEW handler needs a restart.
+        # No Master_Daemon handling here, deliberately. Earlier revisions killed
+        # and restarted it so it would re-enumerate a newly installed
+        # _handler.sh; with the deconflict above there is nothing of ours left
+        # for it to enumerate, and it may well be serving OTHER hybrid cores on
+        # this device (it auto-discovers every games/*/ with an _handler.sh).
+        # It is a third-party script we do not own — leave it running and leave
+        # it alone.
         #
-        # The kill walks /proc rather than using pkill: MiSTer's busybox has NO pkill and
-        # no pgrep (`pkill` exits 127, "command not found"), so the old
-        # `pkill -f Master_Daemon.sh; ... nohup Master_Daemon.sh &` killed nothing and
-        # simply ADDED a second daemon on every deploy. Each daemon then spawns its own
-        # handler on core load, so the core came up with TWO gmloader processes writing one
-        # fabric control block — which is both the documented dual-engine corruption and an
-        # automatic abort for any bench run (mister_run.sh asserts exactly one engine).
-        # Observed on .62 2026-07-29: deploys at 15:08 and 15:20 each left a stray daemon.
-        # `killall` is not a substitute either — these run as `bash <path>/Master_Daemon.sh`,
-        # so the process NAME is bash and killall would either miss it or kill every shell.
-        print("   restarting Master_Daemon so it picks up the handler")
-        # The ssh shell's own cmdline contains "Master_Daemon.sh" (this very
-        # command text), so the loop MUST skip $$ — otherwise it kill -9s itself
-        # mid-loop and the nohup restart below never runs, leaving the device
-        # with NO daemon and therefore no auto-launch on core load (observed
-        # .62 2026-07-29 16:49: daemon killed, restart never executed).
-        kill_daemons = (
-            'for p in /proc/[0-9]*; do '
-            '  [ "$(basename "$p")" = "$$" ] && continue; '
-            '  [ -r "$p/cmdline" ] || continue; '
-            '  case "$(tr "\\0" " " < "$p/cmdline")" in '
-            '    *Master_Daemon.sh*) kill -9 "$(basename "$p")" 2>/dev/null ;; '
-            '  esac; '
-            'done'
-        )
-        count_daemons = (
-            'n=0; for p in /proc/[0-9]*; do '
-            '  [ -r "$p/cmdline" ] || continue; '
-            '  case "$(tr "\\0" " " < "$p/cmdline")" in '
-            '    *Master_Daemon.sh*) n=$((n+1)) ;; '
-            '  esac; '
-            'done; echo "$n"'
-        )
-        ssh(host, f"{kill_daemons}; sleep 1; "
-                  "nohup /media/fat/MiSTer_Frontier/Master_Daemon.sh >/tmp/master_daemon.log 2>&1 & "
-                  "sleep 2; true")
-        # Verify, because the failure is silent and only surfaces later as a wedged core.
-        # The counting shell is itself matched by its own cmdline, hence the -1.
-        live = (ssh(host, count_daemons).stdout or "").strip().splitlines()
-        n_live = int(live[-1]) - 1 if live and live[-1].strip().isdigit() else -1
-        if n_live == 1:
-            print("   Master_Daemon: exactly 1 running")
-        else:
-            print(f"   WARN: {n_live} Master_Daemon instance(s) running — expected 1. "
-                  "More than one spawns duplicate engines on core load.")
+        # An engine the daemon spawned BEFORE this deploy is not killed here.
+        # It keeps the pre-deploy binaries it already mapped, and the daemon
+        # will not respawn it once the file is gone, so it clears on the next
+        # core change. Kill gmloader over SSH if a stale one is in the way.
     else:
-        print(f"\n   WARN: {handler_src} missing — auto-launch handler NOT installed.")
+        print(f"\n   WARN: {handler_src} missing — engine launcher NOT installed. "
+              "Neither the Scripts entry nor the main= handoff can start the engine.")
 
     if not args.no_content:
         print("\n-- Uploading content (APK + game.droid + options.ini, sha1-verified) --")

@@ -77,9 +77,9 @@ beyond the APK-open/`.so`-load steps cited above.
 `status[]`/`joystick_*` buses `hps_io` exposes into the core
 (`maldita.castilla-mister/fpga/Maldita.sv:263-300`). MiSTer Main also writes
 the joystick state that reaches the engine via the joy-shm bridge — see
-`05-data-flows.md`. The Master_Daemon/handler exec chain that launches
-gmloader itself is out of scope for this doc set (see
-`docs/architecture/README.md`).
+`05-data-flows.md`. The launcher exec chain that starts gmloader itself
+(Scripts entry or `main=` hook -> `launch.sh`; no daemon since 2026-08-05) is
+out of scope for this doc set (see `docs/architecture/README.md`).
 
 **Developer** (out-of-scope, dashed). Deploys builds and drives bench runs
 from outside the running system — `Makefile`, `deploy.py`,

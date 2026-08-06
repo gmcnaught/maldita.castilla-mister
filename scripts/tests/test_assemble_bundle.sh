@@ -29,7 +29,8 @@ ACTUAL=$(cd "$TMP/out/bundle" && find . -type f | sed 's|^\./||' | LC_ALL=C sort
 EXPECTED=$(LC_ALL=C sort <<'EOF'
 README.md
 _Other/MalditaCastilla_test.rbf
-games/Maldita Castilla/_handler.sh
+Scripts/MalditaCastilla.sh
+games/Maldita Castilla/launch.sh
 games/gmloader/APKs/README.txt
 games/gmloader/gmloader
 games/gmloader/gmloader.json

@@ -40,19 +40,30 @@
 #      BEFORE the load: under fb_terminal=0 our stdout is MiSTer's popen pipe,
 #      and writing to it after MiSTer exits is SIGPIPE.
 #
-#   5. Then we exec the ordinary handler, which owns everything from there:
-#      the singleton guard, the BLITTER/RASTER/LD_LIBRARY_PATH contract, and
-#      the takeover. Deliberately NOT reimplemented here — every one of those
-#      settings has a device-hit failure behind it, and one copy is enough.
+#   5. Then we exec launch.sh, which owns everything from there: the singleton
+#      guard, the BLITTER/RASTER/LD_LIBRARY_PATH contract, and the takeover.
+#      Deliberately NOT reimplemented here — every one of those settings has a
+#      device-hit failure behind it, and one copy is enough.
 #
-# CAVEAT — without the daemon nobody kills the engine on a core change. That
-# does not arise on the takeover path (MiSTer is dead; there is no OSD to
-# change cores from), but with takeover disarmed the engine would keep running
-# and fight whatever core the user loads next. This launcher is meant for the
-# takeover flow; use the daemon path if you want core-change teardown.
+#   6. That script is launch.sh and NOT _handler.sh, which matters to this file
+#      specifically. Master_Daemon discovers hybrid cores by testing for an
+#      executable games/<CORENAME>/_handler.sh, so under the old name our
+#      load_core in step 2 would ALSO trigger the daemon: two launchers on one
+#      core load, both past the `ps | grep` singleton check before either
+#      exec'd, two gmloader processes on one fabric control block. Measured on
+#      .62 2026-08-05, 2/2 runs, with C_DONE running BACKWARDS
+#      (0x23E -> 0x224). deploy.py deletes any stale _handler.sh it finds.
+#
+# CAVEAT — nobody kills the engine on a core change. The daemon used to do that
+# via kill_child, and we are deliberately out of its reach now. Under the
+# takeover this cannot arise (MiSTer is dead; there is no OSD to change cores
+# from). With the takeover disarmed, leaving the core while the engine runs
+# leaves it running, and it will fight whatever core is loaded next — exit the
+# game itself, or kill gmloader over SSH.
 
 CORENAME="Maldita Castilla"
-HANDLER="/media/fat/games/$CORENAME/_handler.sh"
+# launch.sh, NOT _handler.sh — see note 6 in the header.
+HANDLER="/media/fat/games/$CORENAME/launch.sh"
 RBF_GLOB="/media/fat/_Other/MalditaCastilla_*.rbf"
 LOGDIR="/media/fat/logs/MalditaCastilla"
 CORE_WAIT_S=30

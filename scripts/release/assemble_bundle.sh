@@ -18,7 +18,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 RBF="$1"; ENGINE="$2"; OUT="$3"; VERSION="$4"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 
-# This repo now owns _handler.sh directly; the engine and its whole runtime
+# This repo now owns launch.sh directly; the engine and its whole runtime
 # closure (including Mesa) come from the one submodule.
 GMNEXT="$REPO/external/gmloader-next"
 MALDITA="$REPO"
@@ -56,11 +56,17 @@ fi
 BUNDLE="$OUT/bundle"
 rm -rf "$BUNDLE"
 GMDIR="$BUNDLE/games/gmloader"
-mkdir -p "$BUNDLE/_Other" "$BUNDLE/games/Maldita Castilla" \
+mkdir -p "$BUNDLE/_Other" "$BUNDLE/games/Maldita Castilla" "$BUNDLE/Scripts" \
          "$GMDIR/mesa" "$GMDIR/lib/armeabi-v7a" "$GMDIR/APKs"
 
 cp "$RBF" "$BUNDLE/_Other/"
-cp "$MALDITA/games/Maldita Castilla/_handler.sh" "$BUNDLE/games/Maldita Castilla/"
+# launch.sh, NOT _handler.sh: that name is Master_Daemon's discovery predicate,
+# and a daemon that also spawns it puts a second engine on the fabric control
+# block. The Scripts entry ships with it because it is now the only thing that
+# invokes it — without it a bundle install loads the core and starts nothing.
+cp "$MALDITA/games/Maldita Castilla/launch.sh" "$BUNDLE/games/Maldita Castilla/"
+cp "$MALDITA/Scripts/MalditaCastilla.sh" "$BUNDLE/Scripts/"
+chmod +x "$BUNDLE/games/Maldita Castilla/launch.sh" "$BUNDLE/Scripts/MalditaCastilla.sh"
 cp "$ENGINE" "$GMDIR/gmloader"; chmod +x "$GMDIR/gmloader"
 cp "$GMNEXT/gmloader.json" "$GMDIR/"
 cp "$GMNEXT/3rdparty/gles2-sw/libGLES_sw.so" "$GMDIR/"
@@ -74,7 +80,8 @@ RBF_NAME=$(basename "$RBF")
 EXPECTED=$(cat <<EOF
 README.md
 _Other/$RBF_NAME
-games/Maldita Castilla/_handler.sh
+Scripts/MalditaCastilla.sh
+games/Maldita Castilla/launch.sh
 games/gmloader/APKs/README.txt
 games/gmloader/gmloader
 games/gmloader/gmloader.json

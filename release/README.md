@@ -9,10 +9,12 @@ FPGA blitter core.
 1. Extract this zip over the root of your MiSTer SD card (`/media/fat/`).
    It adds:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
-   - `games/Maldita Castilla/_handler.sh` — auto-launch dispatcher
+   - `Scripts/MalditaCastilla.sh` — **the launcher: this is how you start it**
+   - `games/Maldita Castilla/launch.sh` — engine launcher (run by the above)
    - `games/gmloader/` — the game engine + GL runtime
 2. Add the game data (NOT included — see below).
-3. Load **MalditaCastilla** from the MiSTer OSD (`_Other` menu).
+3. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
+   core and starts the engine in one step.
 
 ## Game data (required, not included)
 
@@ -32,12 +34,23 @@ Place:
 
 `games/gmloader/APKs/README.txt` repeats these steps.
 
-## Auto-launch dependency
+## How to launch it
 
-Auto-launch on core load requires Frontier's **Master_Daemon** on the
-device (it watches the loaded core's name and runs
-`games/Maldita Castilla/_handler.sh`). Without it, the core loads but the
-game will not start automatically.
+Use the **Scripts → MalditaCastilla** entry. Selecting the core directly from
+the `_Other` Cores menu loads the bitstream but starts no engine — you get a
+black screen. That is expected: nothing on the device watches for the core to
+load.
+
+No daemon or resident helper is needed, and none should be installed. Earlier
+releases relied on Frontier's **Master_Daemon** watching the loaded core's name
+and running `games/Maldita Castilla/_handler.sh`. That file is deliberately no
+longer shipped: when a daemon and the Scripts entry both fire on the same core
+load, two engine processes end up writing one FPGA control block and the
+picture corrupts. **If you are upgrading from an older release, delete any
+leftover `games/Maldita Castilla/_handler.sh`.**
+
+Nothing tears the engine down when you switch cores — exit the game from its
+own menu.
 
 ## Troubleshooting
 
