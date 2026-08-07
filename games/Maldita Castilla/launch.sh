@@ -34,8 +34,11 @@
 # TRADEOFF unchanged from the daemon era: OSD Reset (feat #4), the joystick SHM
 # bridge (feat #2) and crash-respawn are NOT available on this path.
 
-GAMEDIR="/media/fat/games/gmloader"     # engine payload (gmloader, mygame.apk, saves/)
-LOGDIR="/media/fat/logs/MalditaCastilla"
+# Overridable only so scripts/tests/test_launch_fabric_gate.sh can run this
+# script against a sandbox tree with stubbed busybox/ps/pidof. Production sets
+# neither and gets the paths below verbatim.
+GAMEDIR="${MALDITA_GAMEDIR:-/media/fat/games/gmloader}"   # engine payload (gmloader, mygame.apk, saves/)
+LOGDIR="${MALDITA_LOGDIR:-/media/fat/logs/MalditaCastilla}"
 
 # --- fabric bring-up recovery gate -------------------------------------------
 # The frame-1 wedge (C_SUBMIT climbs forever, C_DONE never advances past the
@@ -66,11 +69,14 @@ LOGDIR="/media/fat/logs/MalditaCastilla"
 # hardware on demand. Production never sets these.
 FABRIC_CTRL="${MALDITA_FABRIC_CTRL_ADDR:-0x3B000000}"   # C_SUBMIT (qword 0)
 FABRIC_DONE="${MALDITA_FABRIC_DONE_ADDR:-0x3B000028}"   # C_DONE   (qword 5)
-FABRIC_RETRY_MARK="/tmp/maldita_fabric_retry"
+FABRIC_RETRY_MARK="${MALDITA_RETRY_MARK:-/tmp/maldita_fabric_retry}"
+MISTER_CMD="${MALDITA_MISTER_CMD:-/dev/MiSTer_cmd}"
+CORENAME_FILE="${MALDITA_CORENAME_FILE:-/tmp/CORENAME}"
+MENU_RBF="${MALDITA_MENU_RBF:-/media/fat/menu.rbf}"
 FABRIC_MAX_RETRIES="${MALDITA_FABRIC_RETRIES:-2}"
 FABRIC_SUBMIT_WAIT_S="${MALDITA_FABRIC_SUBMIT_WAIT_S:-60}"   # engine start -> first submits
 FABRIC_SAMPLE_S="${MALDITA_FABRIC_SAMPLE_S:-8}"              # C_DONE observation window
-RBF_GLOB="/media/fat/_Other/MalditaCastilla_*.rbf"
+RBF_GLOB="${MALDITA_RBF_GLOB:-/media/fat/_Other/MalditaCastilla_*.rbf}"
 
 # This script's own directory — where mister_takeover.sh and takeover.env live.
 # Resolved BEFORE the cd below, and only from $0, so it follows this script
@@ -236,7 +242,7 @@ if [ -f "$HANDLER_DIR/mister_takeover.sh" ]; then
     TAKEOVER_NOTE=" TAKEOVER=$MALDITA_TAKEOVER"
 fi
 
-echo "maldita handler: CORENAME='$(cat /tmp/CORENAME 2>/dev/null)' \
+echo "maldita handler: CORENAME='$(cat "$CORENAME_FILE" 2>/dev/null)' \
 BLITTER=$GMLOADER_BLITTER RASTER=$GMLOADER_RASTER${BENCH_NOTE}${TAKEOVER_NOTE}" > "$LOGDIR/maldita.log"
 
 # Write-combining for the fabric window (rings + SRC texture heap). Sourced
@@ -303,20 +309,20 @@ reconfigure_fabric() {
         echo "fabric gate: no rbf in MiSTer argv — falling back to newest ($rbf)" >&2
     fi
     [ -n "$rbf" ] || { echo "fabric gate: no RBF matching $RBF_GLOB — cannot reconfigure" >&2; return 1; }
-    [ -p /dev/MiSTer_cmd ] || { echo "fabric gate: /dev/MiSTer_cmd missing" >&2; return 1; }
+    [ -e "$MISTER_CMD" ] || { echo "fabric gate: $MISTER_CMD missing" >&2; return 1; }
     # With MiSTer dead the FIFO has no reader and open(O_WRONLY) blocks forever
     # — the same liveness check Scripts/MalditaCastilla.sh carries, for the same
     # reason, and covering both process names for the main= case.
     pidof MiSTer >/dev/null 2>&1 || pidof MiSTer_Maldita >/dev/null 2>&1 || {
-        echo "fabric gate: no MiSTer process to service /dev/MiSTer_cmd" >&2; return 1; }
+        echo "fabric gate: no MiSTer process to service $MISTER_CMD" >&2; return 1; }
 
     echo "fabric gate: forcing reconfigure via menu.rbf round-trip" >&2
-    echo "load_core /media/fat/menu.rbf" > /dev/MiSTer_cmd
+    echo "load_core $MENU_RBF" > "$MISTER_CMD"
     waited=0
-    while [ "$(cat /tmp/CORENAME 2>/dev/null)" != "MENU" ] && [ "$waited" -lt 20 ]; do
+    while [ "$(cat "$CORENAME_FILE" 2>/dev/null)" != "MENU" ] && [ "$waited" -lt 20 ]; do
         sleep 1; waited=$((waited + 1))
     done
-    echo "load_core $rbf" > /dev/MiSTer_cmd
+    echo "load_core $rbf" > "$MISTER_CMD"
     return 0
 }
 
@@ -401,7 +407,7 @@ if [ "$verdict" -eq 1 ] && [ "$attempt" -lt "$FABRIC_MAX_RETRIES" ]; then
             exit 0
         fi
         waited=0
-        while [ "$(cat /tmp/CORENAME 2>/dev/null)" != "Maldita Castilla" ] && [ "$waited" -lt 30 ]; do
+        while [ "$(cat "$CORENAME_FILE" 2>/dev/null)" != "Maldita Castilla" ] && [ "$waited" -lt 30 ]; do
             sleep 1; waited=$((waited + 1))
         done
         sleep 2
