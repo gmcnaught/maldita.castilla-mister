@@ -629,9 +629,20 @@ def main():
     # itself). Then remove the old binary (FAT can't overwrite a still-open exe).
     # Skipped with --no-engine: the binary is not being replaced, so there is no
     # reason to kill a running session or delete an executable we are keeping.
+    #
+    # SIGTERM first, -9 only as a backstop. -9 is uncatchable, so the engine runs
+    # no fabric teardown (raster_backend_mfgpu.cpp, mf_fabric_teardown) and leaves
+    # the blitter's DDR window at 0x3B000000 with a live doorbell over its own
+    # command ring. Nothing clears that window between engines — not load_core,
+    # which reconfigures the FPGA and not DDR — so the next engine inherits a
+    # fabric already executing a batch nobody submitted. Its bring-up now digs
+    # itself out of that, but a clean exit is free and a recovery is not.
     if not args.no_engine:
-        print("-- Stopping running gmloader --")
-        ssh(host, "for p in $(ps -o pid,args 2>/dev/null | grep '[g]mloader -c' | awk '{print $1}'); do "
+        print("-- Stopping running gmloader (SIGTERM, then SIGKILL) --")
+        ssh(host, "gmpids() { ps -o pid,args 2>/dev/null | grep '[g]mloader -c' | awk '{print $1}'; }; "
+                  "for p in $(gmpids); do kill -TERM \"$p\" 2>/dev/null; done; "
+                  "n=0; while [ \"$n\" -lt 3 ] && [ -n \"$(gmpids)\" ]; do sleep 1; n=$((n+1)); done; "
+                  "for p in $(gmpids); do echo \"gmloader $p ignored SIGTERM - SIGKILL\" >&2; "
                   "kill -9 \"$p\" 2>/dev/null; done; sleep 1; "
                   f"rm -f {GAMEDIR}/gmloader; true")
 
