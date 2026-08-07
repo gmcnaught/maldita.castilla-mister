@@ -30,8 +30,17 @@ if [ ! -f "$ENGINE" ]; then
     exit 1
 fi
 
+# Same rule for the main= wrapper: the assembler gates on its ELF arch, its
+# GLIBC ceiling and a .rodata string only the overlay build contains, none of
+# which a stub can satisfy honestly.
+WRAPPER="$REPO/build/mister-wrapper-hps/MiSTer_Maldita"
+if [ ! -f "$WRAPPER" ]; then
+    echo "SKIP: no wrapper at $WRAPPER (run tools/mister-wrapper/build-hps.sh first) -- NOT VERIFIED, exiting non-zero so a CI runner checking only the exit code cannot report green"
+    exit 1
+fi
+
 bash "$ASSEMBLE" \
-    "$TMP/MalditaCastilla_test.rbf" "$ENGINE" "$TMP/out" "v0.0.0-test" || {
+    "$TMP/MalditaCastilla_test.rbf" "$ENGINE" "$WRAPPER" "$TMP/out" "v0.0.0-test" || {
     echo "FAIL: assemble_bundle.sh exited non-zero"; exit 1; }
 
 PREBUILT="$REPO/tools/mister-mem-wc/prebuilt"
@@ -44,10 +53,12 @@ EXPECTED=$(cat - <(printf '%s\n' "$KOS") <<'EOF' | LC_ALL=C sort
 README.md
 _Other/MalditaCastilla_test.rbf
 Scripts/MalditaCastilla.sh
+Scripts/MalditaCastilla_CoresMenu.sh
 games/Maldita Castilla/launch.sh
 games/Maldita Castilla/mem_wc_load.sh
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
+games/gmloader/MiSTer_Maldita
 games/gmloader/gmloader
 games/gmloader/gmloader.json
 games/gmloader/lib/armeabi-v7a/libstdc++.so
@@ -105,4 +116,23 @@ cmp -s "$GLDIR/libGLES_sw.so" "$REPO/external/gmloader-next/3rdparty/gles2-sw/li
 [ -f "$GLDIR/mesa/libtinfo.so.6" ] \
     || { echo "FAIL: mesa/libtinfo.so.6 missing -- static-LLVM swrast_dri.so cannot load, engine dies at eglInitialize"; exit 1; }
 
-echo "PASS: $(printf '%s\n' "$ACTUAL" | wc -l | tr -d ' ')-file manifest, zip and checksums present, game data + mem_wc objects staged byte-identical"
+# The main= wrapper. Staged bytes must be the built binary, and it must sit at
+# the exact path the arming script writes into MiSTer.ini -- MiSTer execs that
+# path or (FileExists() being false) silently does nothing, and "nothing" is
+# indistinguishable from a broken core to whoever installed the zip.
+cmp -s "$WRAPPER" "$GLDIR/MiSTer_Maldita" \
+    || { echo "FAIL: staged games/gmloader/MiSTer_Maldita differs from $WRAPPER"; exit 1; }
+grep -qF '"/media/fat/games/gmloader/MiSTer_Maldita"' \
+    "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
+    || { echo "FAIL: bundled MalditaCastilla_CoresMenu.sh does not point main= at the path the bundle installs the wrapper to"; exit 1; }
+
+# Negative: a plain armhf ELF that is NOT the overlay build must be rejected.
+# The engine stands in for the realistic version of this mistake -- a stock
+# Main_MiSTer renamed MiSTer_Maldita, which passes every arch/glibc gate, execs
+# fine, shows the OSD and never starts the engine.
+if bash "$ASSEMBLE" "$TMP/MalditaCastilla_test.rbf" "$ENGINE" "$ENGINE" \
+        "$TMP/out-neg" "v0.0.0-neg" >/dev/null 2>&1; then
+    echo "FAIL: assemble_bundle.sh accepted a binary with no maldita_hook launch.sh string as the wrapper"; exit 1
+fi
+
+echo "PASS: $(printf '%s\n' "$ACTUAL" | wc -l | tr -d ' ')-file manifest, zip and checksums present, game data + mem_wc objects staged byte-identical, main= wrapper staged and gated"

@@ -2,9 +2,15 @@
 # assemble_bundle.sh -- stage, verify, and zip the Maldita Castilla MiSTer
 # release bundle from a built RBF + engine plus the repo's pinned sources.
 #
-# Usage: assemble_bundle.sh <rbf> <engine> <out_dir> <version>
+# Usage: assemble_bundle.sh <rbf> <engine> <wrapper> <out_dir> <version>
 #   rbf      built _Other/MalditaCastilla_YYYYMMDD.rbf
 #   engine   built armhf gmloader binary
+#   wrapper  built armhf MiSTer_Maldita (tools/mister-wrapper/build-hps.sh) --
+#            MiSTer.ini's `main=` target, what makes the Cores-browser entry
+#            start the engine. REQUIRED, not optional: releases up to v0.2.1
+#            shipped without it, so selecting the core from Cores -> _Other
+#            loaded the bitstream and started nothing, which is exactly what a
+#            broken build looks like.
 #   out_dir  output dir (created); zip + sha256sums.txt + bundle/ land here
 #   version  release version string (e.g. v1.0.0)
 #
@@ -16,9 +22,9 @@
 # test (see docs/superpowers/plans/2026-07-30-release-ci.md Task 4).
 set -euo pipefail
 
-[ $# -eq 4 ] || { echo "usage: $0 <rbf> <engine> <out_dir> <version>" >&2; exit 2; }
+[ $# -eq 5 ] || { echo "usage: $0 <rbf> <engine> <wrapper> <out_dir> <version>" >&2; exit 2; }
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-RBF="$1"; ENGINE="$2"; OUT="$3"; VERSION="$4"
+RBF="$1"; ENGINE="$2"; WRAPPER="$3"; OUT="$4"; VERSION="$5"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 GAMEDATA="$REPO/release/gamedata"
 
@@ -31,31 +37,58 @@ fail() { echo "ASSEMBLE FAIL: $*" >&2; exit 1; }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 
 # --- input gates -------------------------------------------------------------
-[ -f "$RBF" ]    || fail "RBF not found: $RBF"
-[ -f "$ENGINE" ] || fail "engine not found: $ENGINE"
+[ -f "$RBF" ]     || fail "RBF not found: $RBF"
+[ -f "$ENGINE" ]  || fail "engine not found: $ENGINE"
+[ -f "$WRAPPER" ] || fail "MiSTer_Maldita wrapper not found: $WRAPPER (build it with tools/mister-wrapper/build-hps.sh)"
 [ -d "$GAMEDATA" ] || fail "game data not found: $GAMEDATA"
 RBF_SIZE=$(wc -c < "$RBF")
 [ "$RBF_SIZE" -ge 1000000 ] || fail "RBF implausibly small ($RBF_SIZE bytes)"
 file "$ENGINE" | grep "ELF 32-bit" | grep -q "ARM" \
     || fail "engine is not a 32-bit ARM ELF: $(file "$ENGINE")"
+file "$WRAPPER" | grep "ELF 32-bit" | grep -q "ARM" \
+    || fail "wrapper is not a 32-bit ARM ELF: $(file "$WRAPPER")"
 
 # gmloader-next/CLAUDE.md: a bookworm base image produces GLIBC_2.34+ symbols
-# that MiSTer's Buildroot ld.so cannot resolve -- an unloadable engine with
+# that MiSTer's Buildroot ld.so cannot resolve -- an unloadable binary with
 # every OTHER gate (ELF arch, MISTER_BUILD symbol) still green. The engine's
 # validated bullseye cross-build ("Max GLIBC 2.29 (ok)", CLAUDE.md line 109)
 # is the ceiling actually exercised on-device; assert it here so a future
-# base-image bump fails loudly instead of shipping a dead engine.
+# base-image bump fails loudly instead of shipping something dead.
+#
+# Applied to the wrapper too, and there it is worse than a dead binary: MiSTer
+# only execs `main=` if FileExists() (user_io.cpp:1436), not if it LOADS, so an
+# unloadable MiSTer_Maldita is exec'd and dies, taking the OSD with it. It is
+# built from tools/mister-wrapper/Dockerfile.wrapper -- a different bullseye
+# image from the engine's, and therefore a second thing that can be bumped.
 GLIBC_CEILING="2.29"
 command -v strings >/dev/null 2>&1 \
-    || fail "strings not available -- cannot verify the engine's GLIBC ceiling"
-ENGINE_MAX_GLIBC=$(strings "$ENGINE" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
-    | sed 's/^GLIBC_//' | sort -V | tail -1)
-[ -n "$ENGINE_MAX_GLIBC" ] \
-    || fail "no GLIBC_* symbol versions found in $ENGINE -- cannot verify glibc ceiling"
-if [ "$(printf '%s\n%s\n' "$GLIBC_CEILING" "$ENGINE_MAX_GLIBC" | sort -V | tail -1)" != "$GLIBC_CEILING" ]; then
-    fail "engine requires GLIBC_$ENGINE_MAX_GLIBC > ceiling GLIBC_$GLIBC_CEILING -- " \
-         "MiSTer's Buildroot cannot load this (see gmloader-next/CLAUDE.md 'Mesa (soft GL for MISTER_NATIVE_VIDEO)')"
-fi
+    || fail "strings not available -- cannot verify GLIBC ceilings"
+check_glibc_ceiling() {
+    local what="$1" bin="$2" max
+    max=$(strings "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+        | sed 's/^GLIBC_//' | sort -V | tail -1)
+    [ -n "$max" ] \
+        || fail "no GLIBC_* symbol versions found in $bin -- cannot verify $what's glibc ceiling"
+    if [ "$(printf '%s\n%s\n' "$GLIBC_CEILING" "$max" | sort -V | tail -1)" != "$GLIBC_CEILING" ]; then
+        fail "$what requires GLIBC_$max > ceiling GLIBC_$GLIBC_CEILING -- " \
+             "MiSTer's Buildroot cannot load this (see gmloader-next/CLAUDE.md 'Mesa (soft GL for MISTER_NATIVE_VIDEO)')"
+    fi
+}
+check_glibc_ceiling engine  "$ENGINE"
+check_glibc_ceiling wrapper "$WRAPPER"
+
+# The wrapper is a Main_MiSTer build, so "it is an armhf ELF called
+# MiSTer_Maldita" is satisfied by a STOCK MiSTer renamed -- which would exec
+# fine, show the OSD, and never start the engine. The overlay's one job is the
+# maldita_hook.cpp fork, and the path it forks is a .rodata string that
+# survives stripping. Gate on that string: it proves both that the hook is in
+# this binary and that its target is the launch.sh this bundle stages.
+WRAPPER_FORKS="/media/fat/games/Maldita Castilla/launch.sh"
+# Process substitution, not `strings ... | grep -q`: -q exits on the first match
+# and SIGPIPEs strings, which under `set -o pipefail` fails the whole pipeline
+# on the binaries that DO contain the string.
+grep -qxF "$WRAPPER_FORKS" <(strings "$WRAPPER") \
+    || fail "wrapper has no '$WRAPPER_FORKS' string -- this is not the Maldita overlay build (stock Main_MiSTer renamed?), or the hook's target path changed without this gate"
 
 # --- stage the SD-card tree --------------------------------------------------
 BUNDLE="$OUT/bundle"
@@ -71,7 +104,27 @@ cp "$RBF" "$BUNDLE/_Other/"
 # invokes it — without it a bundle install loads the core and starts nothing.
 cp "$MALDITA/games/Maldita Castilla/launch.sh" "$BUNDLE/games/Maldita Castilla/"
 cp "$MALDITA/Scripts/MalditaCastilla.sh" "$BUNDLE/Scripts/"
-chmod +x "$BUNDLE/games/Maldita Castilla/launch.sh" "$BUNDLE/Scripts/MalditaCastilla.sh"
+# The second Scripts entry arms MiSTer.ini's `main=` at the wrapper below, so
+# the Cores-browser entry starts the engine as well as loading the bitstream.
+# It is a separate, explicit action and not something the extract does: a zip
+# cannot run code, and MiSTer.ini is the user's file (their video mode, their
+# inputs, every other core's settings). deploy.py makes the same edit on a
+# development device.
+cp "$MALDITA/Scripts/MalditaCastilla_CoresMenu.sh" "$BUNDLE/Scripts/"
+chmod +x "$BUNDLE/games/Maldita Castilla/launch.sh" \
+         "$BUNDLE/Scripts/MalditaCastilla.sh" \
+         "$BUNDLE/Scripts/MalditaCastilla_CoresMenu.sh"
+
+# The `main=` target itself, at the same absolute path deploy.py installs it
+# to. That path is written independently in two places -- the line the arming
+# script puts in MiSTer.ini, and deploy.py's MAIN_LINE -- and MiSTer resolves
+# it as an absolute path, so a mismatch is silent: FileExists() is false, no
+# exec happens, and the Cores entry just loads the bitstream. The assertion
+# below ties the staged binary to the script that will point at it.
+cp "$WRAPPER" "$GMDIR/MiSTer_Maldita"; chmod +x "$GMDIR/MiSTer_Maldita"
+WRAPPER_INSTALLED_AT="/media/fat/games/gmloader/MiSTer_Maldita"
+grep -qF "\"$WRAPPER_INSTALLED_AT\"" "$BUNDLE/Scripts/MalditaCastilla_CoresMenu.sh" \
+    || fail "Scripts/MalditaCastilla_CoresMenu.sh does not name $WRAPPER_INSTALLED_AT -- it would arm MiSTer.ini at a path this bundle does not install"
 
 # The write-combining mapping (mem_wc): the loader plus every prebuilt module
 # object we have. deploy.py picks the object by the device's `uname -r` and
@@ -142,10 +195,12 @@ EXPECTED=$(cat <<EOF
 README.md
 _Other/$RBF_NAME
 Scripts/MalditaCastilla.sh
+Scripts/MalditaCastilla_CoresMenu.sh
 games/Maldita Castilla/launch.sh
 games/Maldita Castilla/mem_wc_load.sh
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
+games/gmloader/MiSTer_Maldita
 games/gmloader/gmloader
 games/gmloader/gmloader.json
 games/gmloader/lib/armeabi-v7a/libstdc++.so
