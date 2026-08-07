@@ -57,11 +57,37 @@ mkdir -p "$LOGDIR"
 # Master_Daemon's discovery (see the header) is the actual fix rather than a
 # tighter guard here. What this still catches is the sequential case — a stale
 # engine from a previous session, or a second run of the Scripts entry.
+# SIGTERM FIRST, SIGKILL ONLY AS A BACKSTOP. This used to be a bare `killall -9`,
+# and -9 is uncatchable: the dying engine ran no teardown, so it left the blitter's
+# DDR window at 0x3B000000 exactly as it was mid-frame — a live doorbell
+# (C_SUBMIT != C_DONE) over a 256 KiB command ring full of its commands and a heap
+# full of its textures. None of that is cleared by load_core (which reconfigures the
+# FPGA, not DDR) or by the kernel (the range is outside System RAM), so the engine
+# we start next inherits a fabric already executing a batch nobody submitted. The
+# engine now handles SIGTERM (raster_backend_mfgpu.cpp, mf_fabric_teardown: wait for
+# the ack, zero the rings, park the control block) and its bring-up defends against
+# the -9 case anyway — but only one of those two is free, so take it.
+#
+# 3 s is the cap, not the cost: the teardown's own budget is 250 ms, so a healthy
+# engine is gone inside the first `sleep 1` — the same second the old bare -9 spent
+# anyway. Whole seconds on purpose: busybox `sleep` only takes fractions when built
+# with FEATURE_FANCY_SLEEP, and `killall gmloader` with no signal argument on
+# purpose too — busybox killall's `-TERM` spelling is not universal, and TERM is
+# already its default.
 # NOTE: busybox has NO pkill — use killall.
 if ps w | grep -q "[g]mloader -c"; then
     echo "maldita handler: reaping a pre-existing gmloader before relaunch" >&2
-    killall -9 gmloader 2>/dev/null
-    sleep 1
+    killall gmloader 2>/dev/null
+    n=0
+    while [ "$n" -lt 3 ] && ps w | grep -q "[g]mloader -c"; do
+        sleep 1
+        n=$((n + 1))
+    done
+    if ps w | grep -q "[g]mloader -c"; then
+        echo "maldita handler: gmloader ignored SIGTERM after 3s — SIGKILL" >&2
+        killall -9 gmloader 2>/dev/null
+        sleep 1
+    fi
 fi
 
 # Rotate the previous log.

@@ -167,7 +167,20 @@ cd "$GMDIR" || { echo "gmloader dir not found: $GMDIR" >&2; sleep 3; exit 1; }
 # Avoid a double-launch / ETXTBSY when re-running from the menu.
 # busybox has NO pkill — it fails silently and this guard would pass vacuously.
 # Match "[.]/gmloader" so neither grep nor this script matches itself.
-for p in $(ps | grep "[.]/gmloader" | sed -e "s/^ *//" -e "s/ .*//"); do
+#
+# SIGTERM first, -9 only as a backstop, for the reason spelled out in
+# games/Maldita Castilla/launch.sh: -9 is uncatchable, so the engine runs no
+# teardown and leaves the fabric's DDR window (live doorbell, full command ring,
+# full texture heap) for whatever starts next — and load_core does not clear it.
+gm_pids() { ps | grep "[.]/gmloader" | sed -e "s/^ *//" -e "s/ .*//"; }
+for p in $(gm_pids); do kill -TERM "$p" 2>/dev/null; done
+n=0
+while [ "$n" -lt 3 ] && [ -n "$(gm_pids)" ]; do
+    sleep 1
+    n=$((n + 1))
+done
+for p in $(gm_pids); do
+    echo "gmloader $p ignored SIGTERM after 3s — SIGKILL" >&2
     kill -9 "$p" 2>/dev/null
 done
 sleep 1
