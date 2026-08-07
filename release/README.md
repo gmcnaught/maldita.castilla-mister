@@ -4,6 +4,8 @@ FPGA-accelerated port of Locomalito's Maldita Castilla to the MiSTer
 (DE10-Nano): a GameMaker loader (gmloader) on the ARM HPS drives a custom
 FPGA blitter core.
 
+**The game is included.** Extract, launch, play.
+
 ## Install
 
 1. Extract this zip over the root of your MiSTer SD card (`/media/fat/`).
@@ -11,28 +13,51 @@ FPGA blitter core.
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — **the launcher: this is how you start it**
    - `games/Maldita Castilla/launch.sh` — engine launcher (run by the above)
-   - `games/gmloader/` — the game engine + GL runtime
-2. Add the game data (NOT included — see below).
-3. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
+   - `games/gmloader/` — the game engine, GL runtime, and the game data
+2. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
    core and starts the engine in one step.
 
-## Game data (required, not included)
+There is no separate download step and no game data to supply yourself.
 
-Maldita Castilla is freeware (Locomalito / Gryzor87) and the PortMaster port
-of it is public, so the data is free to obtain — it is just not shipped in
-this bundle. Source:
+## Game data, licence and credits
 
-  https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla
+*Maldita Castilla* © 2012 **Locomalito** — music by **Gryzor87**, cover art by
+**Marek Barej** — is licensed under [Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND
+4.0)](https://creativecommons.org/licenses/by-nc-nd/4.0/).
 
-Place:
+The game files in this bundle are redistributed **unmodified**, byte-for-byte
+from the public PortMaster port
+([`PortsMaster/PortMaster-New`](https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla)):
 
-- `malditacastilla.apk` at `games/gmloader/mygame.apk`
-  (rename it — `gmloader.json`'s `apk_path` expects that exact name)
-- `gamedata/game.droid` at `games/gmloader/saves/game.droid`
-- `gamedata/options.ini` at `games/gmloader/saves/options.ini`
-  (also created on first run if your APK contains it)
+| in this bundle | what it is |
+|---|---|
+| `games/gmloader/mygame.apk` | the port's `malditacastilla.apk`, renamed — `gmloader.json`'s `apk_path` expects exactly this name |
+| `games/gmloader/saves/game.droid` | the 49 MB GameMaker data file (the game) |
+| `games/gmloader/saves/options.ini` | the port's display-name config |
+| `games/gmloader/LICENSE.malditacastilla.txt` | the CC BY-NC-ND 4.0 licence text, as shipped with the game |
+| `games/gmloader/maldita-castilla-readme.txt` | Locomalito's own readme and credits |
 
-`games/gmloader/APKs/README.txt` repeats these steps.
+The FPGA blitter changes how those files are *rendered* at run time; it does
+not alter them, and no modified version of the game is distributed here.
+
+This release is free. **NonCommercial**: if you mirror or repackage it, that
+must stay non-commercial too. If you enjoy the game, support Locomalito at
+<https://locomalito.com>.
+
+`mygame.apk` additionally contains YoYo Games' GameMaker Android runner
+(`lib/armeabi-v7a/libyoyo.so`) and `libopenal.so`, which the CC licence does
+not cover — gmloader needs the runner to run the game, and it is included on
+the same footing as the public PortMaster port it comes from.
+
+The core, the engine and the blitter fabric are separate works under their own
+licences; see the project repository.
+
+## Updating an existing install
+
+Extracting over an existing install overwrites `games/gmloader/saves/game.droid`
+and `options.ini` with identical bytes. Your save files have different names and
+are not touched.
 
 ## How to launch it
 
@@ -62,4 +87,5 @@ instances at once):
     ./gmloader -c gmloader.json
 
 Verify file integrity against `sha256sums.txt` from the GitHub Release —
-FAT can truncate files on interrupted copies.
+FAT can truncate files on interrupted copies, and a truncated `game.droid` is
+a black screen with no other symptom.

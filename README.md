@@ -28,7 +28,7 @@ page](https://github.com/gmcnaught/maldita.castilla-mister/releases). Each
 tagged `v*` release publishes:
 
 - `MalditaCastilla-MiSTer-<tag>.zip` — the SD-card bundle (core `.rbf`, engine,
-  GL runtime closure, launcher)
+  GL runtime closure, launcher, **and the game itself**)
 - `MalditaCastilla_YYYYMMDD.rbf` — the core on its own, for updating in place
 - `sha256sums.txt` — checksums for both
 
@@ -39,19 +39,16 @@ tagged `v*` release publishes:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — the Scripts-menu launcher
    - `games/Maldita Castilla/launch.sh` — the engine launcher it runs
-   - `games/gmloader/` — the engine and its GL runtime
-2. Add the game data — it is **not** included here, but Maldita Castilla is
-   freeware (Locomalito / Gryzor87) and the PortMaster port is public. Source:
-   [`PortsMaster/PortMaster-New` →
-   `ports/maldita.castilla/maldita.castilla/`](https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla).
-   Take from it:
-   - `malditacastilla.apk` → `games/gmloader/mygame.apk` (rename it;
-     `gmloader.json`'s `apk_path` expects that exact name)
-   - `gamedata/game.droid` and `gamedata/options.ini` →
-     `games/gmloader/saves/` (which also holds your save data)
-3. Verify the copy against `sha256sums.txt` — FAT filesystems can silently
-   truncate files on an interrupted copy.
-4. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**.
+   - `games/gmloader/` — the engine, its GL runtime, and the game data
+     (`mygame.apk`, `saves/game.droid`, `saves/options.ini`)
+2. Verify the copy against `sha256sums.txt` — FAT filesystems can silently
+   truncate files on an interrupted copy, and a truncated `game.droid` shows up
+   as a black screen with no other symptom.
+3. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**.
+
+There is no separate game-data download. Re-extracting over an existing install
+rewrites `saves/game.droid` and `saves/options.ini` with identical bytes and
+leaves your save files alone.
 
 Launch from the **Scripts** menu, not the Cores menu: selecting the core alone
 loads the bitstream and starts no engine. No daemon is involved, and a leftover
@@ -98,3 +95,32 @@ This needs passwordless SSH to `root@<host>`. Always deploy through
 `deploy.py` (what the `make` targets call): it verifies artifact provenance,
 checksums the transfer, and restarts the engine correctly. Hand-launching
 `gmloader` afterwards leaves two engines contending for one control block.
+
+## Licensing and credits
+
+This repository — the FPGA core, the blitter fabric, and the tooling — is
+GPL-3.0 (`LICENSE`). The game it runs is not, and is not covered by that
+licence.
+
+*Maldita Castilla* © 2012 **Locomalito** — music by **Gryzor87**, cover art by
+**Marek Barej** — is licensed under [Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND
+4.0)](https://creativecommons.org/licenses/by-nc-nd/4.0/). Under that licence
+the release bundle ships the game **unmodified**, with attribution and the
+licence text alongside it. The blitter changes how the game is rendered at run
+time; it does not alter the distributed files.
+
+The game data lives in `release/gamedata/`, checked in so that a release and a
+`deploy.py` run need nothing but this checkout. It came from the public
+PortMaster port
+([`PortsMaster/PortMaster-New`](https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla));
+`release/gamedata/SOURCE.txt` records the exact upstream commit, the file
+mapping and the sha256s. Releases are free, and the NonCommercial term applies
+to anyone mirroring or repackaging them.
+
+`mygame.apk` also contains YoYo Games' GameMaker Android runner (`libyoyo.so`)
+and `libopenal.so`, which the CC licence does not cover; gmloader requires the
+runner, and it is redistributed on the same footing as the public PortMaster
+port it is taken from.
+
+If you enjoy the game, support Locomalito at <https://locomalito.com>.

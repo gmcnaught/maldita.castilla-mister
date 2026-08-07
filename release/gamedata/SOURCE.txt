@@ -1,0 +1,46 @@
+Maldita Castilla game data, checked into this repository so a release (and a
+`deploy.py` run) needs nothing but this checkout.
+
+LICENCE
+
+  Maldita Castilla (c) 2012 Locomalito. Music by Gryzor87, cover art by
+  Marek Barej. Licensed under Creative Commons
+  Attribution-NonCommercial-NoDerivatives 4.0 International:
+
+      https://creativecommons.org/licenses/by-nc-nd/4.0/
+
+  LICENSE.malditacastilla.txt here is the game's own copy of that licence and
+  maldita-castilla-readme.txt is Locomalito's readme with the credits; both
+  ship in the release bundle beside the game. These files are redistributed
+  UNMODIFIED. The FPGA blitter changes how the game is rendered at run time;
+  it does not alter anything here.
+
+  mygame.apk additionally contains YoYo Games' GameMaker Android runner
+  (lib/armeabi-v7a/libyoyo.so) and libopenal.so, which the CC licence does not
+  cover. gmloader requires the runner to run the game; it is redistributed on
+  the same footing as the public PortMaster port below.
+
+SOURCE
+
+  https://github.com/PortsMaster/PortMaster-New
+  ports/maldita.castilla/maldita.castilla @ 9fcbf7e318ed1f5967457d79c2e84c0b4dcfc4b9
+
+  upstream path                 -> file here
+  malditacastilla.apk           -> mygame.apk          (renamed; gmloader.json's
+                                                        apk_path expects this name)
+  gamedata/game.droid           -> game.droid
+  gamedata/options.ini          -> options.ini
+  LICENSE.malditacastilla.txt   -> LICENSE.malditacastilla.txt
+  gamedata/readme.txt           -> maldita-castilla-readme.txt
+
+  sha256 as committed (git already guarantees these; recorded so the bytes can
+  be matched against upstream without a clone):
+
+  b40d646b6d25b34e07fcfe5b93b2a191eaf7b8962791808186dda2dd328ca075  mygame.apk
+  30821c816eb623af041a5407897f06df5dbfb36786efd0c955f5d26fd53aa579  game.droid
+  735c10e22e63bcdba691a2c48862f774a0a61a45fbb52ef67bcb833e79a044c5  options.ini
+  f7f28b8c7a1af76b9874ca6d040e8b1eb6768fd1043106c9d315090ea96754e7  LICENSE.malditacastilla.txt
+  899d543057cba14f393d33c7352fd5f8c3986b23b47a5b29b34c8467be2055f3  maldita-castilla-readme.txt
+
+This file is NOT staged into the release bundle -- assemble_bundle.sh copies
+the five files above by name.

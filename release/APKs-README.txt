@@ -1,18 +1,30 @@
-Game data is NOT included in this bundle.
+Nothing needs to go in this folder.
 
-Maldita Castilla is freeware (Locomalito / Gryzor87) and the PortMaster
-port is public, so the data is free to obtain. Source:
+The game data ships with this bundle and is already installed:
+
+    games/gmloader/mygame.apk          the game APK (gmloader.json's
+                                       apk_path expects exactly this name)
+    games/gmloader/saves/game.droid    the 49 MB GameMaker data file
+    games/gmloader/saves/options.ini   the port's display-name config
+
+This folder exists only because gmloader looks for it. Leave it empty.
+
+LICENCE AND CREDITS
+
+Maldita Castilla (c) 2012 Locomalito, music by Gryzor87, cover art by
+Marek Barej. Licensed under Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0):
+
+    https://creativecommons.org/licenses/by-nc-nd/4.0/
+
+The licence text ships as games/gmloader/LICENSE.malditacastilla.txt and
+Locomalito's own readme as games/gmloader/maldita-castilla-readme.txt. The
+game files are redistributed UNMODIFIED, taken byte-for-byte from the public
+PortMaster port:
 
   https://github.com/PortsMaster/PortMaster-New/tree/main/ports/maldita.castilla/maldita.castilla
 
-From that folder:
+If you replace them yourself, use files from that source -- the bundle's
+sha256sums.txt records the exact bytes this release shipped.
 
-1. Place the APK ONE LEVEL UP from this folder, at:
-       games/gmloader/mygame.apk
-   (rename malditacastilla.apk -> mygame.apk; gmloader.json's
-   apk_path expects exactly "mygame.apk")
-2. Copy gamedata/game.droid and gamedata/options.ini into:
-       games/gmloader/saves/
-   (that directory also holds your save data)
-
-See the bundle root README.md for full install steps.
+See the bundle root README.md for install and launch steps.
