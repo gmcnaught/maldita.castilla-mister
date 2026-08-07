@@ -720,6 +720,20 @@ def main():
             scp_verified(host, launcher_src, "/media/fat/Scripts/MalditaCastilla.sh")
             ssh(host, "chmod 755 /media/fat/Scripts/MalditaCastilla.sh", check=True)
 
+        # The `main=` toggle, which is how a RELEASE BUNDLE arms what the block
+        # further down arms here (a zip extract cannot run code). Installed on
+        # development devices too, so the thing users get is the thing that was
+        # exercised — and so disarming does not require this script and an SSH
+        # session. It makes the same edit; running it is harmless either way.
+        coresmenu_src = REPO / "Scripts" / "MalditaCastilla_CoresMenu.sh"
+        if coresmenu_src.exists():
+            print("   installing the Scripts main= toggle")
+            ssh(host, "mkdir -p /media/fat/Scripts", check=True)
+            scp_verified(host, coresmenu_src,
+                         "/media/fat/Scripts/MalditaCastilla_CoresMenu.sh")
+            ssh(host, "chmod 755 /media/fat/Scripts/MalditaCastilla_CoresMenu.sh",
+                check=True)
+
         if args.takeover:
             # Written here, not baked into launch.sh, so arming survives a
             # handler redeploy and disarming is one file removal — including

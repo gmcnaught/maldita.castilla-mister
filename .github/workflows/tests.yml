@@ -16,6 +16,12 @@ name: Tests
 #                                 avoid shipping a stale RBF or one from a
 #                                 workflow_dispatch run that never built the
 #                                 Windows artifact.
+#   test_cores_menu_toggle.sh    Guards Scripts/MalditaCastilla_CoresMenu.sh,
+#                                 which edits the user's MiSTer.ini on device
+#                                 to arm the `main=` handoff. Its failure modes
+#                                 (mangling unrelated settings, accumulating a
+#                                 duplicate [Maldita Castilla] section) are only
+#                                 visible on hardware otherwise.
 #   test_assemble_bundle.sh      GATING. Guards the release bundle's
 #                                 exhaustive manifest check, the engine ELF
 #                                 arch / GLIBC-ceiling checks, and that the
@@ -32,7 +38,9 @@ name: Tests
 #                                 job below BUILDS a real engine first, the
 #                                 same recipe release.yml's build-engine job
 #                                 uses, so the skip path is never exercised
-#                                 here.
+#                                 here. It also requires a real MiSTer_Maldita
+#                                 (the `main=` wrapper), built the same way, for
+#                                 the same reason.
 #
 # No added dependencies: system python3 (stdlib unittest) and bash only,
 # matching the "no pytest, no deps" rule in scripts/tests/.
@@ -64,6 +72,9 @@ jobs:
       - name: scripts/lib/resolve_rbf.py tests
         run: python3 scripts/tests/test_resolve_rbf.py
 
+      - name: Scripts/MalditaCastilla_CoresMenu.sh tests
+        run: bash scripts/tests/test_cores_menu_toggle.sh
+
   assemble-bundle-test:
     name: assemble_bundle.sh (builds a real engine so the gate actually runs)
     runs-on: ubuntu-latest
@@ -84,6 +95,12 @@ jobs:
             -v "$PWD/external/gmloader-next:/src" -w /src \
             arm32v7/debian:bullseye-slim \
             bash .github/scripts/build_mister_arm.sh
+
+      - name: Build MiSTer_Maldita (same recipe as release.yml's build-wrapper)
+        # The assembler now requires the main= wrapper and gates it on its ELF
+        # arch, GLIBC ceiling and the maldita_hook string, so like the engine it
+        # has to be a real build here or the test's skip path swallows the gate.
+        run: bash tools/mister-wrapper/build-hps.sh
 
       - name: scripts/release/assemble_bundle.sh tests
         run: bash scripts/tests/test_assemble_bundle.sh

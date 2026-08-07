@@ -12,11 +12,15 @@ FPGA blitter core.
    It adds:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — **the launcher: this is how you start it**
+   - `Scripts/MalditaCastilla_CoresMenu.sh` — optional one-off setup, so the
+     Cores browser can start the game too (see below)
    - `games/Maldita Castilla/launch.sh` — engine launcher (run by the above)
    - `games/Maldita Castilla/mem_wc_load.sh` + `mem_wc-*.ko` — an optional
      kernel module that makes the engine's uploads to the FPGA ~10× faster
      (see below)
    - `games/gmloader/` — the game engine, GL runtime, and the game data
+   - `games/gmloader/MiSTer_Maldita` — an alternative MiSTer binary, used only
+     if you run the setup entry above; inert otherwise
 2. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
    core and starts the engine in one step.
 
@@ -64,10 +68,13 @@ are not touched.
 
 ## How to launch it
 
-Use the **Scripts → MalditaCastilla** entry. Selecting the core directly from
-the `_Other` Cores menu loads the bitstream but starts no engine — you get a
-black screen. That is expected: nothing on the device watches for the core to
-load.
+Use the **Scripts → MalditaCastilla** entry. It works as extracted and changes
+nothing on your system.
+
+Out of the box, selecting the core directly from the `_Other` Cores menu loads
+the bitstream but starts no engine — you get a black screen. That is expected:
+nothing watches for the core to load. The next section turns that on if you
+want it.
 
 No daemon or resident helper is needed, and none should be installed. Earlier
 releases relied on Frontier's **Master_Daemon** watching the loaded core's name
@@ -80,30 +87,53 @@ leftover `games/Maldita Castilla/_handler.sh`.**
 Nothing tears the engine down when you switch cores — exit the game from its
 own menu.
 
-### Why the Cores entry cannot start the game, and what it would take
+### Optional: starting the game from the Cores browser
 
-Selecting the core from **Cores → `_Other`** loads the bitstream and stops
-there. MiSTer's Cores browser lists only `.rbf`/`.mra`/`.mgl`, so a launcher
-script cannot appear in it, and the only per-core hook that can execute
-anything is `MiSTer.ini`'s `main=`.
+Run **Scripts → MalditaCastilla_CoresMenu** once. After that, selecting
+`MalditaCastilla_*.rbf` from **Cores → `_Other`** loads the core *and* starts
+the game. Run the same entry again to undo it. It takes effect on the next core
+load; no reboot.
+
+It prints what it did. Nothing else about the install changes, and
+**Scripts → MalditaCastilla** keeps working either way.
+
+#### What it changes, and why it is a separate step
+
+MiSTer's Cores browser lists only `.rbf`/`.mra`/`.mgl`, so a launcher script
+cannot appear in it. The one per-core hook that can execute anything is
+`MiSTer.ini`'s `main=`, and that file is yours — it holds your video mode, your
+input config and every other core's settings. Nothing here edits it without you
+asking, which is why this is an entry you select rather than something the
+extract does.
+
+The entry adds one section to `MiSTer.ini`, after backing the file up to
+`MiSTer.ini.bak.<timestamp>`:
+
+    [Maldita Castilla]
+    main=/media/fat/games/gmloader/MiSTer_Maldita
 
 **`main=` does not mean "also run this".** It names a **replacement for the
-`MiSTer` binary itself** — whatever you put there is what runs *instead of*
-MiSTer, and it inherits the job of loading cores, driving the OSD and serving
-input. Pointing it at `games/Maldita Castilla/launch.sh` therefore does not
-give you a launcher; it gives you a machine with no MiSTer running at all. Do
-not do it.
+`MiSTer` binary itself** — whatever you put there runs *instead of* MiSTer for
+this core, inheriting the job of loading cores, driving the OSD and serving
+input. Pointing it at a shell script gives you a machine with no MiSTer running
+at all; do not hand-write this line at anything but the binary above.
 
-Making this work needs a `MiSTer_Maldita` binary: a normal Main_MiSTer build
-with one hook that forks `launch.sh` after the FPGA readiness handshake. That
-ordering is the whole point — an earlier version that started the engine before
-the readiness check wedged 3 launches in 5 on hardware. The binary is not built
-for releases, so there is nothing to point `main=` at from a bundle install.
+`MiSTer_Maldita` is that binary: a normal Main_MiSTer build — upstream `main()`
+and scheduler verbatim — plus one call that forks `launch.sh` **after** the FPGA
+readiness handshake. That ordering is the whole point: an earlier build that
+started the engine before the readiness check wedged 3 launches in 5 on
+hardware, and the current one measured 0 in 5. MiSTer only runs a `main=`
+target that exists, so deleting `games/gmloader/MiSTer_Maldita` is also a way
+to switch this off, and the line left behind does nothing.
 
-If you want it, build it from the project repository (`tools/mister-wrapper/`)
-and deploy with `deploy.py`, which installs the binary and writes the
-`MiSTer.ini` section for you. Otherwise use **Scripts → MalditaCastilla**,
-which needs none of this.
+Two notes if you armed it:
+
+- Each release ships its core under a build-stamped name. When you update, an
+  older `_Other/MalditaCastilla_*.rbf` is still listed and still launchable —
+  delete the old ones so you cannot pick a stale core with a current engine.
+- The OSD you get after the handoff is that build of MiSTer, not the one your
+  SD card boots. If your MiSTer install is much newer or older, prefer
+  **Scripts → MalditaCastilla**.
 
 ## The `mem_wc` module (optional, and safe to ignore)
 
