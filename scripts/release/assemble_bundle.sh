@@ -96,8 +96,31 @@ chmod 644 "$BUNDLE/games/Maldita Castilla/mem_wc_load.sh" \
           "$BUNDLE/games/Maldita Castilla/"mem_wc-*.ko
 cp "$ENGINE" "$GMDIR/gmloader"; chmod +x "$GMDIR/gmloader"
 cp "$GMNEXT/gmloader.json" "$GMDIR/"
-cp "$GMNEXT/3rdparty/gles2-sw/libGLES_sw.so" "$GMDIR/"
 cp "$GMNEXT/runtime/mesa/"*.so* "$GMDIR/mesa/"
+# libGLES_sw.so is a COPY of the vendored Mesa libGLESv2.so.2, not a separate
+# artifact. The engine dlopens ./libGLES_sw.so as its bundled GLES library, and
+# the only build that works is this Mesa one, whose sole NEEDED is libglapi.so.0
+# (gmloader-next runtime/README.md).
+#
+# It used to come from 3rdparty/gles2-sw/. That build NEEDs libGLdispatch.so.0,
+# which is not in the closure, so every release from v0.1.0 to v0.2.0 died at
+# `Cannot load libGLES_sw.so`. Supplying libGLdispatch.so.0 as well does not
+# rescue it -- on device it then reports `OpenGL: version string (null)` and
+# SIGSEGVs inside the runner's GR_D3D_Init. Only the Mesa GLESv2 works.
+#
+# Copied from the staged mesa/ rather than from GMNEXT a second time, so the two
+# destinations are the same bytes by construction; the gate below is what makes
+# a future edit that reintroduces a separate source fail here instead of on a
+# user's SD card.
+cp "$GMDIR/mesa/libGLESv2.so.2" "$GMDIR/libGLES_sw.so"
+cmp -s "$GMDIR/libGLES_sw.so" "$GMDIR/mesa/libGLESv2.so.2" \
+    || fail "libGLES_sw.so must be byte-identical to mesa/libGLESv2.so.2"
+# The static-LLVM swrast_dri.so has libtinfo.so.6 as a direct NEEDED and MiSTer
+# does not ship one. Without it Mesa gets as far as an EGL context and then
+# `MESA-LOADER: failed to open swrast` -> `eglInitialize failed` -> dead engine,
+# so its absence is a silent-black-screen bug, not a degraded mode.
+[ -f "$GMDIR/mesa/libtinfo.so.6" ] \
+    || fail "runtime/mesa is missing libtinfo.so.6 -- swrast_dri.so cannot load without it"
 cp "$GMNEXT/lib/armeabi-v7a/libstdc++.so" "$GMDIR/lib/armeabi-v7a/"
 cp "$REPO/release/APKs-README.txt" "$GMDIR/APKs/README.txt"
 cp "$REPO/release/README.md" "$BUNDLE/README.md"
@@ -132,6 +155,7 @@ games/gmloader/mesa/libEGL.so.1
 games/gmloader/mesa/libGLESv2.so.2
 games/gmloader/mesa/libdrm.so.2
 games/gmloader/mesa/libglapi.so.0
+games/gmloader/mesa/libtinfo.so.6
 games/gmloader/mesa/swrast_dri.so
 games/gmloader/mygame.apk
 games/gmloader/saves/game.droid

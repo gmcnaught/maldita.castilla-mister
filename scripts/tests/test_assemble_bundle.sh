@@ -57,6 +57,7 @@ games/gmloader/mesa/libEGL.so.1
 games/gmloader/mesa/libGLESv2.so.2
 games/gmloader/mesa/libdrm.so.2
 games/gmloader/mesa/libglapi.so.0
+games/gmloader/mesa/libtinfo.so.6
 games/gmloader/mesa/swrast_dri.so
 games/gmloader/mygame.apk
 games/gmloader/saves/game.droid
@@ -92,5 +93,16 @@ while IFS= read -r ko; do
 done <<< "$KOS"
 grep -q 'mem_wc-\$(uname -r)\.ko' "$TMP/out/bundle/games/Maldita Castilla/mem_wc_load.sh" \
     || { echo "FAIL: bundled mem_wc_load.sh does not resolve the vermagic-named object"; exit 1; }
+
+# The GL runtime is the one thing here with no on-device fallback: get it wrong
+# and the engine never starts, which is exactly how v0.1.0 and v0.2.0 shipped.
+# Assert the two properties that were violated, not merely that files exist.
+GLDIR="$TMP/out/bundle/games/gmloader"
+cmp -s "$GLDIR/libGLES_sw.so" "$GLDIR/mesa/libGLESv2.so.2" \
+    || { echo "FAIL: libGLES_sw.so is not the vendored Mesa libGLESv2.so.2 (the gles2-sw build cannot run: NEEDs libGLdispatch.so.0, and SIGSEGVs even when it is supplied)"; exit 1; }
+cmp -s "$GLDIR/libGLES_sw.so" "$REPO/external/gmloader-next/3rdparty/gles2-sw/libGLES_sw.so" \
+    && { echo "FAIL: libGLES_sw.so is the 3rdparty/gles2-sw build -- that is the v0.1.0/v0.2.0 defect"; exit 1; }
+[ -f "$GLDIR/mesa/libtinfo.so.6" ] \
+    || { echo "FAIL: mesa/libtinfo.so.6 missing -- static-LLVM swrast_dri.so cannot load, engine dies at eglInitialize"; exit 1; }
 
 echo "PASS: $(printf '%s\n' "$ACTUAL" | wc -l | tr -d ' ')-file manifest, zip and checksums present, game data + mem_wc objects staged byte-identical"

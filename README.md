@@ -61,6 +61,12 @@ daemon firing alongside the Scripts entry on the same core load puts two engines
 on one FPGA control block. The bundle's own `README.md` repeats these steps and
 covers manual launch for troubleshooting.
 
+The Cores-menu entry cannot be made to start the engine by editing `MiSTer.ini`
+alone: `main=` names a **replacement for the `MiSTer` binary**, not an extra
+program to run, so it needs the `MiSTer_Maldita` build (`tools/mister-wrapper/`)
+that `deploy.py` installs and releases do not carry. Pointing `main=` at
+`launch.sh` leaves the device with no MiSTer at all.
+
 To update an existing install, copy just the release's `.rbf` into `_Other/`
 (replacing the old one) if the engine has not changed; otherwise re-extract the
 full zip.

@@ -80,6 +80,31 @@ leftover `games/Maldita Castilla/_handler.sh`.**
 Nothing tears the engine down when you switch cores — exit the game from its
 own menu.
 
+### Why the Cores entry cannot start the game, and what it would take
+
+Selecting the core from **Cores → `_Other`** loads the bitstream and stops
+there. MiSTer's Cores browser lists only `.rbf`/`.mra`/`.mgl`, so a launcher
+script cannot appear in it, and the only per-core hook that can execute
+anything is `MiSTer.ini`'s `main=`.
+
+**`main=` does not mean "also run this".** It names a **replacement for the
+`MiSTer` binary itself** — whatever you put there is what runs *instead of*
+MiSTer, and it inherits the job of loading cores, driving the OSD and serving
+input. Pointing it at `games/Maldita Castilla/launch.sh` therefore does not
+give you a launcher; it gives you a machine with no MiSTer running at all. Do
+not do it.
+
+Making this work needs a `MiSTer_Maldita` binary: a normal Main_MiSTer build
+with one hook that forks `launch.sh` after the FPGA readiness handshake. That
+ordering is the whole point — an earlier version that started the engine before
+the readiness check wedged 3 launches in 5 on hardware. The binary is not built
+for releases, so there is nothing to point `main=` at from a bundle install.
+
+If you want it, build it from the project repository (`tools/mister-wrapper/`)
+and deploy with `deploy.py`, which installs the binary and writes the
+`MiSTer.ini` section for you. Otherwise use **Scripts → MalditaCastilla**,
+which needs none of this.
+
 ## The `mem_wc` module (optional, and safe to ignore)
 
 `games/Maldita Castilla/` contains a small kernel module and a loader script
