@@ -27,7 +27,21 @@
 # frame rate and nothing else. Hence: no error checking, no exit path, and every
 # command below swallows its own stderr.
 
-_mwc_ko="$HANDLER_DIR/mem_wc.ko"
+# TWO NAMES, because two things install this file. deploy.py matches the
+# device's `uname -r` against tools/mister-mem-wc/prebuilt/ on the HOST and
+# writes the winner as plain mem_wc.ko. The release bundle cannot do that --
+# it is assembled once, for every device -- so it ships the prebuilt objects
+# under their vermagic names and the match happens here instead. Vermagic name
+# first so a deploy.py install onto a device that also has a bundle's objects
+# still gets the one deploy.py deliberately chose.
+#
+# On a kernel neither path has an object for, both tests fail and _mwc_ko names
+# a file that does not exist -- which is the intended outcome, not a gap. The
+# module carries one tree's vermagic and insmod refuses any other, so "no
+# object for this kernel" has to mean "say so and carry on" rather than "try
+# the 5.15.1 object on a 6.x kernel".
+_mwc_ko="$HANDLER_DIR/mem_wc-$(uname -r).ko"
+[ -f "$_mwc_ko" ] || _mwc_ko="$HANDLER_DIR/mem_wc.ko"
 _mwc_base=0x3B000000       # MF_DEV_PHYS_BASE  (raster_backend_mfgpu.cpp)
 _mwc_size=0x01000000       # MF_DEV_MAP_SIZE, 16 MiB
 
@@ -64,7 +78,15 @@ fi
 # that matters: the engine will log strongly-ordered and the reason is here,
 # not in the engine.
 if [ ! -e /dev/mem_wc ]; then
-    _mwc_note="unavailable -- DDR stays strongly-ordered"
+    # Split, because these two want different things from the reader: a missing
+    # object for this kernel is a build/packaging fact (nothing is wrong with
+    # the device), whereas insmod refusing an object we DID ship is the case
+    # worth a dmesg look.
+    if [ -f "$_mwc_ko" ]; then
+        _mwc_note="insmod $_mwc_ko failed (see dmesg) -- DDR stays strongly-ordered"
+    else
+        _mwc_note="no module for kernel $(uname -r) -- DDR stays strongly-ordered"
+    fi
 elif [ "$_mwc_ours" = 1 ]; then
     _mwc_note="loaded for [$_mwc_base, +$_mwc_size)"
 else

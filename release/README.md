@@ -13,6 +13,9 @@ FPGA blitter core.
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — **the launcher: this is how you start it**
    - `games/Maldita Castilla/launch.sh` — engine launcher (run by the above)
+   - `games/Maldita Castilla/mem_wc_load.sh` + `mem_wc-*.ko` — an optional
+     kernel module that makes the engine's uploads to the FPGA ~10× faster
+     (see below)
    - `games/gmloader/` — the game engine, GL runtime, and the game data
 2. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
    core and starts the engine in one step.
@@ -76,6 +79,24 @@ leftover `games/Maldita Castilla/_handler.sh`.**
 
 Nothing tears the engine down when you switch cores — exit the game from its
 own menu.
+
+## The `mem_wc` module (optional, and safe to ignore)
+
+`games/Maldita Castilla/` contains a small kernel module and a loader script
+that `launch.sh` sources before starting the engine. All it does is let the
+engine map the FPGA's command rings and texture heap **write-combining**
+instead of strongly-ordered — measured on a DE10-Nano, `memcpy` into that
+window goes from 80 MB/s to 814 MB/s.
+
+Nothing about it is required. The module is built out-of-tree against one
+MiSTer kernel, so it ships under that kernel's name (`mem_wc-5.15.1-MiSTer.ko`)
+and the loader only uses it if it matches your `uname -r`. On any other kernel
+nothing is loaded and the engine uses the ordinary mapping — you lose frame
+rate, not the game. The loader also leaves a `mem_wc` module alone if another
+core already loaded one. Which of those happened is the `mem_wc:` line in
+`/media/fat/logs/MalditaCastilla/maldita.log`.
+
+To opt out entirely, delete the two files, or set `GMLOADER_NO_WC=1`.
 
 ## Troubleshooting
 

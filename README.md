@@ -39,6 +39,9 @@ tagged `v*` release publishes:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — the Scripts-menu launcher
    - `games/Maldita Castilla/launch.sh` — the engine launcher it runs
+   - `games/Maldita Castilla/mem_wc_load.sh` + `mem_wc-<kernel>.ko` — the
+     optional write-combining DDR mapping; used only when the object matches
+     the device's `uname -r`, and worth ~10× on uploads to the fabric
    - `games/gmloader/` — the engine, its GL runtime, and the game data
      (`mygame.apk`, `saves/game.droid`, `saves/options.ini`)
 2. Verify the copy against `sha256sums.txt` — FAT filesystems can silently

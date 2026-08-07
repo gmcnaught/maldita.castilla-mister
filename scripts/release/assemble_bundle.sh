@@ -72,6 +72,28 @@ cp "$RBF" "$BUNDLE/_Other/"
 cp "$MALDITA/games/Maldita Castilla/launch.sh" "$BUNDLE/games/Maldita Castilla/"
 cp "$MALDITA/Scripts/MalditaCastilla.sh" "$BUNDLE/Scripts/"
 chmod +x "$BUNDLE/games/Maldita Castilla/launch.sh" "$BUNDLE/Scripts/MalditaCastilla.sh"
+
+# The write-combining mapping (mem_wc): the loader plus every prebuilt module
+# object we have. deploy.py picks the object by the device's `uname -r` and
+# installs the winner as plain mem_wc.ko; a bundle is assembled once for every
+# device, so it ships them all under their vermagic names and mem_wc_load.sh
+# does the match on-device.
+#
+# Both halves are needed or neither does anything: without this the bundle's
+# engine maps the fabric window strongly-ordered (~80 MB/s vs ~814).
+# Not shipping the objects is safe but slow, so the count is asserted below
+# rather than left to a glob that can quietly match nothing.
+MEMWC_KOS=()
+while IFS= read -r ko; do MEMWC_KOS+=("$ko"); done < <(
+    find "$REPO/tools/mister-mem-wc/prebuilt" -maxdepth 1 -name 'mem_wc-*.ko' \
+        | LC_ALL=C sort)
+[ "${#MEMWC_KOS[@]}" -ge 1 ] \
+    || fail "no tools/mister-mem-wc/prebuilt/mem_wc-*.ko to ship -- the bundle's engine would map DDR strongly-ordered"
+cp "$MALDITA/games/Maldita Castilla/mem_wc_load.sh" "$BUNDLE/games/Maldita Castilla/"
+cp "${MEMWC_KOS[@]}" "$BUNDLE/games/Maldita Castilla/"
+# Sourced, not executed; insmod'd, not run. 644 on both, matching deploy.py.
+chmod 644 "$BUNDLE/games/Maldita Castilla/mem_wc_load.sh" \
+          "$BUNDLE/games/Maldita Castilla/"mem_wc-*.ko
 cp "$ENGINE" "$GMDIR/gmloader"; chmod +x "$GMDIR/gmloader"
 cp "$GMNEXT/gmloader.json" "$GMDIR/"
 cp "$GMNEXT/3rdparty/gles2-sw/libGLES_sw.so" "$GMDIR/"
@@ -98,6 +120,7 @@ README.md
 _Other/$RBF_NAME
 Scripts/MalditaCastilla.sh
 games/Maldita Castilla/launch.sh
+games/Maldita Castilla/mem_wc_load.sh
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
 games/gmloader/gmloader
@@ -115,6 +138,15 @@ games/gmloader/saves/game.droid
 games/gmloader/saves/options.ini
 EOF
 )
+# The module objects are the one part of the manifest that is not a fixed list:
+# it grows a line per MiSTer kernel we have a prebuilt for. Derived from the
+# same glob that staged them, so an object added to prebuilt/ ships and is
+# accounted for without touching this list, while anything else appearing in
+# the tree still fails the comparison.
+for ko in "${MEMWC_KOS[@]}"; do
+    EXPECTED="$EXPECTED
+games/Maldita Castilla/$(basename "$ko")"
+done
 ACTUAL=$(cd "$BUNDLE" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
 if [ "$ACTUAL" != "$(printf '%s\n' "$EXPECTED" | LC_ALL=C sort)" ]; then
     echo "--- expected ---" >&2; printf '%s\n' "$EXPECTED" | LC_ALL=C sort >&2
