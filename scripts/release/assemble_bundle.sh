@@ -8,6 +8,9 @@
 #   out_dir  output dir (created); zip + sha256sums.txt + bundle/ land here
 #   version  release version string (e.g. v1.0.0)
 #
+# The game data comes from release/gamedata/ in this checkout -- see
+# release/gamedata/SOURCE.txt for its origin and licence.
+#
 # The manifest check is exhaustive: any file missing from -- or unexpected
 # in -- the staged tree fails the assembly. Run locally with stub inputs to
 # test (see docs/superpowers/plans/2026-07-30-release-ci.md Task 4).
@@ -17,6 +20,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 RBF="$1"; ENGINE="$2"; OUT="$3"; VERSION="$4"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
+GAMEDATA="$REPO/release/gamedata"
 
 # This repo now owns launch.sh directly; the engine and its whole runtime
 # closure (including Mesa) come from the one submodule.
@@ -29,6 +33,7 @@ sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasu
 # --- input gates -------------------------------------------------------------
 [ -f "$RBF" ]    || fail "RBF not found: $RBF"
 [ -f "$ENGINE" ] || fail "engine not found: $ENGINE"
+[ -d "$GAMEDATA" ] || fail "game data not found: $GAMEDATA"
 RBF_SIZE=$(wc -c < "$RBF")
 [ "$RBF_SIZE" -ge 1000000 ] || fail "RBF implausibly small ($RBF_SIZE bytes)"
 file "$ENGINE" | grep "ELF 32-bit" | grep -q "ARM" \
@@ -57,7 +62,7 @@ BUNDLE="$OUT/bundle"
 rm -rf "$BUNDLE"
 GMDIR="$BUNDLE/games/gmloader"
 mkdir -p "$BUNDLE/_Other" "$BUNDLE/games/Maldita Castilla" "$BUNDLE/Scripts" \
-         "$GMDIR/mesa" "$GMDIR/lib/armeabi-v7a" "$GMDIR/APKs"
+         "$GMDIR/mesa" "$GMDIR/lib/armeabi-v7a" "$GMDIR/APKs" "$GMDIR/saves"
 
 cp "$RBF" "$BUNDLE/_Other/"
 # launch.sh, NOT _handler.sh: that name is Master_Daemon's discovery predicate,
@@ -75,6 +80,17 @@ cp "$GMNEXT/lib/armeabi-v7a/libstdc++.so" "$GMDIR/lib/armeabi-v7a/"
 cp "$REPO/release/APKs-README.txt" "$GMDIR/APKs/README.txt"
 cp "$REPO/release/README.md" "$BUNDLE/README.md"
 
+# The game data. Maldita Castilla is CC BY-NC-ND 4.0 (Locomalito / Gryzor87),
+# so it ships unmodified with the game's own licence text and credits readme
+# beside it -- that is what the attribution and no-derivatives terms ask of us.
+# SOURCE.txt is deliberately not copied: it documents the files for anyone
+# reading the repo, and has no business on an SD card.
+cp "$GAMEDATA/mygame.apk"                  "$GMDIR/mygame.apk"
+cp "$GAMEDATA/game.droid"                  "$GMDIR/saves/game.droid"
+cp "$GAMEDATA/options.ini"                 "$GMDIR/saves/options.ini"
+cp "$GAMEDATA/LICENSE.malditacastilla.txt" "$GMDIR/LICENSE.malditacastilla.txt"
+cp "$GAMEDATA/maldita-castilla-readme.txt" "$GMDIR/maldita-castilla-readme.txt"
+
 # --- exhaustive manifest check ----------------------------------------------
 RBF_NAME=$(basename "$RBF")
 EXPECTED=$(cat <<EOF
@@ -83,15 +99,20 @@ _Other/$RBF_NAME
 Scripts/MalditaCastilla.sh
 games/Maldita Castilla/launch.sh
 games/gmloader/APKs/README.txt
+games/gmloader/LICENSE.malditacastilla.txt
 games/gmloader/gmloader
 games/gmloader/gmloader.json
 games/gmloader/lib/armeabi-v7a/libstdc++.so
 games/gmloader/libGLES_sw.so
+games/gmloader/maldita-castilla-readme.txt
 games/gmloader/mesa/libEGL.so.1
 games/gmloader/mesa/libGLESv2.so.2
 games/gmloader/mesa/libdrm.so.2
 games/gmloader/mesa/libglapi.so.0
 games/gmloader/mesa/swrast_dri.so
+games/gmloader/mygame.apk
+games/gmloader/saves/game.droid
+games/gmloader/saves/options.ini
 EOF
 )
 ACTUAL=$(cd "$BUNDLE" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)

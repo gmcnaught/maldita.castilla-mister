@@ -17,8 +17,11 @@ name: Tests
 #                                 workflow_dispatch run that never built the
 #                                 Windows artifact.
 #   test_assemble_bundle.sh      GATING. Guards the release bundle's
-#                                 exhaustive manifest check AND the engine ELF
-#                                 arch / GLIBC-ceiling checks in
+#                                 exhaustive manifest check, the engine ELF
+#                                 arch / GLIBC-ceiling checks, and that the
+#                                 CC BY-NC-ND game data from release/gamedata/
+#                                 is staged byte-identical (the bundle
+#                                 redistributes it unmodified) in
 #                                 scripts/release/assemble_bundle.sh --
 #                                 exactly what release.yml's publish step
 #                                 relies on. It exits 1 with no engine binary

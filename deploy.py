@@ -17,7 +17,9 @@ lays them into the device gmloader tree:
                 The lexicographically-last name wins (dates sort chronologically).
   2. ENGINE     gmloader-next armhf binary + gmloader.json (the loader that turns
                 Maldita's GLES draws into the fabric command ring).
-  3. CONTENT    the PortMaster game payload: the APK, the 49MB game.droid, options.ini.
+  3. CONTENT    the game payload: the APK, the 49MB game.droid, options.ini —
+                checked into this repo at release/gamedata/ (origin and licence:
+                release/gamedata/SOURCE.txt), so no sibling checkout is needed.
 
   (GL runtime) mesa/ + libGLES_sw.so + lib/armeabi-v7a/libstdc++.so are the
                 surfaceless-Mesa closure. They rarely change and are not tracked in
@@ -163,10 +165,12 @@ GMNEXT = _SUBMODULE_GM if (_SUBMODULE_GM / "Makefile.gmloader").is_file() else _
 ENGINE_DEFAULT  = GMNEXT / "build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
 WRAPPER_DEFAULT = REPO / "build/mister-wrapper-hps/MiSTer_Maldita"
 JSON_DEFAULT    = GMNEXT / "games/gmloader/gmloader.json"
-PORTMASTER      = SIBLINGS / "PortMaster-New/ports/maldita.castilla/maldita.castilla"
-APK_DEFAULT     = PORTMASTER / "malditacastilla.apk"
-DROID_DEFAULT   = PORTMASTER / "gamedata/game.droid"
-OPTIONS_DEFAULT = PORTMASTER / "gamedata/options.ini"
+# The game data is checked in (release/gamedata/, see its SOURCE.txt), so a
+# fresh clone can deploy without a PortMaster-New checkout beside it.
+GAMEDATA        = REPO / "release/gamedata"
+APK_DEFAULT     = GAMEDATA / "mygame.apk"
+DROID_DEFAULT   = GAMEDATA / "game.droid"
+OPTIONS_DEFAULT = GAMEDATA / "options.ini"
 RBF_GLOB        = str(REPO / "_Other" / "MalditaCastilla_*.rbf")
 
 
