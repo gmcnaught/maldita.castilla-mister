@@ -1150,7 +1150,8 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.disp_active    (reader_disp_active),   // [device-fix] displayed buffer -> comp_fb_dma back-buffer select
 	.dbg_blt        (blt_dbg_live),          // [wedge probe v4] -> 0x3A070004
 	.dbg_addr       (blt_mem_addr),          // [wedge probe v4] -> 0x3A070008
-	.dbg_diag       (arb_dbg_w)              // [wedge probe v6] -> 0x3BFB000C
+	.dbg_diag       (32'd0),                 // no writer on the SCANOUT_ONLY ship path
+	.dbg_arb        (arb_dbg_w)              // [wedge probe v6] -> byte 0x3BFB0024
 );
 
 assign VGA_DE  = tim_de;
