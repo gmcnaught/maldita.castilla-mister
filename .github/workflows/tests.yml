@@ -32,6 +32,16 @@ name: Tests
 #                                 the original criterion scored a real wedge as
 #                                 an idle engine, and an over-eager one would
 #                                 reload the core out from under a paused game.
+#   test_launch_single_instance.sh
+#                                 Guards launch.sh's launch mutex. With `main=`
+#                                 armed -- the default -- the Scripts entry and
+#                                 the main= wrapper both fire on one core load
+#                                 and, before the lock, both started an engine:
+#                                 two gmloader processes on one fabric control
+#                                 block (measured on .81 2026-08-08). Also pins
+#                                 the two ways a lock goes wrong: blocking a
+#                                 legitimate relaunch, and deadlocking on a
+#                                 stale lock left by a launcher that died.
 #   test_assemble_bundle.sh      GATING. Guards the release bundle's
 #                                 exhaustive manifest check, the engine ELF
 #                                 arch / GLIBC-ceiling checks, and that the
@@ -87,6 +97,9 @@ jobs:
 
       - name: launch.sh fabric recovery gate tests
         run: bash scripts/tests/test_launch_fabric_gate.sh
+
+      - name: launch.sh single-instance lock tests
+        run: bash scripts/tests/test_launch_single_instance.sh
 
   assemble-bundle-test:
     name: assemble_bundle.sh (builds a real engine so the gate actually runs)
