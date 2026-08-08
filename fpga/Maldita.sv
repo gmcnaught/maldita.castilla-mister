@@ -597,7 +597,7 @@ wire [31:0] blt_dbg_live;
 // means its read COMMAND is never accepted -- so the answer is in the arbiter's
 // grant gating (rdr_idle), not in the blitter. See ddr_blitter_arb's dbg assign
 // for the field layout.
-wire [31:0] arb_dbg_w;
+wire [15:0] arb_dbg_w;
 wire  [7:0] arb_ddr_burstcnt;
 wire [28:0] arb_ddr_addr;
 wire        arb_ddr_rd;
@@ -782,7 +782,7 @@ ddr_blitter_arb #(.ENABLE(1'b1)) blitter_arb
 	.ddram_din        (arb_ddr_din),
 	.ddram_be         (arb_ddr_be),
 	.ddram_we         (arb_ddr_we),
-	.dbg              (arb_dbg_w)    // [wedge probe v6] -> dbg_diag -> 0x3BFB000C
+	.dbg              (arb_dbg_w)    // [wedge probe v6] -> beacon qword high half
 );
 
 // --- Task 4: VRAM demux — route blitter mem_* by address -----------------
@@ -1151,7 +1151,7 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.dbg_blt        (blt_dbg_live),          // [wedge probe v4] -> 0x3A070004
 	.dbg_addr       (blt_mem_addr),          // [wedge probe v4] -> 0x3A070008
 	.dbg_diag       (32'd0),                 // no writer on the SCANOUT_ONLY ship path
-	.dbg_arb        (arb_dbg_w)              // [wedge probe v6] -> byte 0x3BFB0024
+	.dbg_arb        (arb_dbg_w)              // [wedge probe v6] -> 0x3BFB0010[31:16]
 );
 
 assign VGA_DE  = tim_de;

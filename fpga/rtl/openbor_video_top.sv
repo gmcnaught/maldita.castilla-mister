@@ -79,7 +79,7 @@ module openbor_video_top (
     input  wire [31:0] dbg_blt,
     input  wire [31:0] dbg_addr,  // blitter mem_addr -> 0x3A070008 (stuck read addr)
     input  wire [31:0] dbg_diag,  // #34 capture-miss diagnostic (no ship writer)
-    input  wire [31:0] dbg_arb    // [wedge probe v6] arbiter state -> 0x3BFB0024
+    input  wire [15:0] dbg_arb    // [wedge probe v6] arbiter state -> 0x3BFB0010[31:16]
 );
 
 // -- Timing Generator --------------------------------------------------

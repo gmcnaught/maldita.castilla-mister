@@ -119,10 +119,11 @@ module openbor_video_reader #(
     // delivered". [31:16]=dst_dready beats delivered, [15:8]=delivered-but-missed
     // events, [0]=missed-ever sticky.
     input  wire [31:0] dbg_diag,
-    // [wedge probe v6] ddr_blitter_arb grant/queue state -> ARB_ADDR
-    // (byte 0x3BFB0024). Separate from dbg_diag because dbg_diag's only writer,
-    // ST_WRITE_DBGA, is unreachable on the SCANOUT_ONLY ship path.
-    input  wire [31:0] dbg_arb
+    // [wedge probe v6] ddr_blitter_arb grant/queue state, published in the top
+    // half of the beacon qword's low word. Separate from dbg_diag because
+    // dbg_diag's only writer, ST_WRITE_DBGA, is unreachable on the
+    // SCANOUT_ONLY ship path and so never runs in a shipping build.
+    input  wire [15:0] dbg_arb
 );
 
 // DDR3 byte enable (always all bytes)
@@ -195,17 +196,6 @@ localparam [28:0] VSYNC_ADDR      = FB_QW_BASE + 29'h0E000; // debug vblank-coun
 //   same sentinel-clean tail the VSYNC/beacon probes already own; qwords +0/+1/+2 of
 //   VSYNC_ADDR are taken (vsync, dbg_addr/dbg_diag, beacon), +3 was spare.
 localparam [28:0] SCANFRM_ADDR    = VSYNC_ADDR + 29'd3;     // = byte 0x3BFB0018
-// [wedge probe v6] ddr_blitter_arb state, published beside the beacon.
-//   byte 0x3BFB0020 = beacon_cnt (again, so a reader can tell a fresh sample
-//                     from a stale one), 0x3BFB0024 = dbg_arb.
-// It rides the BEACON chain, not ST_WRITE_DBGA, and that is the whole point:
-// ST_WRITE_DBGA is only reached from ST_WRITE_VSYNC, which SCANOUT_ONLY ship
-// builds skip (see the ternary at the end of the JOY3 chain). So dbg_addr and
-// dbg_diag have NO writer on the shipping path, and reading 0x3BFB0008/000C on
-// a device returns whatever was in DDR — measured 2026-08-07 as a constant
-// 0x21000000 / 0x72746C61 ("altr") across seven reboots, which decodes as
-// plausible-looking nonsense. The beacon chain is unconditional, so this is.
-localparam [28:0] ARB_ADDR        = VSYNC_ADDR + 29'd4;     // = byte 0x3BFB0020
 // [reader-health instrument] SOLARUS_DBG_PROBES-only per-frame reader-health record.
 // Placed in the tail (byte 0x3BFF0000) that device sentinels proved clean/unused —
 // well above BUF1-end (0x3BFA5840), clear of ctrl/joy/buffers, so a devmem peek can
@@ -364,7 +354,6 @@ localparam [4:0] ST_WRITE_VSYNC      = 5'd21;  // vblank counter writeback (anti
 localparam [4:0] ST_WRITE_DBGA       = 5'd22;  // [wedge probe v4] blitter mem_addr writeback
 localparam [4:0] ST_BEACON           = 5'd23;  // [wedge probe v5] timer-driven liveness beacon
 localparam [4:0] ST_WRITE_SCANFRM    = 5'd24;  // [Phase 3 B2] scanout frame counter + period
-localparam [4:0] ST_BEACON_ARB       = 5'd25;  // [wedge probe v6] arbiter state publish
 
 // [wedge probe v5] f2h liveness beacon: every ~42.6ms (2^22 cyc) publish
 // {dbg_blt, beacon_cnt} to VSYNC_ADDR+2 (byte 0x3A070010) from ST_IDLE. Timer-
@@ -666,24 +655,20 @@ always @(posedge ddr_clk) begin
             ST_BEACON: begin
                 if (!ddr_busy) begin
                     ddr_addr       <= VSYNC_ADDR + 29'd2;   // byte 0x3A070010
-                    ddr_din        <= {dbg_blt, beacon_cnt};
+                    // [wedge probe v6] beacon_cnt only needs its low half to be a
+                    // liveness/freshness signal, so the top half of the low word
+                    // carries the arbiter state. Same single write this state
+                    // always did — adding a state and a second write instead made
+                    // the wedge stop reproducing (0/15 vs ~36% on the release
+                    // bitstream), so the instrument must not grow.
+                    //   0x3BFB0010 [15:0]  beacon_cnt  (freshness stamp)
+                    //   0x3BFB0010 [31:16] arbiter     (rdr_out/xq_level/idle/flush)
+                    //   0x3BFB0014         dbg_blt     (unchanged)
+                    ddr_din        <= {dbg_blt, dbg_arb, beacon_cnt[15:0]};
                     ddr_burstcnt   <= 8'd1;
                     ddr_we         <= 1'b1;
                     beacon_cnt     <= beacon_cnt + 32'd1;
                     beacon_pending <= 1'b0;
-                    state          <= ST_BEACON_ARB;  // publish the arbiter word too
-                end
-            end
-
-            // [wedge probe v6] ddr_blitter_arb grant/queue state. Chained off the
-            // beacon so it inherits the one publish path that runs in ship builds,
-            // and carries beacon_cnt alongside so a stale sample is obvious.
-            ST_BEACON_ARB: begin
-                if (!ddr_busy) begin
-                    ddr_addr       <= ARB_ADDR;
-                    ddr_din        <= {dbg_arb, beacon_cnt};
-                    ddr_burstcnt   <= 8'd1;
-                    ddr_we         <= 1'b1;
                     state          <= ST_POLL_CTRL;   // POLL-anchored (IDLE starves)
                 end
             end
