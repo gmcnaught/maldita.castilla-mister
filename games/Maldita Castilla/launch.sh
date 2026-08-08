@@ -65,8 +65,10 @@ LOGDIR="${MALDITA_LOGDIR:-/media/fat/logs/MalditaCastilla}"
 # The arbiter grants the blitter only when rdr_idle (rdr_out == 0), so a reader
 # outstanding-beat count that never returns to zero locks the blitter out
 # permanently, and `flush` cannot rescue it because fquiet is reset by ANY
-# arriving beat. Confirming that directly is what probe v6 (arbiter dbg ->
-# 0x3BFB000C) was added for.
+# arriving beat. Probe v6 (arbiter state in 0x3BFB0010[31:16]) confirmed exactly
+# that on device: rdr_out=1 with an EMPTY expectation queue. Fixed in the
+# arbiter as of v0.3.2 by resyncing those counts to the queue; this gate remains
+# the safety net.
 #
 # Measured on .62 2026-08-07 with the v0.3.0 bundle: 1 wedge in 3 reboot->launch
 # trials on this entry point. Confirmed fabric-side, not ours — fabric_probe
@@ -118,16 +120,95 @@ HANDLER_DIR="$(dirname "$HANDLER_SELF")"
 cd "$GAMEDIR" || exit 1
 mkdir -p "$LOGDIR"
 
+# ── MUTUAL EXCLUSION ─────────────────────────────────────────────────────────
+# TWO LAUNCHERS ON ONE CORE LOAD IS THE DEFAULT CONFIGURATION, not an exotic
+# case. With `main=` armed (deploy.py arms it, and so does the CoresMenu entry),
+# starting from Scripts -> MalditaCastilla runs BOTH entry points off the same
+# load: the Scripts entry writes load_core and then execs this script, while
+# MiSTer execs MiSTer_Maldita for the core, which forks this script too.
+# Measured on .81 2026-08-08, deterministically from MENU: engines=2, two
+# gmloader pids on one fabric control block — the dual-engine corruption
+# previously seen as C_DONE running BACKWARDS (0x23E -> 0x224).
+#
+# The `ps | grep` reap below CANNOT fix this and never could: it is check-then-
+# act, so both launchers look, both see nothing, and both proceed. Only an
+# atomic claim works. `mkdir` is atomic and available in busybox: exactly one
+# racer creates the directory, the loser gets a non-zero exit and steps aside.
+#
+# The loser exits 0, not 1 — it is not an error for the other entry point to
+# have won, and a non-zero exit here would show up as a failed Scripts entry.
+# The lock is claimed and NEVER explicitly released. Releasing it is what makes
+# it a timing heuristic instead of a mutex: whoever releases first re-opens the
+# window, and the loser only stands down if it happens to look while the lock
+# exists. (Written that way first; the concurrent-launch test caught it, because
+# with a stubbed `sleep` the winner finished its startup before the loser
+# looked. On hardware it "worked" only because the readiness wait is slow.)
+#
+# Instead, ownership is decided by FRESHNESS. A competing launcher from the same
+# core load appears within a second or two, so a lock younger than
+# MALDITA_LOCK_FRESH_S means "someone else is mid-launch right now" -> stand
+# down. An older lock means this is a deliberate relaunch (the user ran the
+# Scripts entry again), which must proceed and let the reap below restart the
+# engine -- so it is taken over, not obeyed.
+#
+# Age prefers /proc/uptime over `date`: it is monotonic, so an NTP step or a
+# clock set during boot cannot make a fresh lock look ancient (or a stale one
+# look current). `date +%s` is the fallback for hosts without /proc, which is
+# only the test harness -- MiSTer always has it.
+#
+# Liveness uses `kill -0`, not `[ -d /proc/$pid ]`: the /proc form is
+# Linux-only and silently reports every owner as dead where /proc is absent,
+# which turns "stand down" into "take over" and reopens the double launch. The
+# host test caught exactly that.
+#
+# NOTE: `exec` KEEPS THE PID, so after the exec below the lock's pid is the
+# engine's. That is why liveness alone cannot decide this -- a live owner is the
+# normal state while the game runs, not evidence of a competing launcher.
+LOCKDIR="${MALDITA_LOCKDIR:-/tmp/maldita-launch.lock}"
+LOCK_FRESH_S="${MALDITA_LOCK_FRESH_S:-30}"
+now_s() {
+    if [ -r /proc/uptime ]; then read -r u _ < /proc/uptime && echo "${u%.*}"
+    else date +%s
+    fi
+}
+pid_alive() { kill -0 "$1" 2>/dev/null; }
+
+lock_claim() { echo "$$ $(now_s)" > "$LOCKDIR/owner"; }
+
+if mkdir "$LOCKDIR" 2>/dev/null; then
+    lock_claim
+else
+    # mkdir is atomic but writing the owner file is not, so a loser can arrive
+    # in between and see an empty lock. Give the winner a moment to finish
+    # claiming before concluding the lock is abandoned — otherwise this narrow
+    # window reopens the exact double-launch the lock exists to stop.
+    owner=""; claimed_at=0
+    for _try in 1 2; do
+        read -r owner claimed_at _ < "$LOCKDIR/owner" 2>/dev/null && [ -n "$owner" ] && break
+        sleep 1
+    done
+    age=$(( $(now_s) - ${claimed_at:-0} ))
+    # `owner = $$` means WE hold it: the recovery gate re-execs this script to
+    # restart the engine, and exec preserves the pid, so the new instance finds
+    # a fresh lock owned by itself. Standing down there would leave the core
+    # reconfigured with no engine — the gate would "recover" into a black
+    # screen. Re-claim and carry on.
+    if [ -n "$owner" ] && [ "$owner" != "$$" ] && pid_alive "$owner" \
+       && [ "$age" -ge 0 ] && [ "$age" -lt "$LOCK_FRESH_S" ]; then
+        echo "maldita handler: another launcher (pid $owner, ${age}s ago) owns this core load — standing down" >&2
+        exit 0
+    fi
+    echo "maldita handler: taking over launch lock (owner ${owner:-unknown}, age ${age}s)" >&2
+    lock_claim
+fi
+
 # Singleton guard. If a previous engine is still alive, a second gmloader
 # fights the first for the fabric and exits 255. Reap any survivor before
 # starting ours.
 #
-# This is check-then-act and therefore NOT a mutual exclusion: two launchers
-# started by the same core load both reach this point before either has exec'd,
-# both see nothing, and both proceed. That race is why staying out of
-# Master_Daemon's discovery (see the header) is the actual fix rather than a
-# tighter guard here. What this still catches is the sequential case — a stale
-# engine from a previous session, or a second run of the Scripts entry.
+# Still needed WITH the lock above, which only serialises concurrent launchers:
+# this catches the sequential case — a stale engine from a previous session, or
+# a second run of the Scripts entry minutes later.
 # SIGTERM FIRST, SIGKILL ONLY AS A BACKSTOP. This used to be a bare `killall -9`,
 # and -9 is uncatchable: the dying engine ran no teardown, so it left the blitter's
 # DDR window at 0x3B000000 exactly as it was mid-frame — a live doorbell
