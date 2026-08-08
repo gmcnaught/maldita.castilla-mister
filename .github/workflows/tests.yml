@@ -22,6 +22,16 @@ name: Tests
 #                                 (mangling unrelated settings, accumulating a
 #                                 duplicate [Maldita Castilla] section) are only
 #                                 visible on hardware otherwise.
+#   test_launch_fabric_gate.sh   Guards launch.sh's frame-1 fabric wedge
+#                                 recovery gate: that a healthy or merely idle
+#                                 fabric is left alone, that a frozen C_DONE
+#                                 with work still outstanding IS caught, that
+#                                 recovery is capped, and that under `main=` it
+#                                 hands off rather than starting a second
+#                                 engine. The first two are the ones that bite:
+#                                 the original criterion scored a real wedge as
+#                                 an idle engine, and an over-eager one would
+#                                 reload the core out from under a paused game.
 #   test_assemble_bundle.sh      GATING. Guards the release bundle's
 #                                 exhaustive manifest check, the engine ELF
 #                                 arch / GLIBC-ceiling checks, and that the
@@ -74,6 +84,9 @@ jobs:
 
       - name: Scripts/MalditaCastilla_CoresMenu.sh tests
         run: bash scripts/tests/test_cores_menu_toggle.sh
+
+      - name: launch.sh fabric recovery gate tests
+        run: bash scripts/tests/test_launch_fabric_gate.sh
 
   assemble-bundle-test:
     name: assemble_bundle.sh (builds a real engine so the gate actually runs)
