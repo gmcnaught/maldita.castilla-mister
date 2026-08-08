@@ -73,7 +73,18 @@ FABRIC_RETRY_MARK="${MALDITA_RETRY_MARK:-/tmp/maldita_fabric_retry}"
 MISTER_CMD="${MALDITA_MISTER_CMD:-/dev/MiSTer_cmd}"
 CORENAME_FILE="${MALDITA_CORENAME_FILE:-/tmp/CORENAME}"
 MENU_RBF="${MALDITA_MENU_RBF:-/media/fat/menu.rbf}"
-FABRIC_MAX_RETRIES="${MALDITA_FABRIC_RETRIES:-2}"
+# 4, not 2. A reconfigure clears the jam but not reliably on the first try: the
+# v0.3.1 bundle wedged on a reboot trial, both attempts failed, the gate gave up
+# — and a single further reconfigure by hand brought it straight back
+# (`bring-up ok`, C_DONE advancing). So the cap, not the remedy, was what left a
+# dead picture on screen.
+#
+# Bounded on purpose rather than "retry until it works": each attempt reloads
+# the core, so an unbounded loop on a genuinely dead fabric would keep yanking
+# the machine between MENU and this core forever, with no way to reach the OSD.
+# 4 attempts is ~2 minutes worst case before it gives up and leaves the engine
+# running.
+FABRIC_MAX_RETRIES="${MALDITA_FABRIC_RETRIES:-4}"
 FABRIC_SUBMIT_WAIT_S="${MALDITA_FABRIC_SUBMIT_WAIT_S:-60}"   # engine start -> first submits
 FABRIC_SAMPLE_S="${MALDITA_FABRIC_SAMPLE_S:-8}"              # C_DONE observation window
 RBF_GLOB="${MALDITA_RBF_GLOB:-/media/fat/_Other/MalditaCastilla_*.rbf}"
