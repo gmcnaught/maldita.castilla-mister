@@ -4,8 +4,10 @@
 # Runs the real launch.sh against a sandbox tree with stubbed busybox/ps/
 # killall/pidof/sleep, so the decision logic is exercised without a DE10-Nano.
 # What it does NOT cover is whether a reconfigure actually clears the wedge —
-# that is a fabric property and only the device can answer it (measured on .62
-# 2026-08-07: gate fired on 2 of 3 wedged boots, both recovered).
+# that is a fabric property and only the device can answer it. Measured on .62
+# 2026-08-07 across 10 reboot trials: the gate fired on 4, and recovered 3. The
+# fourth exhausted a cap of 2 and gave up, and one further reconfigure by hand
+# then fixed it — which is why the shipped cap is 4 and why case 8 pins it.
 #
 # The idle-vs-wedged pair below is the point of this file. The gate originally
 # tested "C_SUBMIT advancing while C_DONE is frozen", which scores a genuinely
@@ -181,7 +183,15 @@ run_launch
 log | grep -q "starting unsupervised" || fail "case 7: no unsupervised note logged"
 rm -rf "$SB"
 
+# --- case 8: the shipped default cap ----------------------------------------
+# Every case above pins MALDITA_FABRIC_RETRIES so the cap under test is known,
+# which means none of them would notice the default changing. It matters: with
+# the default at 2, a v0.3.1 reboot trial exhausted both attempts and gave up on
+# a fabric that a single further reconfigure fixed.
+grep -qE 'MALDITA_FABRIC_RETRIES:-4\}' "$LAUNCH" \
+    || fail "case 8: default retry cap is no longer 4 (2 was measured too low to recover)"
+
 if [ "$FAILED" -eq 0 ]; then
-    echo "PASS: healthy no-op, idle vs wedged C_DONE, SOFT-FAILED recovery, retry cap, main= handoff, missing devmem"
+    echo "PASS: healthy no-op, idle vs wedged C_DONE, SOFT-FAILED recovery, retry cap + default, main= handoff, missing devmem"
 fi
 exit "$FAILED"
