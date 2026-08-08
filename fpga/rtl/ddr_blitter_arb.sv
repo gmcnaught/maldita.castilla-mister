@@ -82,7 +82,14 @@ module ddr_blitter_arb #(
     output reg         ddram_we,
     // DEBUG (#34): {reader-beats-outstanding, state[1:0]} — grant-FSM state plus
     // whether the reader still has read beats in flight (lend gate closed).
-    output wire  [2:0] dbg
+    // [wedge probe v6] Widened from 3 bits ({~rdr_idle, state[1:0]}) so the
+    // grant-starvation wedge can be read on device. Published to dbg_diag ->
+    // byte 0x3BFB000C. Every TB leaves this unconnected; nothing consumed the
+    // old encoding. Layout — see the assign at the bottom of this file:
+    //   [2:0] state  [3] rdr_idle  [13:4] rdr_out  [23:14] blt_out
+    //   [27:24] xq_level  [28] rdr_rd  [29] rdr_we  [30] ddram_busy
+    //   [31] flush_sticky
+    output wire [31:0] dbg
 );
     // gate the blitter off entirely when disabled
     wire b_rd = ENABLE & blt_rd;
@@ -238,7 +245,28 @@ module ddr_blitter_arb #(
         endcase
     end
 
-    assign dbg       = {~rdr_idle, state[1:0]};
+    // [wedge probe v6] Grant-starvation post-mortem, published to 0x3BFB000C.
+    //
+    // Device capture 2026-08-07 (.62) named the wedge as blitter_top parked in
+    // S_RD_WAIT with rd_issued=0 — i.e. waiting for its read COMMAND to be
+    // accepted, not for read DATA. mem_busy can only stay high forever if this
+    // arbiter never enters G_BLT, and the grant condition is gated on
+    // rdr_idle (rdr_out == 0). rdr_out is therefore the value this probe
+    // exists to read: stuck non-zero while the reader keeps working (the
+    // liveness beacon kept climbing) locks the blitter out permanently, and
+    // `flush` cannot rescue it because fquiet is reset by ANY arriving beat.
+    //
+    // blt_out and xq_level come along to separate "expectation leaked" from
+    // "counter leaked": a stuck rdr_out with an EMPTY queue means the count is
+    // wrong, not that a response is genuinely outstanding.
+    reg flush_sticky;
+    always @(posedge clk) begin
+        if (reset)      flush_sticky <= 1'b0;
+        else if (flush) flush_sticky <= 1'b1;
+    end
+    wire [3:0] xq_level = {1'b0, xq_wr[XQ_AW-1:0]} - {1'b0, xq_rd[XQ_AW-1:0]};
+    assign dbg = {flush_sticky, ddram_busy, rdr_we, rdr_rd,
+                  xq_level, blt_out, rdr_out, rdr_idle, state};
     // Beat routing is by EXPECTATION OWNER, not grant state: consumers AND these
     // with ddram_dout_ready, so each must be high exactly when the arriving beat
     // belongs to that master — regardless of who currently holds the bus grant.

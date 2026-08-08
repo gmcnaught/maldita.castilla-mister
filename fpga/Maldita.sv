@@ -592,6 +592,12 @@ wire use_nv = NATIVE_VID;
 // live mem_addr, published by the READER (which survives a blitter park) into
 // the vsync-writeback words: 0x3A070004 = blt_dbg, 0x3A070008 = blt mem_addr.
 wire [31:0] blt_dbg_live;
+// [wedge probe v6] ddr_blitter_arb grant/queue state -> dbg_diag -> 0x3BFB000C.
+// The device wedge is blitter_top parked in S_RD_WAIT with rd_issued=0, which
+// means its read COMMAND is never accepted -- so the answer is in the arbiter's
+// grant gating (rdr_idle), not in the blitter. See ddr_blitter_arb's dbg assign
+// for the field layout.
+wire [31:0] arb_dbg_w;
 wire  [7:0] arb_ddr_burstcnt;
 wire [28:0] arb_ddr_addr;
 wire        arb_ddr_rd;
@@ -776,7 +782,7 @@ ddr_blitter_arb #(.ENABLE(1'b1)) blitter_arb
 	.ddram_din        (arb_ddr_din),
 	.ddram_be         (arb_ddr_be),
 	.ddram_we         (arb_ddr_we),
-	.dbg              ()             // #34 debug probe stripped for shipping core
+	.dbg              (arb_dbg_w)    // [wedge probe v6] -> dbg_diag -> 0x3BFB000C
 );
 
 // --- Task 4: VRAM demux — route blitter mem_* by address -----------------
@@ -1144,7 +1150,7 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.disp_active    (reader_disp_active),   // [device-fix] displayed buffer -> comp_fb_dma back-buffer select
 	.dbg_blt        (blt_dbg_live),          // [wedge probe v4] -> 0x3A070004
 	.dbg_addr       (blt_mem_addr),          // [wedge probe v4] -> 0x3A070008
-	.dbg_diag       (32'd0)
+	.dbg_diag       (arb_dbg_w)              // [wedge probe v6] -> 0x3BFB000C
 );
 
 assign VGA_DE  = tim_de;
