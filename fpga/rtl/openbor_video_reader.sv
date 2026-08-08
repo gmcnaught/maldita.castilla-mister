@@ -118,7 +118,12 @@ module openbor_video_reader #(
     // "blitter missed a delivered SDRAM dst beat" hypothesis vs "beat never
     // delivered". [31:16]=dst_dready beats delivered, [15:8]=delivered-but-missed
     // events, [0]=missed-ever sticky.
-    input  wire [31:0] dbg_diag
+    input  wire [31:0] dbg_diag,
+    // [wedge probe v6] ddr_blitter_arb grant/queue state, published in the top
+    // half of the beacon qword's low word. Separate from dbg_diag because
+    // dbg_diag's only writer, ST_WRITE_DBGA, is unreachable on the
+    // SCANOUT_ONLY ship path and so never runs in a shipping build.
+    input  wire [15:0] dbg_arb
 );
 
 // DDR3 byte enable (always all bytes)
@@ -650,7 +655,16 @@ always @(posedge ddr_clk) begin
             ST_BEACON: begin
                 if (!ddr_busy) begin
                     ddr_addr       <= VSYNC_ADDR + 29'd2;   // byte 0x3A070010
-                    ddr_din        <= {dbg_blt, beacon_cnt};
+                    // [wedge probe v6] beacon_cnt only needs its low half to be a
+                    // liveness/freshness signal, so the top half of the low word
+                    // carries the arbiter state. Same single write this state
+                    // always did — adding a state and a second write instead made
+                    // the wedge stop reproducing (0/15 vs ~36% on the release
+                    // bitstream), so the instrument must not grow.
+                    //   0x3BFB0010 [15:0]  beacon_cnt  (freshness stamp)
+                    //   0x3BFB0010 [31:16] arbiter     (rdr_out/xq_level/idle/flush)
+                    //   0x3BFB0014         dbg_blt     (unchanged)
+                    ddr_din        <= {dbg_blt, dbg_arb, beacon_cnt[15:0]};
                     ddr_burstcnt   <= 8'd1;
                     ddr_we         <= 1'b1;
                     beacon_cnt     <= beacon_cnt + 32'd1;

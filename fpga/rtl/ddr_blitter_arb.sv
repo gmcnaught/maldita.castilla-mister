@@ -82,7 +82,15 @@ module ddr_blitter_arb #(
     output reg         ddram_we,
     // DEBUG (#34): {reader-beats-outstanding, state[1:0]} — grant-FSM state plus
     // whether the reader still has read beats in flight (lend gate closed).
-    output wire  [2:0] dbg
+    // [wedge probe v6] Grant-starvation post-mortem, 16 bits so it fits in the
+    // half of the beacon qword freed by publishing only beacon_cnt[15:0] — see
+    // the assign at the bottom. Deliberately NOT wider: a 32-bit version with
+    // its own reader state and its own DDR write went 0-for-15 at reproducing
+    // the wedge that the release bitstream hits ~36% of the time, i.e. the
+    // instrument suppressed the bug. This encoding adds no state and no DDR
+    // traffic. Layout: [9:0] rdr_out [13:10] xq_level [14] rdr_idle
+    //                  [15] flush_sticky
+    output wire [15:0] dbg
 );
     // gate the blitter off entirely when disabled
     wire b_rd = ENABLE & blt_rd;
@@ -193,6 +201,38 @@ module ddr_blitter_arb #(
                 2'b11: blt_out <= blt_out + {2'd0, b_burst_eff} - 10'd1;
                 default: ;
             endcase
+
+            // ── RESYNC TO THE QUEUE. The expectation queue is the authority on
+            // what is outstanding: an entry exists for every accepted read
+            // command and is popped only when its last beat lands. So an EMPTY
+            // queue means nothing is outstanding, and both counters must be
+            // zero. They are caches of that fact, derived by a different route
+            // (running +burst/-beat arithmetic), and a cache that can disagree
+            // with its source and never re-synchronise is a latch for a
+            // permanent fault.
+            //
+            // It is not hypothetical. Device capture on .62 2026-08-08 caught
+            // the frame-1 wedge with rdr_out=1 while xq_level=0:
+            //
+            //   word=0x0001073B (stamp advancing) rdr_out=1 xq_level=0
+            //   rdr_idle=0 flush_sticky=0; blitter parked in S_RD_WAIT
+            //   rd_issued=0; C_DONE frozen
+            //
+            // rdr_idle is (rdr_out == 0), and the blitter is granted the bus
+            // only when rdr_idle. So a single leaked count locks the blitter
+            // out FOREVER while the reader carries on normally — a deadlock
+            // between two working parties, which is why nothing else catches
+            // it: `flush` cannot fire (fquiet is reset by every arriving beat)
+            // and blitter_top's S_RD_WAIT reissue watchdog is unreachable with
+            // rd_issued=0.
+            //
+            // Guarded on the accepts so a push in this same cycle is not
+            // clobbered: xq_empty is the pre-update value, and a command
+            // accepted now legitimately makes the count non-zero.
+            if (xq_empty & ~rdr_acc & ~blt_acc) begin
+                rdr_out <= 10'd0;
+                blt_out <= 10'd0;
+            end
         end
     end
 
@@ -238,7 +278,31 @@ module ddr_blitter_arb #(
         endcase
     end
 
-    assign dbg       = {~rdr_idle, state[1:0]};
+    // [wedge probe v6] Grant-starvation post-mortem, published to 0x3BFB000C.
+    //
+    // Device capture 2026-08-07 (.62) named the wedge as blitter_top parked in
+    // S_RD_WAIT with rd_issued=0 — i.e. waiting for its read COMMAND to be
+    // accepted, not for read DATA. mem_busy can only stay high forever if this
+    // arbiter never enters G_BLT, and the grant condition is gated on
+    // rdr_idle (rdr_out == 0). rdr_out is therefore the value this probe
+    // exists to read: stuck non-zero while the reader keeps working (the
+    // liveness beacon kept climbing) locks the blitter out permanently, and
+    // `flush` cannot rescue it because fquiet is reset by ANY arriving beat.
+    //
+    // blt_out and xq_level come along to separate "expectation leaked" from
+    // "counter leaked": a stuck rdr_out with an EMPTY queue means the count is
+    // wrong, not that a response is genuinely outstanding.
+    reg flush_sticky;
+    always @(posedge clk) begin
+        if (reset)      flush_sticky <= 1'b0;
+        else if (flush) flush_sticky <= 1'b1;
+    end
+    wire [3:0] xq_level = {1'b0, xq_wr[XQ_AW-1:0]} - {1'b0, xq_rd[XQ_AW-1:0]};
+    // rdr_out and xq_level are the pair that decides the fix: rdr_out stuck
+    // non-zero is what holds rdr_idle low and locks the blitter out of a grant
+    // forever, and xq_level says whether a response is genuinely outstanding
+    // (bound the wait) or the count merely leaked (repair the accounting).
+    assign dbg = {flush_sticky, rdr_idle, xq_level, rdr_out};
     // Beat routing is by EXPECTATION OWNER, not grant state: consumers AND these
     // with ddram_dout_ready, so each must be high exactly when the arriving beat
     // belongs to that master — regardless of who currently holds the bus grant.

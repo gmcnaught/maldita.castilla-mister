@@ -102,7 +102,7 @@ module tb_reader_ddr;
         .joystick_l_analog_0(16'd0),
         .r_out(reader_r), .g_out(reader_g), .b_out(reader_b),
         .enable(1'b1), .frame_ready(),
-        .dbg_blt(32'd0), .dbg_addr(32'd0), .dbg_diag(32'd0)
+        .dbg_blt(32'd0), .dbg_addr(32'd0), .dbg_diag(32'd0), .dbg_arb(16'd0)
     );
 
     // ── per-pixel test pattern: pix(buf,x,y) packed into the buffer (qw=y*`FB_STRIDE_QW+x/4, lane=x%4) ──
