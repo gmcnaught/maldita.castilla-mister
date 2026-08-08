@@ -201,6 +201,38 @@ module ddr_blitter_arb #(
                 2'b11: blt_out <= blt_out + {2'd0, b_burst_eff} - 10'd1;
                 default: ;
             endcase
+
+            // ── RESYNC TO THE QUEUE. The expectation queue is the authority on
+            // what is outstanding: an entry exists for every accepted read
+            // command and is popped only when its last beat lands. So an EMPTY
+            // queue means nothing is outstanding, and both counters must be
+            // zero. They are caches of that fact, derived by a different route
+            // (running +burst/-beat arithmetic), and a cache that can disagree
+            // with its source and never re-synchronise is a latch for a
+            // permanent fault.
+            //
+            // It is not hypothetical. Device capture on .62 2026-08-08 caught
+            // the frame-1 wedge with rdr_out=1 while xq_level=0:
+            //
+            //   word=0x0001073B (stamp advancing) rdr_out=1 xq_level=0
+            //   rdr_idle=0 flush_sticky=0; blitter parked in S_RD_WAIT
+            //   rd_issued=0; C_DONE frozen
+            //
+            // rdr_idle is (rdr_out == 0), and the blitter is granted the bus
+            // only when rdr_idle. So a single leaked count locks the blitter
+            // out FOREVER while the reader carries on normally — a deadlock
+            // between two working parties, which is why nothing else catches
+            // it: `flush` cannot fire (fquiet is reset by every arriving beat)
+            // and blitter_top's S_RD_WAIT reissue watchdog is unreachable with
+            // rd_issued=0.
+            //
+            // Guarded on the accepts so a push in this same cycle is not
+            // clobbered: xq_empty is the pre-update value, and a command
+            // accepted now legitimately makes the count non-zero.
+            if (xq_empty & ~rdr_acc & ~blt_acc) begin
+                rdr_out <= 10'd0;
+                blt_out <= 10'd0;
+            end
         end
     end
 
