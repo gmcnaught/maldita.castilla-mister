@@ -41,13 +41,32 @@ GAMEDIR="${MALDITA_GAMEDIR:-/media/fat/games/gmloader}"   # engine payload (gmlo
 LOGDIR="${MALDITA_LOGDIR:-/media/fat/logs/MalditaCastilla}"
 
 # --- fabric bring-up recovery gate -------------------------------------------
-# The frame-1 wedge (C_SUBMIT climbs forever, C_DONE never advances past the
-# value it had at reconfigure) is a fabric-side arbiter jam: ddr_blitter_arb's
-# G_BLT_RD exits only on ddram_dout_ready with NO timeout, so one blitter DDR
-# read that never returns parks the arbiter and starves everything downstream.
-# Nothing host-side can un-jam it — the engine drops frames forever and the
-# user gets audio with a frozen or black picture. The only known recovery is a
-# real FPGA reconfigure.
+# The frame-1 wedge: C_DONE never advances past the value it had at
+# reconfigure, so the engine drops every frame forever and the user gets audio
+# with a frozen or black picture. Nothing host-side can un-jam it; the only
+# known recovery is a real FPGA reconfigure.
+#
+# MECHANISM, measured on .62 2026-08-07 — and NOT the one this comment used to
+# claim. It said "ddr_blitter_arb's G_BLT_RD exits only on ddram_dout_ready with
+# NO timeout, so one blitter DDR read that never returns parks the arbiter and
+# starves everything downstream". That is wrong twice over: the arbiter has had
+# a bounded borrow timeout (blt_abort) and a lost-beat flush since "iteration
+# 7", and nothing downstream is starved — the reader keeps running throughout,
+# which is why devmem, scanout and the liveness beacon all stay alive during a
+# wedge.
+#
+# What the device actually shows (probe words at 0x3BFB0010/14, present in ship
+# builds): blitter_top parked in S_RD_WAIT with rd_issued=0 and
+# rd_reissue_cnt=0, beacon climbing, C_DONE frozen. rd_issued=0 means it is
+# waiting for its read COMMAND to be accepted, not for read DATA — so it is
+# starved of an arbiter GRANT. blitter_top's own S_RD_WAIT reissue watchdog sits
+# in an `else if` after rd_issued and is therefore unreachable in this state.
+#
+# The arbiter grants the blitter only when rdr_idle (rdr_out == 0), so a reader
+# outstanding-beat count that never returns to zero locks the blitter out
+# permanently, and `flush` cannot rescue it because fquiet is reset by ANY
+# arriving beat. Confirming that directly is what probe v6 (arbiter dbg ->
+# 0x3BFB000C) was added for.
 #
 # Measured on .62 2026-08-07 with the v0.3.0 bundle: 1 wedge in 3 reboot->launch
 # trials on this entry point. Confirmed fabric-side, not ours — fabric_probe
