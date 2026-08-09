@@ -98,3 +98,22 @@ void maldita_child_signal(pid_t pid, int sig)
 {
     if (pid > 0) kill(pid, sig);
 }
+
+void maldita_child_signal_group(pid_t pid, int sig)
+{
+    if (pid <= 0) return;
+
+    /* The child called setsid(), so it leads its own process group with
+     * pgid == pid, and the engine it starts is in that group. Signalling the
+     * GROUP is what makes an OSD Reset reach gmloader itself rather than only
+     * the launcher shell: in the normal path launch.sh keeps the engine as a
+     * background job and waits on it, so a signal to the shell alone leaves the
+     * engine orphaned and alive — its SIGTERM teardown (ack the in-flight batch,
+     * zero the command ring, park the control block) would never run, and the
+     * ring would only be cleaned up later by the next launcher's stray reap.
+     *
+     * If setsid() failed the child is still in OUR group, whose pgid is not
+     * pid — so the negative-pid send finds no such group and fails with ESRCH
+     * rather than signalling MiSTer's own group. Fall back to the single pid. */
+    if (kill(-pid, sig) != 0) kill(pid, sig);
+}

@@ -31,8 +31,21 @@
 # arise (no MiSTer, no OSD to change cores from); with the takeover disarmed,
 # leaving the core while the engine runs leaves it running.
 #
-# TRADEOFF unchanged from the daemon era: OSD Reset (feat #4), the joystick SHM
-# bridge (feat #2) and crash-respawn are NOT available on this path.
+# TRADEOFF unchanged from the daemon era: the joystick SHM bridge (feat #2) and
+# crash-respawn are NOT available on this path.
+#
+# OSD RESET IS, as of the `main=` wrapper taking the trigger directly
+# (vendor/Main_MiSTer/maldita_hook.cpp + maldita_reset.cpp). What that means for
+# THIS script: selecting Reset in the OSD signals this script's whole process
+# GROUP with SIGTERM — so both this shell and the engine it is waiting on get it,
+# the engine runs its own fabric teardown, and once we are reaped the wrapper
+# forks a fresh copy of this script. That fresh copy is an ordinary launch: it
+# takes the launch lock over from our now-dead pid, reaps any stray engine, waits
+# on the FPGA-ready bit, and runs the fabric gate below against a brand-new
+# bring-up. The wrapper also unlinks $FABRIC_RETRY_MARK first, so a deliberate
+# Reset always gets the full recovery budget rather than inheriting a spent one.
+# Nothing here needs to detect a Reset; it is indistinguishable from a relaunch,
+# which is the point.
 
 # Overridable only so scripts/tests/test_launch_fabric_gate.sh can run this
 # script against a sandbox tree with stubbed busybox/ps/pidof. Production sets

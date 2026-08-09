@@ -101,6 +101,14 @@ jobs:
       - name: launch.sh single-instance lock tests
         run: bash scripts/tests/test_launch_single_instance.sh
 
+      # Host-native: maldita_child.cpp and maldita_reset.cpp are plain POSIX with
+      # no Main_MiSTer dependencies, so the OSD-Reset restart policy is testable
+      # without the armhf cross-build. check-hook additionally syntax-checks
+      # maldita_hook.cpp against a stub user_io.h — the real link is proven by
+      # the build-hps.sh step in the assemble_bundle job below.
+      - name: main= wrapper host tests (child spawn + OSD Reset restart policy)
+        run: make -C tools/mister-wrapper/test
+
   assemble-bundle-test:
     name: assemble_bundle.sh (builds a real engine so the gate actually runs)
     runs-on: ubuntu-latest
