@@ -42,6 +42,7 @@
 #include "maldita_child.h"
 #include "maldita_reset.h"
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -124,12 +125,33 @@ constexpr int64_t kKillBudgetMs = 2000;
 /* Deliberately write(2) rather than printf: the framework reconfigures stdio
  * during user_io_init(), which silently swallowed every printf the reverted
  * wrapper made after that point and cost real debugging time chasing a "hang"
- * that was only a buffering artifact. */
+ * that was only a buffering artifact.
+ *
+ * AND to a file, not only to stderr. MiSTer execs this binary with fd 1 and 2 on
+ * /dev/console (verified on .62 2026-08-09: /proc/<pid>/fd/2 -> /dev/console),
+ * so every line here has historically gone somewhere no `ssh` and no bug report
+ * can read — which was survivable while the hook only ever logged one spawn at
+ * startup, and is not now that it also logs OSD Resets. "I pressed Reset and
+ * nothing happened" needs a trace.
+ *
+ * kLogPath is the handler's own log and the interleaving is deliberate: the
+ * child holds it O_APPEND too, so one file carries the whole launch path in
+ * order — the hook's decision, then the handler's, then the engine's. Best
+ * effort throughout; a wrapper that cannot open its log still has a game to
+ * start. */
 void hlog(const char *msg)
 {
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "maldita_hook: %s\n", msg);
-    if (n > 0) (void)!write(STDERR_FILENO, buf, (size_t)(n > (int)sizeof(buf) ? (int)sizeof(buf) : n));
+    if (n <= 0) return;
+    size_t len = (size_t)(n > (int)sizeof(buf) ? (int)sizeof(buf) : n);
+
+    (void)!write(STDERR_FILENO, buf, len);
+
+    int fd = open(kLogPath, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    (void)!write(fd, buf, len);
+    close(fd);
 }
 
 bool file_exists(const char *path)
