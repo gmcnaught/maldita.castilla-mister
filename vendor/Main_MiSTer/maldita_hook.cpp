@@ -23,16 +23,27 @@
  * scheduler_wait_fpga_ready(). The contract is honoured by the code that owns
  * it, and we cannot get it wrong because we never took it over.
  *
- * WHAT THIS DOES NOT DO. No supervision, no respawn, no joystick publishing, no
- * OSD polling. Those existed in the reverted wrapper because it had to coexist
- * with the engine forever. Under the HPS takeover this process is killed a few
- * seconds after the engine proves itself live, so its whole job is one fork at
- * one correct moment.
+ * WHAT THIS DOES NOT DO. No crash respawn, no joystick publishing, no
+ * supervision of the engine's health. Those existed in the reverted wrapper
+ * because it had to coexist with the engine forever. Under the HPS takeover this
+ * process is killed a few seconds after the engine proves itself live.
+ *
+ * The ONE thing it does beyond the initial fork is take the OSD "Reset" trigger
+ * and restart the engine (see maldita_reset.h for what that resets and why it is
+ * stepped rather than done inline). That is here rather than in the engine or in
+ * launch.sh for a simple reason: this process IS MiSTer, so it can read the
+ * status pulse directly. Every other consumer would have to receive it over the
+ * fabric, and the fabric's only publisher of that bit (blitter_top's
+ * S_WR_STATUS -> C_STATUS bit0) stops writing during exactly the wedge a user
+ * most wants to Reset out of.
  */
 
 #include "maldita_hook.h"
 #include "maldita_child.h"
+#include "maldita_reset.h"
 
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -40,7 +51,10 @@
 #include <sys/types.h>
 #include <time.h>
 
-/* Upstream Main_MiSTer symbols, resolved at the armhf link. */
+/* Upstream Main_MiSTer symbols, resolved at the armhf link. user_io.h also
+ * declares user_io_status_trigger_take(), which is a Maldita overlay addition to
+ * upstream's user_io.cpp — a CONF_STR "T" pulse is set and cleared inside one
+ * HandleUI() call and cannot be seen any other way. */
 #include "user_io.h"
 
 namespace {
@@ -76,15 +90,68 @@ constexpr const char *kNoEngineFlag = "/media/fat/games/gmloader/NOENGINE";
 constexpr const char *kRestoreStamp = "/tmp/maldita_takeover_restore.stamp";
 constexpr long kRestoreWindowS = 60;
 
+/* CONF_STR "TJ,Reset;" -> status bit 19 (fpga/Maldita.sv). The letter and the
+ * bit must agree; if the CONF_STR ever gains or loses an option before this one,
+ * BOTH move. */
+constexpr uint32_t kResetTriggerBit = 19;
+
+/* launch.sh's fabric-recovery attempt counter. A deliberate Reset must not
+ * inherit a spent recovery budget from an earlier bad start, or the fresh
+ * engine's gate gives up without ever trying. launch.sh removes it itself on a
+ * healthy verdict; this clears it on the way in. Keep in sync with
+ * MALDITA_RETRY_MARK's default in games/Maldita Castilla/launch.sh. */
+constexpr const char *kRetryMark = "/tmp/maldita_fabric_retry";
+
+/* launch.sh's atomic launch mutex (MALDITA_LOCKDIR's default) — keep in sync.
+ *
+ * Dropped before a Reset respawn. The fresh handler would USUALLY take the lock
+ * over on its own, because its owner check is liveness-then-freshness and by
+ * then the owner pid is dead. The exception is the one case that matters: a
+ * child that survived even SIGKILL (stuck in uninterruptible DDR I/O) is still
+ * "alive", and if the lock is also younger than MALDITA_LOCK_FRESH_S the fresh
+ * handler stands down and the user's Reset produces NO engine at all. Clearing
+ * it here is safe precisely because we just killed the only launcher this core
+ * load has: there is no concurrent racer for the mutex to protect against, which
+ * is the only thing it exists for. */
+constexpr const char *kLockOwner = "/tmp/maldita-launch.lock/owner";
+constexpr const char *kLockDir   = "/tmp/maldita-launch.lock";
+
+/* SIGTERM budget before SIGKILL, and SIGKILL budget before spawning anyway.
+ * 3000 ms mirrors launch.sh's own reap budget for the same child; the engine's
+ * teardown budget is 250 ms, so a healthy engine is gone long before either. */
+constexpr int64_t kTermBudgetMs = 3000;
+constexpr int64_t kKillBudgetMs = 2000;
+
 /* Deliberately write(2) rather than printf: the framework reconfigures stdio
  * during user_io_init(), which silently swallowed every printf the reverted
  * wrapper made after that point and cost real debugging time chasing a "hang"
- * that was only a buffering artifact. */
+ * that was only a buffering artifact.
+ *
+ * AND to a file, not only to stderr. MiSTer execs this binary with fd 1 and 2 on
+ * /dev/console (verified on .62 2026-08-09: /proc/<pid>/fd/2 -> /dev/console),
+ * so every line here has historically gone somewhere no `ssh` and no bug report
+ * can read — which was survivable while the hook only ever logged one spawn at
+ * startup, and is not now that it also logs OSD Resets. "I pressed Reset and
+ * nothing happened" needs a trace.
+ *
+ * kLogPath is the handler's own log and the interleaving is deliberate: the
+ * child holds it O_APPEND too, so one file carries the whole launch path in
+ * order — the hook's decision, then the handler's, then the engine's. Best
+ * effort throughout; a wrapper that cannot open its log still has a game to
+ * start. */
 void hlog(const char *msg)
 {
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "maldita_hook: %s\n", msg);
-    if (n > 0) (void)!write(STDERR_FILENO, buf, (size_t)(n > (int)sizeof(buf) ? (int)sizeof(buf) : n));
+    if (n <= 0) return;
+    size_t len = (size_t)(n > (int)sizeof(buf) ? (int)sizeof(buf) : n);
+
+    (void)!write(STDERR_FILENO, buf, len);
+
+    int fd = open(kLogPath, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    (void)!write(fd, buf, len);
+    close(fd);
 }
 
 bool file_exists(const char *path)
@@ -114,58 +181,27 @@ bool restore_in_progress()
 pid_t g_child = -1;
 bool  g_decided = false;
 
-} // namespace
+/* True only when WE started the engine. Everything Reset does is predicated on
+ * it: if the initial decision refused (not our core, NOENGINE, a takeover
+ * restore in progress) there is no engine of ours to restart, and honouring the
+ * OSD trigger would spawn one behind the back of whatever made us refuse. */
+bool g_owns_engine = false;
 
-void maldita_hook_poll(void)
+maldita_reset_t g_reset;
+
+int64_t now_ms()
 {
-    if (g_decided)
-    {
-        /* Keep the process table tidy in the no-takeover case, where this
-         * process outlives the handler. Free: WNOHANG on a known pid. Under
-         * takeover we are killed long before this matters. */
-        if (g_child > 0)
-        {
-            int code = 0;
-            if (maldita_child_reap(g_child, &code))
-            {
-                char buf[96];
-                snprintf(buf, sizeof(buf), "handler exited rc=%d", code);
-                hlog(buf);
-                g_child = -1;
-            }
-        }
-        return;
-    }
+    struct timespec ts;
+    /* CLOCK_MONOTONIC, not time(): the restart deadlines must survive an NTP
+     * step, and MiSTer sets its clock from the network shortly after boot —
+     * which is exactly when a first Reset is plausible. */
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
-    /* One decision, whatever it is. Everything below sets g_decided so a
-     * refusal cannot be retried on the next iteration — a hook that keeps
-     * re-deciding is a hook that eventually spawns two engines onto one fabric
-     * control block, which is the documented dual-engine corruption. */
-    g_decided = true;
-
-    /* `main=` is a per-core ini setting, so in the intended configuration this
-     * binary only ever runs for our core. The check is for the footgun: a
-     * `main=` line left in a global section would otherwise spawn the engine
-     * under every core on the device. */
-    const char *core = user_io_get_core_name();
-    if (!core || strcmp(core, kCoreName) != 0)
-    {
-        hlog("not the Maldita core — running as stock MiSTer");
-        return;
-    }
-
-    if (file_exists(kNoEngineFlag))
-    {
-        hlog("NOENGINE flag present — not spawning the handler");
-        return;
-    }
-
-    if (restore_in_progress())
-    {
-        hlog("takeover restore in progress — not spawning, leaving the way out clear");
-        return;
-    }
-
+/* Fork the launch handler. Sets g_child; returns false and logs on failure. */
+bool spawn_handler()
+{
     /* The handler mkdir -p's this itself, but not before its own first write,
      * and maldita_child_spawn()'s log redirect happens earlier than that. */
     mkdir("/media/fat/logs", 0755);
@@ -178,11 +214,128 @@ void maldita_hook_poll(void)
     g_child = maldita_child_spawn(argv, NULL, NULL, kLogPath);
     if (g_child < 0)
     {
-        hlog("FAILED to spawn the handler — running as stock MiSTer");
-        return;
+        hlog("FAILED to spawn the handler");
+        return false;
     }
 
     char buf[96];
     snprintf(buf, sizeof(buf), "handler spawned pid=%d", (int)g_child);
     hlog(buf);
+    return true;
+}
+
+/* The one-shot startup decision. True when the handler was spawned. */
+bool decide_and_spawn()
+{
+    /* `main=` is a per-core ini setting, so in the intended configuration this
+     * binary only ever runs for our core. The check is for the footgun: a
+     * `main=` line left in a global section would otherwise spawn the engine
+     * under every core on the device. */
+    const char *core = user_io_get_core_name();
+    if (!core || strcmp(core, kCoreName) != 0)
+    {
+        hlog("not the Maldita core — running as stock MiSTer");
+        return false;
+    }
+
+    if (file_exists(kNoEngineFlag))
+    {
+        hlog("NOENGINE flag present — not spawning the handler");
+        return false;
+    }
+
+    if (restore_in_progress())
+    {
+        hlog("takeover restore in progress — not spawning, leaving the way out clear");
+        return false;
+    }
+
+    if (!spawn_handler())
+    {
+        hlog("running as stock MiSTer");
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+void maldita_hook_poll(void)
+{
+    if (!g_decided)
+    {
+        /* One decision, whatever it is. This flag is set before the decision so
+         * a refusal cannot be retried on the next iteration — a hook that keeps
+         * re-deciding is a hook that eventually spawns two engines onto one
+         * fabric control block, which is the documented dual-engine corruption.
+         * Reset does not weaken that: it is a serialised kill-then-spawn gated
+         * on the child actually being gone, never a second concurrent spawn. */
+        g_decided = true;
+        g_owns_engine = decide_and_spawn();
+        if (g_owns_engine) maldita_reset_init(&g_reset, kTermBudgetMs, kKillBudgetMs);
+        return;
+    }
+
+    /* Keep the process table tidy in the no-takeover case, where this process
+     * outlives the handler. Free: WNOHANG on a known pid. Under takeover we are
+     * killed long before this matters. Also the liveness input to the restart
+     * step below, which is why it runs before it. */
+    if (g_child > 0)
+    {
+        int code = 0;
+        if (maldita_child_reap(g_child, &code))
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "handler exited rc=%d", code);
+            hlog(buf);
+            g_child = -1;
+        }
+    }
+
+    if (!g_owns_engine) return;
+
+    /* Drain the trigger latch on EVERY iteration, including mid-restart. The
+     * step function ignores a request while a restart is in flight, so this
+     * discards a mashed second press instead of queueing it. Leaving the latch
+     * set would instead fire a second restart the moment the first completed. */
+    const bool requested =
+        (user_io_status_trigger_take() & (1u << kResetTriggerBit)) != 0;
+
+    switch (maldita_reset_step(&g_reset, requested, g_child > 0, now_ms()))
+    {
+    case MALDITA_RESET_ACT_TERM:
+    {
+        /* Clear the recovery budget BEFORE the kill, so the fresh launch.sh
+         * cannot read a stale count no matter how fast it starts. */
+        unlink(kRetryMark);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "OSD Reset — restarting the engine (SIGTERM pid=%d)",
+                 (int)g_child);
+        hlog(buf);
+        maldita_child_signal_group(g_child, SIGTERM);
+        break;
+    }
+    case MALDITA_RESET_ACT_KILL:
+        hlog("OSD Reset — handler ignored SIGTERM, SIGKILL");
+        maldita_child_signal_group(g_child, SIGKILL);
+        break;
+
+    case MALDITA_RESET_ACT_SPAWN:
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "OSD Reset — respawning the handler (restart #%u)",
+                 g_reset.restarts);
+        hlog(buf);
+        /* See kLockDir. Order matters: the directory only goes away once the
+         * owner file inside it does. */
+        unlink(kLockOwner);
+        rmdir(kLockDir);
+        /* A failed respawn leaves g_child at -1 and g_owns_engine true, so the
+         * next Reset press tries again rather than wedging the feature off. */
+        spawn_handler();
+        break;
+    }
+    case MALDITA_RESET_ACT_NONE:
+        break;
+    }
 }

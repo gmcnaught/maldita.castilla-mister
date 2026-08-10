@@ -31,6 +31,12 @@ bool  maldita_child_reap(pid_t pid, int *exit_code_out);
 
 void  maldita_child_signal(pid_t pid, int sig);
 
+/* Signal the child's whole process group (the launcher shell AND the engine it
+ * started), falling back to the single pid if the child is not a group leader.
+ * This is what an OSD Reset uses — see the definition for why signalling only
+ * the launcher shell is not enough. */
+void  maldita_child_signal_group(pid_t pid, int sig);
+
 #ifdef __cplusplus
 }
 #endif
