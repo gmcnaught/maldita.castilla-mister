@@ -1121,7 +1121,19 @@ reg  [63:0] lb_q;
 always @(posedge clk_vid)
     lb_q <= linebuf[{vcount[0], hcol[8:2]}];
 
-wire [15:0] cur_pix = lb_q[{hcol[1:0], 4'b0000} +: 16];
+// [crt-subpix] The lane select must age with lb_q. `lb_q` is a REGISTERED linebuf
+// read, so it presents the word for hcol one clk_vid AFTER hcol advances; the lane
+// mux below used the *current* hcol. For one clk_vid after every 4th column (hcol[1:0]
+// == 0) that pairs lane 0 with the PREVIOUS word -> the output register (ungated on
+// clk_vid, see below) latches the pixel 4 columns to the left for exactly one cycle.
+// The ce_pix-sampled consumers (video_mixer -> ascal -> HDMI/screenshot) never see it;
+// the analog chain (scanlines/osd/vga_out/ADV7125, all ungated clk_vid) emits it as an
+// 18.6 ns sliver -> a bright ghost line 1-4 px right of every bright edge on a CRT.
+// Delaying the lane select by one clk_vid keeps (word, lane) consistent at all times.
+reg [1:0] hcol_q;
+always @(posedge clk_vid) hcol_q <= reset_vid ? 2'd0 : hcol[1:0];
+
+wire [15:0] cur_pix = lb_q[{hcol_q, 4'b0000} +: 16];
 wire  [7:0] dec_r = {cur_pix[15:11], cur_pix[15:13]};
 wire  [7:0] dec_g = {cur_pix[10:5],  cur_pix[10:9]};
 wire  [7:0] dec_b = {cur_pix[4:0],   cur_pix[4:2]};
