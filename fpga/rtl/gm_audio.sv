@@ -151,8 +151,11 @@ localparam int OUT_DIV = CLK_RATE / OUT_RATE;
 // and measured ~8.7k qwords/s on hardware -- enough for 22.05 kHz (11k/s), not
 // for 48 kHz (24k/s), which starved and drained at 17.5 kHz. OpenBOR/MAMESTer
 // solve the same problem on the same bus by bursting into a deep FIFO; this is
-// that idea at the smaller scale this module needs.
-localparam int ST_DEPTH  = 32;
+// that idea at the smaller scale this module needs. Depth 16 rather than 32:
+// a burst of 8 needs room for 8 plus margin, and the wider array cost ~2k
+// flip-flops that showed up as a placement regression on the fabric clock.
+localparam int ST_DEPTH  = 16;
+localparam int SW        = $clog2(ST_DEPTH);   // staging pointer width
 localparam int BURST_MAX = 8;
 
 localparam logic S_IDLE = 1'b0,
@@ -175,8 +178,8 @@ reg [PW-1:0] wptr;              // qword index the host has filled up to
 reg          got_first;         // dropped the stale ring contents yet?
 
 reg [63:0] stage [ST_DEPTH];
-reg  [4:0] st_wr, st_rd;
-reg  [5:0] st_cnt;
+reg [SW-1:0] st_wr, st_rd;
+reg [SW:0]   st_cnt;
 reg  [3:0] burst_rem;   // beats still owed by the in-flight J_DATA burst
 reg        st_half;             // which stereo frame of stage[st_rd]
 
@@ -208,15 +211,15 @@ assign ram_byteenable = 8'hFF;
 
 wire [PW-1:0] backlog = wptr - rptr;            // natural mod-RING_QWORDS
 
-wire st_full  = (st_cnt == ST_DEPTH[5:0]);
-wire st_empty = (st_cnt == 6'd0);
+wire st_full  = (st_cnt == ST_DEPTH[SW:0]);
+wire st_empty = (st_cnt == '0);
 
 // [48k burst] How many qwords this fetch may take: staging room, data the host
 // has actually written, and the distance to the ring's end -- a burst must not
 // wrap, since the address does not.
-wire [5:0]    st_room    = ST_DEPTH[5:0] - st_cnt;
+wire [SW:0]   st_room    = ST_DEPTH[SW:0] - st_cnt;
 wire [PW:0]   wrap_room  = {1'b0, PMAX[PW-1:0]} - {1'b0, rptr} + {{PW{1'b0}}, 1'b1};
-wire [3:0]    lim_room   = (st_room   >= BURST_MAX[5:0])       ? BURST_MAX[3:0] : st_room[3:0];
+wire [3:0]    lim_room   = (st_room   >= BURST_MAX[SW:0])      ? BURST_MAX[3:0] : st_room[3:0];
 wire [3:0]    lim_avail  = (backlog   >= BURST_MAX[PW-1:0])    ? BURST_MAX[3:0] : backlog[3:0];
 wire [3:0]    lim_wrap   = (wrap_room >= BURST_MAX[PW:0])      ? BURST_MAX[3:0] : wrap_room[3:0];
 wire [3:0]    burst_len_a = (lim_room  < lim_avail) ? lim_room  : lim_avail;
@@ -227,7 +230,8 @@ wire st_push  = (state == S_WAIT) && ram_readdatavalid && (job == J_DATA);
 // holds two stereo frames, so "the frame after next" is either the other half
 // of this qword or the low half of the following one.
 wire [63:0] st_q  = stage[st_rd];
-wire [63:0] st_q2 = stage[st_rd + 5'd1];
+wire [SW-1:0] st_rd_n = st_rd + 1'b1;   // wraps with the array, by width
+wire [63:0] st_q2 = stage[st_rd_n];
 wire [15:0] nxt_l = st_half ? st_q[47:32] : st_q[15:0];
 wire [15:0] nxt_r = st_half ? st_q[63:48] : st_q[31:16];
 wire [15:0] nxt2_l = st_half ? st_q2[15:0]  : st_q[47:32];
@@ -248,8 +252,8 @@ wire        primed     = (prime == 2'd2);
 
 // Two frames are available when this qword still holds both halves, or when a
 // second qword is staged behind it.
-wire have1 = (st_cnt >= 6'd1);
-wire have2 = st_half ? (st_cnt >= 6'd2) : (st_cnt >= 6'd1);
+wire have1 = (st_cnt >= 1);
+wire have2 = st_half ? (st_cnt >= 2) : (st_cnt >= 1);
 
 // Priming fills s0/s1 one frame per tick; after that the accumulator decides.
 // Starvation clamps the count rather than glitching -- the window just holds.
@@ -336,9 +340,9 @@ always @(posedge clk) begin
         wptr          <= '0;
         got_first     <= 1'b0;
         pub_due       <= 1'b0;
-        st_wr         <= 5'd0;
-        st_rd         <= 5'd0;
-        st_cnt        <= 6'd0;
+        st_wr         <= '0;
+        st_rd         <= '0;
+        st_cnt        <= '0;
         burst_rem     <= 4'd0;
         ram_burstcount<= 8'd1;
         st_half       <= 1'b0;
