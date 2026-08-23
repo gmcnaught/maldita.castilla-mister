@@ -226,16 +226,18 @@ wire [3:0]    burst_len_a = (lim_room  < lim_avail) ? lim_room  : lim_avail;
 wire [3:0]    burst_len   = (burst_len_a < lim_wrap) ? burst_len_a : lim_wrap;
 wire st_push  = (state == S_WAIT) && ram_readdatavalid && (job == J_DATA);
 
-// The frame the interpolator will pull next, and the one after it. A qword
-// holds two stereo frames, so "the frame after next" is either the other half
-// of this qword or the low half of the following one.
+// The frame the interpolator will pull next, and the one after it. A qword holds
+// two stereo frames, so "the frame after next" is the other half of THIS qword.
+// Deliberately not stage[st_rd+1]: a second read port stops Quartus inferring
+// the array as M10K and it lands in registers instead (the M10K gate catches
+// exactly this). A double step therefore only happens from the low half, and
+// when it is wanted from the high half the accumulator simply carries the
+// surplus to the next tick -- same total frames, one tick later.
 wire [63:0] st_q  = stage[st_rd];
-wire [SW-1:0] st_rd_n = st_rd + 1'b1;   // wraps with the array, by width
-wire [63:0] st_q2 = stage[st_rd_n];
 wire [15:0] nxt_l = st_half ? st_q[47:32] : st_q[15:0];
 wire [15:0] nxt_r = st_half ? st_q[63:48] : st_q[31:16];
-wire [15:0] nxt2_l = st_half ? st_q2[15:0]  : st_q[47:32];
-wire [15:0] nxt2_r = st_half ? st_q2[31:16] : st_q[63:48];
+wire [15:0] nxt2_l = st_q[47:32];
+wire [15:0] nxt2_r = st_q[63:48];
 
 wire want_data = (burst_len != 4'd0) && got_first;
 
@@ -253,7 +255,8 @@ wire        primed     = (prime == 2'd2);
 // Two frames are available when this qword still holds both halves, or when a
 // second qword is staged behind it.
 wire have1 = (st_cnt >= 1);
-wire have2 = st_half ? (st_cnt >= 2) : (st_cnt >= 1);
+// Both frames of a double step must come from the qword already being read.
+wire have2 = !st_half && (st_cnt >= 1);
 
 // Priming fills s0/s1 one frame per tick; after that the accumulator decides.
 // Starvation clamps the count rather than glitching -- the window just holds.
@@ -433,8 +436,9 @@ always @(posedge clk) begin
         endcase
 
         if (st_pop_two) begin
-            // Two frames = one qword, from whichever half we started on.
-            st_rd <= st_rd + 1'b1;
+            // Both halves of this qword consumed: retire it, stay on half 0.
+            st_rd   <= st_rd + 1'b1;
+            st_half <= 1'b0;
         end
         else if (st_pop_one) begin
             st_rd   <= st_rd + 1'b1;
