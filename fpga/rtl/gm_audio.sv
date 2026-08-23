@@ -55,16 +55,14 @@ module gm_audio #(
     parameter int    OUT_RATE   = 48000,
     // Native rate of the PCM in the ring. Must match the host's NA_SAMPLE_RATE
     // (gmloader native_audio_writer.h).
-    parameter int    SRC_RATE   = 44100,   // [Donut Dodo] LOCKSTEP with the host's
-                                           // audio open rate. 44100 is the highest
-                                           // rate this datapath supports: at 48000
-                                           // the ratio is exactly 1.0, the phase
-                                           // accumulator stops advancing (output
-                                           // degenerates to zero-order hold) and the
-                                           // loop can only trim, never hurry, since
-                                           // it pops at most one source frame per
-                                           // output tick. tb_gm_audio passes at
-                                           // 22050/32000/44100 and fails at 48000.
+    parameter int    SRC_RATE   = 48000,   // [Donut Dodo] LOCKSTEP with the host's
+                                           // audio open rate. Unity ratio: every
+                                           // output frame is a source frame, no
+                                           // resampling, and Godot's 48 kHz mix
+                                           // reaches the DAC untouched. Needs the
+                                           // two-step pop below -- see phase_nxt.
+                                           // tb_gm_audio passes at 22050/32000/
+                                           // 44100/48000.
 
     // Absolute qword addresses. These are byte>>3 and are NOT relative to any
     // framebuffer base -- see the [audio-map] note in openbor_video_reader.sv.
@@ -225,26 +223,50 @@ wire [3:0]    burst_len_a = (lim_room  < lim_avail) ? lim_room  : lim_avail;
 wire [3:0]    burst_len   = (burst_len_a < lim_wrap) ? burst_len_a : lim_wrap;
 wire st_push  = (state == S_WAIT) && ram_readdatavalid && (job == J_DATA);
 
-// The frame the interpolator will pull next.
+// The frame the interpolator will pull next, and the one after it. A qword
+// holds two stereo frames, so "the frame after next" is either the other half
+// of this qword or the low half of the following one.
 wire [63:0] st_q  = stage[st_rd];
+wire [63:0] st_q2 = stage[st_rd + 5'd1];
 wire [15:0] nxt_l = st_half ? st_q[47:32] : st_q[15:0];
 wire [15:0] nxt_r = st_half ? st_q[63:48] : st_q[31:16];
+wire [15:0] nxt2_l = st_half ? st_q2[15:0]  : st_q[47:32];
+wire [15:0] nxt2_r = st_half ? st_q2[31:16] : st_q[63:48];
 
 wire want_data = (burst_len != 4'd0) && got_first;
 
 wire signed [17:0] inc = INC_BASE + slew * SLEW_STEP_EFF;
 
-wire [16:0] phase_nxt = {1'b0, phase} + inc[16:0];
-wire        step      = phase_nxt[16];          // crossed into the next frame
-wire        primed    = (prime == 2'd2);
+// [unity ratio] The integer part of the accumulator is TWO bits, so a tick may
+// advance the window by 0, 1 or 2 source frames. One bit was enough only while
+// SRC_RATE < OUT_RATE: at ratio 1.0 the increment is exactly 65536, and a loop
+// that can never pull twice can slow the consumer down but never speed it up,
+// so any host running fractionally fast grows the ring without bound.
+wire [17:0] phase_nxt  = {2'b0, phase} + $unsigned(inc[17:0]);
+wire [1:0]  steps_want = phase_nxt[17:16];
+wire        primed     = (prime == 2'd2);
 
-// One path pulls a source frame, whether priming the window or sliding it.
-// Gating on !st_empty is what makes starvation a hold rather than a glitch.
-wire frame_pull = out_ce && !st_empty && (!primed || step);
+// Two frames are available when this qword still holds both halves, or when a
+// second qword is staged behind it.
+wire have1 = (st_cnt >= 6'd1);
+wire have2 = st_half ? (st_cnt >= 6'd2) : (st_cnt >= 6'd1);
 
-// Which staging slot that pull consumes: first half advances, second retires.
-wire st_adv = frame_pull && !st_half;
-wire st_pop = frame_pull &&  st_half;
+// Priming fills s0/s1 one frame per tick; after that the accumulator decides.
+// Starvation clamps the count rather than glitching -- the window just holds.
+wire [1:0] steps = (!primed)                        ? (have1 ? 2'd1 : 2'd0)
+                 : (steps_want == 2'd2 && have2)    ? 2'd2
+                 : (steps_want != 2'd0 && have1)    ? 2'd1
+                 :                                    2'd0;
+
+wire frame_pull = out_ce && (steps != 2'd0);
+
+// Cursor bookkeeping. One qword retires when its second half is consumed, and
+// a double pull always consumes exactly one qword's worth whichever half it
+// started on -- so the read pointer advances and st_half is unchanged.
+wire st_adv     = frame_pull && (steps == 2'd1) && !st_half;
+wire st_pop_one = frame_pull && (steps == 2'd1) &&  st_half;
+wire st_pop_two = frame_pull && (steps == 2'd2);
+wire st_pop     = st_pop_one || st_pop_two;
 
 // Linear interpolation. s1-s0 is 17-bit signed, phase is 16-bit unsigned;
 // one 17x17 signed multiply per channel, ~40 ns of budget at 24.576 MHz.
@@ -406,7 +428,11 @@ always @(posedge clk) begin
             default: ;   // 2'b11 nets out, 2'b00 idle
         endcase
 
-        if (st_pop) begin
+        if (st_pop_two) begin
+            // Two frames = one qword, from whichever half we started on.
+            st_rd <= st_rd + 1'b1;
+        end
+        else if (st_pop_one) begin
             st_rd   <= st_rd + 1'b1;
             st_half <= 1'b0;
         end
@@ -475,8 +501,15 @@ always @(posedge clk) begin
     end
     else begin
         if (frame_pull) begin
-            s0_l <= s1_l;  s0_r <= s1_r;
-            s1_l <= nxt_l; s1_r <= nxt_r;
+            if (steps == 2'd2) begin
+                // Slid twice: the window lands on the next pair outright.
+                s0_l <= nxt_l;  s0_r <= nxt_r;
+                s1_l <= nxt2_l; s1_r <= nxt2_r;
+            end
+            else begin
+                s0_l <= s1_l;  s0_r <= s1_r;
+                s1_l <= nxt_l; s1_r <= nxt_r;
+            end
             if (!primed) prime <= prime + 1'b1;
         end
 
@@ -487,7 +520,10 @@ always @(posedge clk) begin
             // Advance phase only when the window actually slid. Holding it on
             // starvation freezes the output at the last sample instead of
             // interpolating toward whatever lands next.
-            if (!step || !st_empty) phase <= phase_nxt[15:0];
+            // Advance only when the window actually slid as far as the
+            // accumulator asked. Holding it on starvation freezes the output at
+            // the last sample instead of interpolating toward whatever lands.
+            if (steps == steps_want) phase <= phase_nxt[15:0];
         end
     end
 end

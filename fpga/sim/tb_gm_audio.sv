@@ -417,14 +417,27 @@ initial begin
     chk(n_out > 80000, "B produced too few output samples");
     // Apex samples are the only legitimate off-band deltas: ~20 apexes over the
     // run, at most a couple of samples each.
-    chk(d_bad < 200, "B: too many deltas outside the expected band -- window slid wrong");
-    // Under zero-order hold every delta would be 0 or RAMP_SLOPE, so d_max
-    // would equal RAMP_SLOPE and d_zoh would be ~54% of n_out. Both gates are
-    // three orders of magnitude away from the ZOH outcome.
-    chk(d_max < RAMP_SLOPE,
-        "B: saw a full-slope delta -- output is zero-order hold, not interpolated");
-    chk(d_zoh < 100,
-        "B: too many held deltas -- output is zero-order hold, not interpolated");
+    // These three gates all assert that the output is INTERPOLATED, which is only
+    // meaningful while SRC_RATE < OUT_RATE. At unity ratio every output frame is
+    // a source frame -- a full-slope delta is then the correct result, not a
+    // defect, and the loop's occasional double-step (inc slightly above 1.0)
+    // legitimately puts deltas outside the two-value band this models. What
+    // still holds at unity is the mean-slope gate below, plus "never exceeds the
+    // source slope", which is what a faithful copy means.
+    if (INC_NOM != 65536) begin
+        chk(d_bad < 200, "B: too many deltas outside the expected band -- window slid wrong");
+        // Under zero-order hold every delta would be 0 or RAMP_SLOPE, so d_max
+        // would equal RAMP_SLOPE and d_zoh would be ~54% of n_out. Both gates are
+        // three orders of magnitude away from the ZOH outcome.
+        chk(d_max < RAMP_SLOPE,
+            "B: saw a full-slope delta -- output is zero-order hold, not interpolated");
+        chk(d_zoh < 100,
+            "B: too many held deltas -- output is zero-order hold, not interpolated");
+    end
+    else begin
+        chk(d_max <= RAMP_SLOPE,
+            "B(unity): a delta exceeded the source slope -- the copy is corrupt");
+    end
     chk(mean_d > want_d * 0.995 && mean_d < want_d * 1.005,
         "B: mean slope is not SRC_RATE/OUT_RATE -- resample ratio is wrong");
 
