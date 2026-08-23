@@ -55,19 +55,16 @@ module gm_audio #(
     parameter int    OUT_RATE   = 48000,
     // Native rate of the PCM in the ring. Must match the host's NA_SAMPLE_RATE
     // (gmloader native_audio_writer.h).
-    parameter int    SRC_RATE   = 22050,   // [Donut Dodo] MEASURED CEILING, not a
-                                           // preference: at 48000 this module
-                                           // starves. frame_pull needs one source
-                                           // frame per 48 kHz output tick = 24000
-                                           // qword reads/s, and the fetch path is
-                                           // single-beat and non-pipelined
-                                           // (ram_burstcount = 1), sustaining only
-                                           // ~8.7k/s -- measured 17.5 kHz drain,
-                                           // with the fabric idle, so it is not
-                                           // DDR contention. 22050 needs 11k/s and
-                                           // runs exactly on rate. Raising this
-                                           // means bursting the fetch first.
-                                           // LOCKSTEP with the host's audio open rate
+    parameter int    SRC_RATE   = 44100,   // [Donut Dodo] LOCKSTEP with the host's
+                                           // audio open rate. 44100 is the highest
+                                           // rate this datapath supports: at 48000
+                                           // the ratio is exactly 1.0, the phase
+                                           // accumulator stops advancing (output
+                                           // degenerates to zero-order hold) and the
+                                           // loop can only trim, never hurry, since
+                                           // it pops at most one source frame per
+                                           // output tick. tb_gm_audio passes at
+                                           // 22050/32000/44100 and fails at 48000.
 
     // Absolute qword addresses. These are byte>>3 and are NOT relative to any
     // framebuffer base -- see the [audio-map] note in openbor_video_reader.sv.
@@ -86,7 +83,11 @@ module gm_audio #(
     // Ring occupancy the host pump aims to hold, in qwords. The slew loop pulls
     // the measured trough toward this. Must track kTargetFillFrames/2 in
     // gmloader's mister_native_audio.cpp.
-    parameter int    TARGET_QW   = 1102,
+    // Occupancy target and slew band. These are TIMES expressed in qwords, so
+    // they must be derived from SRC_RATE: the shipped 1102/128 mean 100 ms and
+    // 11.6 ms at 22050, and would mean half that at 44100, shrinking the loop's
+    // working set exactly when the disturbance in frames/s grows.
+    parameter int    TARGET_QW   = (1102 * SRC_RATE) / 22050,
 
     // Slew-loop tuning. Defaults are the device values; the testbench shortens
     // them so the closed loop can be exercised in tractable simulated time.
@@ -96,15 +97,20 @@ module gm_audio #(
     //   SLEW_STEP  -- phase-increment units per slew step (16 -> 0.053% each)
     parameter int    POLL_TICKS  = 512,
     parameter int    WIN_TICKS   = 8192,
-    parameter int    BAND_QW     = 128,
-    parameter int    SLEW_STEP   = 16
+    parameter int    BAND_QW     = (128 * SRC_RATE) / 22050,
+    // 0 = derive it from the rate (see SLEW_STEP_EFF). A fixed step is an
+    // ABSOLUTE increment delta, so its authority as a fraction of INC_NOM
+    // halves when SRC_RATE doubles -- at 44100 a step of 16 gives the loop
+    // half the trim range it has at 22050, and the tb's fast-producer case
+    // saturates. Deriving it keeps the relative range constant.
+    parameter int    SLEW_STEP   = 0
 ) (
     input  wire        reset,
     input  wire        clk,           // clk_audio, 24.576 MHz
 
     // Avalon-MM master (sysmem ram2). Single-beat transfers only.
     output reg  [28:0] ram_address,
-    output wire  [7:0] ram_burstcount,
+    output reg   [7:0] ram_burstcount,
     input  wire        ram_waitrequest,
     input  wire [63:0] ram_readdata,
     input  wire        ram_readdatavalid,
@@ -121,10 +127,20 @@ localparam int PW   = $clog2(RING_QWORDS);          // 13
 localparam int PMAX = RING_QWORDS - 1;
 
 // Phase increment, 1.0 == 65536. round(65536 * 22050/48000) = 30106.
+// The 64'd65536 is load-bearing: Verilog `int` is 32-bit signed, so a plain
+// 65536*SRC_RATE overflows for any SRC_RATE >= 32768 and INC_NOM comes out
+// NEGATIVE. That is why 44100 and 48000 produced a garbage increment (measured
+// nom -29266 at 44100) while 22050 was fine -- it is an arithmetic bug, not a
+// limit of the resampler.
 // The 0.4-LSB rounding error is +6.1e-6 relative (~0.13 Hz at 22050), an order
 // of magnitude below one slew step, and the loop absorbs it regardless.
-localparam int INC_NOM = (65536 * SRC_RATE + OUT_RATE/2) / OUT_RATE;
+localparam int INC_NOM = (64'd65536 * SRC_RATE + OUT_RATE/2) / OUT_RATE;
 localparam signed [17:0] INC_BASE = INC_NOM;
+
+// Slew step as a fixed fraction of the nominal increment (~0.053% each), so the
+// closed loop has the same relative authority at any SRC_RATE. 22050 -> 16,
+// 44100 -> 32, matching the hand-tuned value the 22050 build shipped with.
+localparam int SLEW_STEP_EFF = (SLEW_STEP != 0) ? SLEW_STEP : (INC_NOM / 1882);
 
 // Output tick divider: 24576000 / 48000 = 512, exact.
 localparam int OUT_DIV = CLK_RATE / OUT_RATE;
@@ -132,7 +148,14 @@ localparam int OUT_DIV = CLK_RATE / OUT_RATE;
 // Staging: 4 qwords = 8 stereo frames. alsa.sv gets by with a single qword;
 // the extra depth covers ddr_svc arbitration against ch1 without ever stalling
 // a sample tick.
-localparam int ST_DEPTH = 4;
+// [48k burst] Staging depth and burst length. The original single-beat fetch
+// (ST_DEPTH 4, burstcount 1) cost a full request/response round trip per qword
+// and measured ~8.7k qwords/s on hardware -- enough for 22.05 kHz (11k/s), not
+// for 48 kHz (24k/s), which starved and drained at 17.5 kHz. OpenBOR/MAMESTer
+// solve the same problem on the same bus by bursting into a deep FIFO; this is
+// that idea at the smaller scale this module needs.
+localparam int ST_DEPTH  = 32;
+localparam int BURST_MAX = 8;
 
 localparam logic S_IDLE = 1'b0,
                  S_WAIT = 1'b1;
@@ -154,8 +177,9 @@ reg [PW-1:0] wptr;              // qword index the host has filled up to
 reg          got_first;         // dropped the stale ring contents yet?
 
 reg [63:0] stage [ST_DEPTH];
-reg  [1:0] st_wr, st_rd;
-reg  [2:0] st_cnt;
+reg  [4:0] st_wr, st_rd;
+reg  [5:0] st_cnt;
+reg  [3:0] burst_rem;   // beats still owed by the in-flight J_DATA burst
 reg        st_half;             // which stereo frame of stage[st_rd]
 
 reg  state;
@@ -180,13 +204,25 @@ reg  [1:0] prime;               // frames loaded into the window so far (0..2)
 // ---------------------------------------------------------------------------
 wire rst = rst_sync[1];
 
-assign ram_burstcount = 8'd1;      // single-beat only
+// [48k burst] Driven per request: 1 for the pointer poll/publish, burst_len
+// for a sample fetch.
 assign ram_byteenable = 8'hFF;
 
 wire [PW-1:0] backlog = wptr - rptr;            // natural mod-RING_QWORDS
 
-wire st_full  = (st_cnt == ST_DEPTH[2:0]);
-wire st_empty = (st_cnt == 3'd0);
+wire st_full  = (st_cnt == ST_DEPTH[5:0]);
+wire st_empty = (st_cnt == 6'd0);
+
+// [48k burst] How many qwords this fetch may take: staging room, data the host
+// has actually written, and the distance to the ring's end -- a burst must not
+// wrap, since the address does not.
+wire [5:0]    st_room    = ST_DEPTH[5:0] - st_cnt;
+wire [PW:0]   wrap_room  = {1'b0, PMAX[PW-1:0]} - {1'b0, rptr} + {{PW{1'b0}}, 1'b1};
+wire [3:0]    lim_room   = (st_room   >= BURST_MAX[5:0])       ? BURST_MAX[3:0] : st_room[3:0];
+wire [3:0]    lim_avail  = (backlog   >= BURST_MAX[PW-1:0])    ? BURST_MAX[3:0] : backlog[3:0];
+wire [3:0]    lim_wrap   = (wrap_room >= BURST_MAX[PW:0])      ? BURST_MAX[3:0] : wrap_room[3:0];
+wire [3:0]    burst_len_a = (lim_room  < lim_avail) ? lim_room  : lim_avail;
+wire [3:0]    burst_len   = (burst_len_a < lim_wrap) ? burst_len_a : lim_wrap;
 wire st_push  = (state == S_WAIT) && ram_readdatavalid && (job == J_DATA);
 
 // The frame the interpolator will pull next.
@@ -194,9 +230,9 @@ wire [63:0] st_q  = stage[st_rd];
 wire [15:0] nxt_l = st_half ? st_q[47:32] : st_q[15:0];
 wire [15:0] nxt_r = st_half ? st_q[63:48] : st_q[31:16];
 
-wire want_data = !st_full && (backlog != '0) && got_first;
+wire want_data = (burst_len != 4'd0) && got_first;
 
-wire signed [17:0] inc = INC_BASE + slew * SLEW_STEP;
+wire signed [17:0] inc = INC_BASE + slew * SLEW_STEP_EFF;
 
 wire [16:0] phase_nxt = {1'b0, phase} + inc[16:0];
 wire        step      = phase_nxt[16];          // crossed into the next frame
@@ -278,9 +314,11 @@ always @(posedge clk) begin
         wptr          <= '0;
         got_first     <= 1'b0;
         pub_due       <= 1'b0;
-        st_wr         <= 2'd0;
-        st_rd         <= 2'd0;
-        st_cnt        <= 3'd0;
+        st_wr         <= 5'd0;
+        st_rd         <= 5'd0;
+        st_cnt        <= 6'd0;
+        burst_rem     <= 4'd0;
+        ram_burstcount<= 8'd1;
         st_half       <= 1'b0;
     end
     else begin
@@ -294,8 +332,9 @@ always @(posedge clk) begin
                 // can read past what the host has actually written, and a
                 // publish that never happens stalls the host's flow control.
                 if (poll_due || !got_first) begin
-                    ram_address <= WPTR_QW;
-                    ram_read    <= 1'b1;
+                    ram_address  <= WPTR_QW;
+                    ram_burstcount <= 8'd1;
+                    ram_read     <= 1'b1;
                     job         <= J_POLL;
                     poll_ack    <= 1'b1;
                     state       <= S_WAIT;
@@ -306,16 +345,19 @@ always @(posedge clk) begin
                     // The upper half is zeroed, as the retired ST_WRITE_AUDIO_RD
                     // did, so the whole qword is defined.
                     ram_writedata <= {32'd0, {{(32-PW-3){1'b0}}, rptr, 3'b000}};
+                    ram_burstcount <= 8'd1;
                     ram_write     <= 1'b1;
                     job           <= J_PUB;
                     pub_due       <= 1'b0;
                     state         <= S_WAIT;
                 end
                 else if (want_data) begin
-                    ram_address <= RING_QW + {{(29-PW){1'b0}}, rptr};
-                    ram_read    <= 1'b1;
-                    job         <= J_DATA;
-                    state       <= S_WAIT;
+                    ram_address    <= RING_QW + {{(29-PW){1'b0}}, rptr};
+                    ram_burstcount <= {4'd0, burst_len};
+                    burst_rem      <= burst_len;
+                    ram_read       <= 1'b1;
+                    job            <= J_DATA;
+                    state          <= S_WAIT;
                 end
             end
 
@@ -347,8 +389,11 @@ always @(posedge clk) begin
                         stage[st_wr] <= ram_readdata;
                         st_wr        <= st_wr + 1'b1;
                         rptr         <= (rptr == PMAX[PW-1:0]) ? '0 : rptr + 1'b1;
+                        burst_rem    <= burst_rem - 4'd1;
                     end
-                    state <= S_IDLE;
+                    // [48k burst] A poll/publish is one beat; a data burst owes
+                    // burst_len of them and must not release the bus early.
+                    if (job != J_DATA || burst_rem == 4'd1) state <= S_IDLE;
                 end
             end
         endcase

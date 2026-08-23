@@ -43,14 +43,20 @@ localparam int    RING_QWORDS = 8192;
 localparam [31:3] RING_QW     = 29'h0741A000;
 localparam [31:3] WPTR_QW     = 29'h07400006;
 localparam [31:3] RDPTR_QW    = 29'h07400007;
-localparam int    TARGET_QW   = 64;
+// Scaled with the rate for the same reason the DUT's defaults are: these are
+// buffer TIMES, and a fixed qword count silently halves them at double rate.
+localparam int    TARGET_QW   = (64 * SRC_RATE) / 22050;
 localparam int    POLL_TICKS  = 16;
 localparam int    WIN_TICKS   = 128;
-localparam int    BAND_QW     = 4;
-localparam int    SLEW_STEP   = 64;         // +/-4 steps = +/-0.85% capture
+localparam int    BAND_QW     = (4 * SRC_RATE) / 22050;
+// +/-4 steps = +/-0.85% capture, against C's 0.4%-fast producer. Scaled with
+// the rate: the step is an ABSOLUTE increment delta, so a fixed 64 gives only
+// +/-0.42% at 44100 and the loop saturates -- a property of the bench, not of
+// the DUT.
+localparam int    SLEW_STEP   = (64 * SRC_RATE) / 22050;
 
 // The exact ratio the DUT resamples by, in the same fixed point.
-localparam int    INC_NOM     = (65536 * SRC_RATE + OUT_RATE/2) / OUT_RATE;
+localparam int    INC_NOM     = (64'd65536 * SRC_RATE + OUT_RATE/2) / OUT_RATE;
 
 integer errors = 0;
 
@@ -130,6 +136,7 @@ reg [3:0]  wr_hold  = 0;
 reg        rd_busy  = 0;
 reg [7:0]  rd_lat   = 0;
 reg [28:0] addr_lat;
+reg [7:0]  beats_left = 0;   // [48k burst] beats still owed for the burst in flight
 integer    lfsr = 32'h1234_5678;
 
 // Init to 0, matching NativeAudioWriter_Init(), which zeroes the ring and
@@ -161,9 +168,10 @@ always @(posedge clk) begin
                 end
             end
             else begin
-                rd_busy  <= 1'b1;
-                addr_lat <= ram_address;
-                rd_lat   <= 8'd3 + lfsr[3:0];
+                rd_busy    <= 1'b1;
+                addr_lat   <= ram_address;
+                rd_lat     <= 8'd3 + lfsr[3:0];
+                beats_left <= (ram_burstcount == 8'd0) ? 8'd1 : ram_burstcount;
             end
             ram_waitrequest <= 1'b1;
             wr_hold         <= lfsr[1:0];
@@ -172,10 +180,14 @@ always @(posedge clk) begin
         if (rd_busy) begin
             if (rd_lat != 0) rd_lat <= rd_lat - 8'd1;
             else begin
+                // One beat per cycle for the length of the burst, addresses
+                // advancing — what the real slave returns.
                 ram_readdata      <= (addr_lat == WPTR_QW) ? {32'd0, wr_ptr_bytes}
                                                            : ring[addr_lat - RING_QW];
                 ram_readdatavalid <= 1'b1;
-                rd_busy           <= 1'b0;
+                addr_lat          <= addr_lat + 29'd1;
+                beats_left        <= beats_left - 8'd1;
+                if (beats_left <= 8'd1) rd_busy <= 1'b0;
             end
         end
     end
@@ -201,6 +213,12 @@ integer prod_acc  = 0;
 // |d| in {7,8} and ZOH would give {0,16}.
 localparam int M_CONST = 0, M_RAMP = 1;
 localparam int RAMP_SLOPE = 16;
+// Expected per-sample delta band for the rate under test: the interpolator
+// advances INC_NOM/65536 of a source frame per output sample, so a ramp of
+// RAMP_SLOPE comes out as deltas straddling that product. Derived, not
+// hardcoded, so this bench is meaningful at rates other than 22050.
+localparam int EXP_LO = (INC_NOM * RAMP_SLOPE) / 65536;
+localparam int EXP_HI = EXP_LO + 1;
 localparam int RAMP_PEAK  = 16384;
 
 integer src_mode  = M_CONST;
@@ -311,7 +329,7 @@ always @(posedge clk) begin
                 d_sum = d_sum + ad;
                 // Steady state on either leg of the triangle is |d| in {7,8}.
                 // Only the samples straddling an apex may fall outside.
-                if (ad != 7 && ad != 8) d_bad = d_bad + 1;
+                if (ad != EXP_LO && ad != EXP_HI) d_bad = d_bad + 1;
                 // Anti-ZOH: a held source sample gives |d| of exactly 0 or
                 // RAMP_SLOPE, never the fractional step in between. d_max
                 // covers the full-slope half; d_zoh counts the held half,
@@ -364,7 +382,13 @@ endtask
 
 initial begin
     $display("tb_gm_audio: INC_NOM=%0d (%0d/%0d)", INC_NOM, SRC_RATE, OUT_RATE);
-    chk(INC_NOM == 30106, "INC_NOM must be 30106 for 22050->48000");
+    // Guards the 32-bit overflow that made INC_NOM negative for any SRC_RATE
+    // >= 32768 (65536*SRC_RATE exceeds a Verilog int), which silently detuned
+    // 44100 and 48000 while leaving 22050 correct.
+    chk(INC_NOM > 0 && INC_NOM <= 65536,
+        "INC_NOM out of range -- 32-bit overflow in the increment?");
+    chk(INC_NOM == (64'd65536 * SRC_RATE + OUT_RATE/2) / OUT_RATE,
+        "INC_NOM does not match SRC_RATE/OUT_RATE");
 
     // -- A: a constant source must come out bit-exact ------------------------
     src_mode  = M_CONST;
@@ -393,7 +417,7 @@ initial begin
     chk(n_out > 80000, "B produced too few output samples");
     // Apex samples are the only legitimate off-band deltas: ~20 apexes over the
     // run, at most a couple of samples each.
-    chk(d_bad < 200, "B: too many deltas outside {7,8} -- window slid wrong");
+    chk(d_bad < 200, "B: too many deltas outside the expected band -- window slid wrong");
     // Under zero-order hold every delta would be 0 or RAMP_SLOPE, so d_max
     // would equal RAMP_SLOPE and d_zoh would be ~54% of n_out. Both gates are
     // three orders of magnitude away from the ZOH outcome.
