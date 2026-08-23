@@ -49,16 +49,24 @@ module openbor_video_timing (
 // 15,700 Hz and 59.92 Hz refresh unchanged). Active width 288 x 9 = 2592 MCLK
 // = 48.3 us, ~= the standard 47.7 us console window.
 localparam H_ACTIVE = `FB_W;
-localparam H_FP     = 16;
-localparam H_SYNC   = 34;
-localparam H_BP     = 42;
+// [320x240] H_TOTAL is held at 380 so the pixel clock, line rate and refresh are
+// all unchanged from the 288-wide build: the extra 32 active pixels come out of
+// the blanking budget (92 -> 60), keeping the same 16:34:42 proportions.
+// This is NOT Genesis-H40-exact geometry (that is 420 total at MCLK/8, as in
+// MiSTer_OpenBOR_7533); the active time here is 320 px at this core's MCLK/9
+// clock, so a CRT shows a slightly wider image than H40. Adopting H40 exactly
+// means changing the PLL as well, which is deliberately a separate step.
+localparam H_FP     = 10;
+localparam H_SYNC   = 22;
+localparam H_BP     = 28;
 localparam H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;   // 380 (3420 MCLK at /9)
 
 localparam V_ACTIVE = `FB_H;  // native game height; the 224-line V28 window shrunk
                               // 4 lines off top AND bottom == still CENTERED.
-localparam V_FP     = 14;     // V28's 10 + 4
+localparam V_FP     = 2;      // [320x240] 22 blanking lines for a 240-line active
+                              // area, keeping V_TOTAL at 262 (Genesis NTSC)
 localparam V_SYNC   = 3;      // NTSC vsync = 3 lines (unchanged)
-localparam V_BP     = 29;     // V28's 25 + 4
+localparam V_BP     = 17;     // [320x240] see V_FP above
 localparam V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP;   // 262 (H rate + refresh unchanged)
 
 // Derived boundaries — adjusted by OSD H/V position offset.

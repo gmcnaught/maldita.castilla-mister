@@ -20,12 +20,12 @@
 
 // GEOMETRY ROOT (this repo's Verilog domain). MUST equal the refmodel's
 // BLT_FB_WIDTH/HEIGHT — enforced by fpga/sim/gen_tri_golden.mk contract-check.
-`define FB_W        288
-`define FB_H        216
+`define FB_W        320
+`define FB_H        240
 // Derived — never retype a dimension (native-288x216 single-source rule).
-`define FB_QWORDS   (`FB_W * `FB_H / 4)   // 15552 (2 B/px, 8 B/qword)
-`define FB_PIXELS   (`FB_W * `FB_H)       // 62208
-`define FB_STRIDE_QW (`FB_W / 4)          // 72 qwords per framebuffer row
+`define FB_QWORDS   (`FB_W * `FB_H / 4)   // 19200 (2 B/px, 8 B/qword)
+`define FB_PIXELS   (`FB_W * `FB_H)       // 76800
+`define FB_STRIDE_QW (`FB_W / 4)          // 80 qwords per framebuffer row
 
 `define FB0_QW      29'h07400008          // 0x3A000040 (BUF0, existing)
 `define FB1_QW      29'h07408008          // 0x3A040040 (BUF1, existing)
