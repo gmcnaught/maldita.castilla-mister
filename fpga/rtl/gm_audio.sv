@@ -55,7 +55,18 @@ module gm_audio #(
     parameter int    OUT_RATE   = 48000,
     // Native rate of the PCM in the ring. Must match the host's NA_SAMPLE_RATE
     // (gmloader native_audio_writer.h).
-    parameter int    SRC_RATE   = 48000,   // [Donut Dodo] Godot mixes at 48 kHz;
+    parameter int    SRC_RATE   = 22050,   // [Donut Dodo] MEASURED CEILING, not a
+                                           // preference: at 48000 this module
+                                           // starves. frame_pull needs one source
+                                           // frame per 48 kHz output tick = 24000
+                                           // qword reads/s, and the fetch path is
+                                           // single-beat and non-pipelined
+                                           // (ram_burstcount = 1), sustaining only
+                                           // ~8.7k/s -- measured 17.5 kHz drain,
+                                           // with the fabric idle, so it is not
+                                           // DDR contention. 22050 needs 11k/s and
+                                           // runs exactly on rate. Raising this
+                                           // means bursting the fetch first.
                                            // LOCKSTEP with the host's audio open rate
 
     // Absolute qword addresses. These are byte>>3 and are NOT relative to any
