@@ -308,9 +308,33 @@ while ! fpga_ready; do
 done
 [ "$waited" -gt 0 ] && echo "maldita handler: waited ${waited}s for FPGA ready" >&2
 
-# Settle after readiness. The fabric's first DDR read is what jams
-# ddr_blitter_arb (G_BLT_RD has no timeout) if issued before the fabric is up.
-sleep 2
+# Settle after readiness — OFF BY DEFAULT, and here is why it can be.
+#
+# This was an unconditional `sleep 2`, on the theory that the fabric's first DDR
+# read is what jams ddr_blitter_arb (G_BLT_RD has no timeout) if it is issued
+# before the fabric is up. The theory is fine; the placement was not. Nothing
+# touches DDR at this point in the script — we still have to exec the engine,
+# which then dlopens libyoyo/libopenal/libstdc++, builds the GL thunk tables,
+# brings up EGL and loads a 49 MB game.droid before mf_fabric_bringup issues a
+# single beat. MEASURED on .81 2026-08-22 across four cold starts (menu.rbf
+# round-trip, then load_core, timestamped with `tail -F -s 0.05 | ts` plus a
+# 50 ms C_SUBMIT poller): launch.sh is forked ~0.5 s after load_core, this line
+# is reached ~1.2 s in, and the first fabric submit lands at ~12.9 s — so the
+# settle finished roughly TEN SECONDS before anything went near DDR. It was
+# buying nothing and costing 2 s of the 14.5 s time-to-first-drawn-frame.
+#
+# The readiness gate above is the part that actually gates: it polls the same
+# gpi bit MiSTer gates on, and on the `main=` path the wrapper has already
+# completed scheduler_wait_fpga_ready() before forking us, so this is the
+# second such wait either way. (The prior measurement noted above the gate --
+# gpi bit 31 set for a single ~40 ms sample, clear BEFORE /tmp/CORENAME changes
+# -- says the same thing from the other direction.)
+#
+# Kept as a knob rather than deleted so it can be restored without a code
+# change if a fabric bring-up ever turns out to need it: set
+# MALDITA_FPGA_SETTLE_S to a whole number of seconds.
+FPGA_SETTLE_S="${MALDITA_FPGA_SETTLE_S:-0}"
+[ "$FPGA_SETTLE_S" != "0" ] && sleep "$FPGA_SETTLE_S"
 
 # The fabric path REQUIRES BOTH of these (see CLAUDE.md): blitter level 2 gives
 # the engine ownership of rendering, and RASTER=mfgpu routes it to the FPGA
