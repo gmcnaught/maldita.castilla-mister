@@ -49,17 +49,15 @@ module openbor_video_timing (
 // 15,700 Hz and 59.92 Hz refresh unchanged). Active width 288 x 9 = 2592 MCLK
 // = 48.3 us, ~= the standard 47.7 us console window.
 localparam H_ACTIVE = `FB_W;
-// [320x240] H_TOTAL is held at 380 so the pixel clock, line rate and refresh are
-// all unchanged from the 288-wide build: the extra 32 active pixels come out of
-// the blanking budget (92 -> 60), keeping the same 16:34:42 proportions.
-// This is NOT Genesis-H40-exact geometry (that is 420 total at MCLK/8, as in
-// MiSTer_OpenBOR_7533); the active time here is 320 px at this core's MCLK/9
-// clock, so a CRT shows a slightly wider image than H40. Adopting H40 exactly
-// means changing the PLL as well, which is deliberately a separate step.
-localparam H_FP     = 10;
-localparam H_SYNC   = 22;
-localparam H_BP     = 28;
-localparam H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;   // 380 (3420 MCLK at /9)
+// [320x240] Genesis H40 geometry: 320 active + 100 blanking = 420 pixel clocks
+// per line, with CE_PIXEL (Maldita.sv) issuing those 420 pixels in exactly 3420
+// MCLK. Active time is the CRT-correct 47.68 us, matching NES/SNES/Genesis
+// image width, and the line rate and refresh are unchanged from the 288-wide
+// build. No PLL change: CLK_VIDEO was already the 53.693 MHz Genesis MCLK.
+localparam H_FP     = 17;
+localparam H_SYNC   = 38;
+localparam H_BP     = 45;
+localparam H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;   // 420 (3420 MCLK, mixed /8,/9,/10)
 
 localparam V_ACTIVE = `FB_H;  // native game height; the 224-line V28 window shrunk
                               // 4 lines off top AND bottom == still CENTERED.

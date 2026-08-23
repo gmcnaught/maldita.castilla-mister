@@ -55,7 +55,8 @@ module gm_audio #(
     parameter int    OUT_RATE   = 48000,
     // Native rate of the PCM in the ring. Must match the host's NA_SAMPLE_RATE
     // (gmloader native_audio_writer.h).
-    parameter int    SRC_RATE   = 22050,
+    parameter int    SRC_RATE   = 48000,   // [Donut Dodo] Godot mixes at 48 kHz;
+                                           // LOCKSTEP with the host's audio open rate
 
     // Absolute qword addresses. These are byte>>3 and are NOT relative to any
     // framebuffer base -- see the [audio-map] note in openbor_video_reader.sv.

@@ -186,21 +186,40 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 assign DDRAM_CLK = clk_sys;
 
-// CE_PIXEL: uniform /9 from CLK_VIDEO (53.693 MHz) — native 288-wide raster.
-// 380 px/line x 9 MCLK = 3420 MCLK/line (same as the Genesis H40 line we used
-// at 320 wide), so the 15,700 Hz H rate and 59.92 Hz refresh are unchanged.
-// The old mixed /8,/9,/10 blanking schedule is gone: every pixel is 9 MCLK.
+// CE_PIXEL: exact Genesis H40 timing from CLK_VIDEO (53.693 MHz), for the
+// 320-wide raster this core now renders. Active pixels are /8 (6.712 MHz) and
+// the blanking interval uses mixed /8,/9,/10 widths so a line still totals the
+// Genesis' 3420 MCLK — which is what keeps the 15,700 Hz H rate and 59.92 Hz
+// refresh identical to the 288-wide build while the active time becomes the
+// CRT-correct 47.68 us. Schedule (copied from MiSTer_OpenBOR_7533, which runs
+// this same geometry): 320@/8 + 28@/10 + 4@/9 + 68@/8 = 2560+280+36+544 = 3420.
 reg [3:0] ce_cnt;
 reg ce_pix_gen;
+reg [9:0] pix_in_line;
+
+wire in_active   = (pix_in_line < 10'd320);
+wire in_blank_10 = (pix_in_line >= 10'd320) && (pix_in_line < 10'd348);
+wire in_blank_9  = (pix_in_line >= 10'd348) && (pix_in_line < 10'd352);
+wire [3:0] pix_width = in_active   ? 4'd7 :   // /8: count 0-7
+                       in_blank_10 ? 4'd9 :   // /10
+                       in_blank_9  ? 4'd8 :   // /9
+                                     4'd7;    // /8 for the rest of blanking
 
 always @(posedge CLK_VIDEO) begin
 	if (RESET) begin
 		ce_cnt <= 4'd0;
 		ce_pix_gen <= 1'b0;
+		pix_in_line <= 10'd0;
 	end
 	else begin
 		ce_pix_gen <= (ce_cnt == 4'd0);
-		ce_cnt <= (ce_cnt == 4'd8) ? 4'd0 : (ce_cnt + 4'd1);
+		if (ce_cnt == pix_width) begin
+			ce_cnt <= 4'd0;
+			pix_in_line <= (pix_in_line == 10'd419) ? 10'd0 : (pix_in_line + 10'd1);
+		end
+		else begin
+			ce_cnt <= ce_cnt + 4'd1;
+		end
 	end
 end
 assign CE_PIXEL = ce_pix_gen;
