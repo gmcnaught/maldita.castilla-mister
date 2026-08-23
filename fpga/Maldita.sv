@@ -265,7 +265,7 @@ assign LED_POWER[0]= FB ? led[2] : act_cnt2[26] ? act_cnt2[25:18] > act_cnt2[7:0
 
 `include "build_id.v"
 localparam CONF_STR = {
-	"Maldita Castilla;;",
+	"DonutDodo;;",
 	"-;",
 	"OCE,H Position (CRT),0,+1,+2,+3,-3,-2,-1;",
 	"OFH,V Position (CRT),0,+1,+2,+3,-3,-2,-1;",
@@ -273,8 +273,14 @@ localparam CONF_STR = {
 	"OK,FPS Overlay,Off,On;",
 	"TJ,Reset;",
 	"-;",
-	"J1,Sword,Action,Item 1,Item 2,Pause;",
-	"jn,A,B,X,Y,Start;",
+	// Eight buttons, named for what our SDL joystick driver maps them to
+	// (SDL_sysjoystick_mister.c): the core's joystick word carries the d-pad in
+	// bits 0-3 and these in bits 4+, in this order, and the driver reports a
+	// gamepad mapping of A/B/X/Y/Start/Back/L/R from exactly that order. Naming
+	// all eight means every button the engine can see is assignable in the OSD,
+	// rather than the five this core inherited from Maldita.
+	"J1,A (Jump),B (Jump),X,Y,Start,Select/Coin,L,R;",
+	"jn,A,B,X,Y,Start,Select,L,R;",
 	"-;",
 	"V,v",`BUILD_DATE
 };
