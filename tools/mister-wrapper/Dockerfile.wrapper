@@ -22,6 +22,20 @@
 #       -t maldita-mister-wrapper-hps tools/mister-wrapper
 FROM debian:bullseye-slim
 
+# bullseye has left the live mirrors (debian-security 404s on packages its own
+# index lists), so install from a fixed snapshot.debian.org date -- the same one
+# scripts/ci/debian_bullseye_snapshot.sh pins for the ARM engine build. Plain
+# http because ca-certificates is not installed yet; apt still verifies the
+# archive signatures. The snapshot's Release files are past Valid-Until.
+ARG DEBIAN_SNAPSHOT=20260801T000000Z
+RUN printf '%s\n' \
+      "deb http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bullseye main" \
+      "deb http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bullseye-updates main" \
+      "deb http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bullseye-security main" \
+      > /etc/apt/sources.list \
+ && printf '%s\n' 'Acquire::Check-Valid-Until "false";' 'Acquire::Retries "5";' \
+      > /etc/apt/apt.conf.d/99snapshot
+
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
       make git rsync ca-certificates \

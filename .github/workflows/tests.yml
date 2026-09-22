@@ -127,8 +127,9 @@ jobs:
         run: |
           docker run --rm --platform linux/arm/v7 \
             -v "$PWD/external/gmloader-next:/src" -w /src \
+            -v "$PWD/scripts/ci/debian_bullseye_snapshot.sh:/debian_bullseye_snapshot.sh:ro" \
             arm32v7/debian:bullseye-slim \
-            bash .github/scripts/build_mister_arm.sh
+            sh -c 'sh /debian_bullseye_snapshot.sh && exec bash .github/scripts/build_mister_arm.sh'
 
       - name: Build MiSTer_Maldita (same recipe as release.yml's build-wrapper)
         # The assembler now requires the main= wrapper and gates it on its ELF
