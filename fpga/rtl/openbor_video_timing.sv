@@ -59,12 +59,11 @@ localparam H_SYNC   = 38;
 localparam H_BP     = 45;
 localparam H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;   // 420 (3420 MCLK, mixed /8,/9,/10)
 
-localparam V_ACTIVE = `FB_H;  // native game height; the 224-line V28 window shrunk
-                              // 4 lines off top AND bottom == still CENTERED.
-localparam V_FP     = 2;      // [320x240] 22 blanking lines for a 240-line active
-                              // area, keeping V_TOTAL at 262 (Genesis NTSC)
+localparam V_ACTIVE = `DISP_H; // 224-line V28 window of the `FB_H framebuffer
+                              // (blitter_defs.vh: rows `DISP_Y0.. are scanned out)
+localparam V_FP     = 11;     // Genesis V28 NTSC: 8 bottom border + 3 blank
 localparam V_SYNC   = 3;      // NTSC vsync = 3 lines (unchanged)
-localparam V_BP     = 17;     // [320x240] see V_FP above
+localparam V_BP     = 24;     // Genesis V28 NTSC: 13 blank + 11 top border
 localparam V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP;   // 262 (H rate + refresh unchanged)
 
 // Derived boundaries — adjusted by OSD H/V position offset.

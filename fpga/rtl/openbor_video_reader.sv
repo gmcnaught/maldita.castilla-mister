@@ -206,9 +206,10 @@ localparam [28:0] DIAG_ADDR       = FB_QW_BASE + 29'h16000; // = byte 0x3BFF0000
 localparam [7:0]  LINE_BURST   = 8'(`FB_STRIDE_QW);
 // Each scanline takes `FB_STRIDE_QW qword addresses
 localparam [28:0] LINE_STRIDE  = 29'(`FB_STRIDE_QW);
-// Display lines (== timing V_ACTIVE == `FB_H, so every fetched row is displayed —
-// the old 240-vs-224 bottom-crop mismatch is structurally gone)
-localparam [8:0]  V_ACTIVE     = 9'(`FB_H);
+// Display lines (== timing V_ACTIVE == `DISP_H, so every fetched row is displayed).
+// Display line N shows framebuffer row N + `DISP_Y0 (blitter_defs.vh).
+localparam [8:0]  V_ACTIVE     = 9'(`DISP_H);
+localparam [8:0]  DISP_Y0      = 9'(`DISP_Y0);
 
 localparam [19:0] TIMEOUT_MAX = 20'hF_FFFF;
 
@@ -977,7 +978,7 @@ always @(posedge ddr_clk) begin
                     // cited a V_ACTIVE=240-vs-224-displayed-lines mismatch; both are `FB_H
                     // = 216 now — V_ACTIVE:206 and openbor_video_timing.sv:57 take the
                     // same root — so that particular offset is structurally gone.)
-                    ddr_addr     <= buf_base_addr + (display_line * LINE_STRIDE);
+                    ddr_addr     <= buf_base_addr + ((display_line + DISP_Y0) * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // `FB_STRIDE_QW-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;

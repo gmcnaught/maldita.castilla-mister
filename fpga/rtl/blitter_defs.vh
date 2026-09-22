@@ -27,6 +27,14 @@
 `define FB_PIXELS   (`FB_W * `FB_H)       // 76800
 `define FB_STRIDE_QW (`FB_W / 4)          // 80 qwords per framebuffer row
 
+// SCANOUT WINDOW. The fabric still renders all `FB_H rows; the CRT is sent a
+// 224-line (Genesis V28) window of them, the height consumer sets actually show
+// -- a full 240-line picture lost ~8 lines top and more at the bottom to
+// overscan. Donut Dodo leaves rows 0-6 blank and starts its HUD at row 7, so the
+// window is rows 7..230 and only the bottom floor edge (231..239) is cropped.
+`define DISP_H      224                   // scanout active lines (timing V_ACTIVE)
+`define DISP_Y0     7                     // first framebuffer row scanned out
+
 `define FB0_QW      29'h07400008          // 0x3A000040 (BUF0, existing)
 `define FB1_QW      29'h07408008          // 0x3A040040 (BUF1, existing)
 `define VCTRL_QW    29'h07400000          // 0x3A000000 (video control word)
