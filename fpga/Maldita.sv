@@ -273,14 +273,20 @@ localparam CONF_STR = {
 	"OK,FPS Overlay,Off,On;",
 	"TJ,Reset;",
 	"-;",
-	// Eight buttons, named for what our SDL joystick driver maps them to
-	// (SDL_sysjoystick_mister.c): the core's joystick word carries the d-pad in
-	// bits 0-3 and these in bits 4+, in this order, and the driver reports a
-	// gamepad mapping of A/B/X/Y/Start/Back/L/R from exactly that order. Naming
-	// all eight means every button the engine can see is assignable in the OSD,
-	// rather than the five this core inherited from Maldita.
-	"J1,A (Jump),B (Jump),X,Y,Start,Select/Coin,L,R;",
-	"jn,A,B,X,Y,Start,Select,L,R;",
+	// Eight buttons: the joystick word carries the d-pad in bits 0-3 and these
+	// in bits 4+, in this order. Our SDL driver (SDL_sysjoystick_mister.c) hands
+	// them to Godot as joypad indices 0,1,2,3,11,10,4,5, and Godot's indices are
+	// POSITIONAL (0 bottom, 1 right, 2 left, 3 top face button). The labels name
+	// what Donut Dodo binds to each index (its controller_mapping.dat); the
+	// unused ones stay named, not "-", because Main_MiSTer skips "-" entries and
+	// the names after one would shift.
+	//
+	// jn is the default map for a pad with no per-core map file. Main_MiSTer
+	// matches it by SNES label (A right, B bottom, X top, Y left), so the
+	// positional order Godot expects is B,A,Y,X -- not A,B,X,Y, which put Jump
+	// on the right button.
+	"J1,Jump/OK,Back,Unused,Options,Start,Select/Coin,Unused L,Unused R;",
+	"jn,B,A,Y,X,Start,Select,L,R;",
 	"-;",
 	"V,v",`BUILD_DATE
 };
