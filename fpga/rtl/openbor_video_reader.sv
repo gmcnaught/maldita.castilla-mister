@@ -207,9 +207,9 @@ localparam [7:0]  LINE_BURST   = 8'(`FB_STRIDE_QW);
 // Each scanline takes `FB_STRIDE_QW qword addresses
 localparam [28:0] LINE_STRIDE  = 29'(`FB_STRIDE_QW);
 // Display lines (== timing V_ACTIVE == `DISP_H, so every fetched row is displayed).
-// Display line N shows framebuffer row floor(N * `FB_H / `DISP_H): the frame is
-// scaled, nearest-neighbour, into the 224 output lines (blitter_defs.vh).
+// Display line N shows framebuffer row N + `DISP_Y0 (blitter_defs.vh).
 localparam [8:0]  V_ACTIVE     = 9'(`DISP_H);
+localparam [8:0]  DISP_Y0      = 9'(`DISP_Y0);
 
 localparam [19:0] TIMEOUT_MAX = 20'hF_FFFF;
 
@@ -389,10 +389,7 @@ reg         active_buffer;
 reg  [31:0] vsync_count;      // increments each displayed frame; written to VSYNC_ADDR
 reg  [28:0] buf_base_addr;   // [DDR-scanout custom-reader/Option A] DDR qword base of the ACTIVE
                              // display buffer, latched at ST_CHECK_CTRL (BUF0/BUF1 by active_buffer)
-reg  [8:0]  display_line;     // 0..`DISP_H-1 (output display line)
-// Framebuffer row fetched for display_line (scaled `FB_H -> `DISP_H, blitter_defs.vh).
-wire [21:0] src_row_mul = display_line * 13'(`DISP_ROW_MUL);
-wire [8:0]  src_row     = src_row_mul[`DISP_ROW_SHIFT +: 9];
+reg  [8:0]  display_line;     // 0..239 (output display line, also = source line)
 reg  [6:0]  beat_count;
 // [#39 probe] OR-accumulate every ddr_dout (FB data read) over a
 // frame; published in the VSYNC writeback high word (0x3A070004). Non-zero ->
@@ -981,7 +978,7 @@ always @(posedge ddr_clk) begin
                     // cited a V_ACTIVE=240-vs-224-displayed-lines mismatch; both are `FB_H
                     // = 216 now — V_ACTIVE:206 and openbor_video_timing.sv:57 take the
                     // same root — so that particular offset is structurally gone.)
-                    ddr_addr     <= buf_base_addr + (src_row * LINE_STRIDE);
+                    ddr_addr     <= buf_base_addr + ((display_line + DISP_Y0) * LINE_STRIDE);
                     ddr_burstcnt <= LINE_BURST;      // `FB_STRIDE_QW-beat burst
                     ddr_rd       <= 1'b1;
                     beat_count   <= 7'd0;

@@ -27,18 +27,13 @@
 `define FB_PIXELS   (`FB_W * `FB_H)       // 76800
 `define FB_STRIDE_QW (`FB_W / 4)          // 80 qwords per framebuffer row
 
-// SCANOUT HEIGHT. The fabric renders all `FB_H rows; the CRT is sent 224 lines
-// (Genesis V28), the height consumer sets actually show -- a full 240-line
-// picture lost ~8 lines top and more at the bottom to overscan. The whole frame
-// is scaled into those 224 lines, nearest-neighbour: display line n shows
-// framebuffer row floor(n * `FB_H / `DISP_H), which drops one row in 15
-// (14, 29, ... 239) and crops nothing.
+// SCANOUT WINDOW. The fabric still renders all `FB_H rows; the CRT is sent a
+// 224-line (Genesis V28) window of them, the height consumer sets actually show
+// -- a full 240-line picture lost ~8 lines top and more at the bottom to
+// overscan. Donut Dodo leaves rows 0-6 blank and starts its HUD at row 7, so the
+// window is rows 7..230 and only the bottom floor edge (231..239) is cropped.
 `define DISP_H      224                   // scanout active lines (timing V_ACTIVE)
-// floor(n * 240 / 224) == (n * 4389) >> 12 exactly for every n < 224 (checked
-// exhaustively); retune both if FB_H or DISP_H change -- tb_reader_ddr checks
-// the mapping against the exact division.
-`define DISP_ROW_MUL   4389
-`define DISP_ROW_SHIFT 12
+`define DISP_Y0     7                     // first framebuffer row scanned out
 
 `define FB0_QW      29'h07400008          // 0x3A000040 (BUF0, existing)
 `define FB1_QW      29'h07408008          // 0x3A040040 (BUF1, existing)

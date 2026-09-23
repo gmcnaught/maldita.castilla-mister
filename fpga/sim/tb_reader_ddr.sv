@@ -57,9 +57,7 @@ module tb_reader_ddr;
     localparam integer STRIDE = `FB_STRIDE_QW;   // qwords per FB row (72 @288)
     localparam [7:0]   BURST_B = 8'(`FB_STRIDE_QW); // reader per-line burst-beat count (sized)
     localparam integer VACT   = `DISP_H;    // scanout window lines (timing V_ACTIVE)
-    // Screen row r shows framebuffer row floor(r * FB_H / DISP_H) -- the exact
-    // division, independent of the RTL's multiply-shift form.
-    function integer srow(input integer r); srow = (r * `FB_H) / `DISP_H; endfunction
+    localparam integer Y0     = `DISP_Y0;   // screen row r shows framebuffer row r + Y0
     localparam integer HACT   = `FB_W;
 
     reg clk = 1'b0; always #5 clk = ~clk;          // single clock (clk_vid == ddr_clk)
@@ -422,15 +420,15 @@ module tb_reader_ddr;
     integer addr_errs = 0, data_errs = 0, orient_errs = 0, active_err = 0;
     integer addr_checks = 0, data_checks = 0, orient_checks = 0;
 
-    // (a) burst address: FORWARD source line (srow(display_line)).
+    // (a) burst address: FORWARD source line (display_line + Y0).
     wire burst_issue = r_rd && (r_burstcnt == BURST_B) && !serving;
     always @(posedge clk) begin
         if (!reset && burst_issue) begin
             if (r_addr !== ((u_reader.active_buffer ? BUF1 : BUF0)
-                            + (srow(u_reader.display_line) * STRIDE))) begin
+                            + ((u_reader.display_line + Y0) * STRIDE))) begin
                 if (addr_errs < 8) $display("  ADDR MISMATCH line=%0d active=%0b got=%h exp=%h",
                     u_reader.display_line, u_reader.active_buffer, r_addr,
-                    (u_reader.active_buffer ? BUF1 : BUF0) + (srow(u_reader.display_line) * STRIDE));
+                    (u_reader.active_buffer ? BUF1 : BUF0) + ((u_reader.display_line + Y0) * STRIDE));
                 addr_errs = addr_errs + 1;
             end
             addr_checks = addr_checks + 1;
@@ -441,8 +439,8 @@ module tb_reader_ddr;
     always @(posedge clk) begin
         if (!reset && u_reader.lb_we) begin
             if (u_reader.lb_wdata !== (u_reader.active_buffer
-                    ? mem1[srow(u_reader.display_line) * STRIDE + u_reader.lb_waddr[6:0]]
-                    : mem0[srow(u_reader.display_line) * STRIDE + u_reader.lb_waddr[6:0]])) begin
+                    ? mem1[(u_reader.display_line + Y0) * STRIDE + u_reader.lb_waddr[6:0]]
+                    : mem0[(u_reader.display_line + Y0) * STRIDE + u_reader.lb_waddr[6:0]])) begin
                 if (data_errs < 8) $display("  DATA MISMATCH line=%0d beat=%0d",
                     u_reader.display_line, u_reader.lb_waddr[6:0]);
                 data_errs = data_errs + 1;
@@ -472,10 +470,10 @@ module tb_reader_ddr;
             // X reversal (col `FB_W-1-c) and a Y reversal (row `FB_H-1-d) fail this.
             // [#15] the `tim_vc < VACT-1` exclusion is GONE: row 215 is the last ACTIVE line,
             // not a vblank line, and rows 214/215 are exactly where the defect lives.
-            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, srow(tim_vc))) begin
+            if (u_reader.cur_pix !== bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc + Y0)) begin
                 if (orient_errs < 8) $display("  ORIENT MISMATCH screen(%0d,%0d) got=%h exp=%h (buf px %0d,%0d)",
                     u_reader.hcol, tim_vc, u_reader.cur_pix,
-                    bufpix(u_reader.active_buffer, u_reader.hcol, srow(tim_vc)),
+                    bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc + Y0),
                     u_reader.hcol, tim_vc);
                 orient_errs = orient_errs + 1;
             end
@@ -507,7 +505,7 @@ module tb_reader_ddr;
         if (!reset && orient_arm && ce_pix && tim_de && u_reader.frame_ready_vid
             && (u_reader.display_line == (tim_vc + 9'd1))
             && tim_hc < 10'(HACT) && tim_vc < 9'(VACT)) begin
-            exp24 = dec24(bufpix(u_reader.active_buffer, tim_hc, srow(tim_vc)));
+            exp24 = dec24(bufpix(u_reader.active_buffer, tim_hc, tim_vc + Y0));
             got24 = {reader_r, reader_g, reader_b};
             if (got24 !== exp24) begin
                 if (phase_errs < 8) $display("  PHASE MISMATCH screen(%0d,%0d) got=%h exp=%h",
@@ -581,9 +579,9 @@ module tb_reader_ddr;
             // classifier below only consults row_dup0 under `row_dup0[rr] == row_pix[rr]`,
             // i.e. EVERY pixel of the row was wrong, and a pixel that matched its own row
             // was never one of those.
-            if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, srow(tim_vc)))
+            if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, tim_vc + Y0))
                 row_ok[tim_vc] = row_ok[tim_vc] + 1;
-            else if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, 0))
+            else if (u_reader.cur_pix === bufpix(u_reader.active_buffer, u_reader.hcol, Y0))
                 row_dup0[tim_vc] = row_dup0[tim_vc] + 1;
             row_bsrc[tim_vc] = bank_src[tim_vc[0]];
         end
