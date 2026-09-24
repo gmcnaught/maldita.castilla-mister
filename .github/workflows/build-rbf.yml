@@ -106,7 +106,8 @@ jobs:
       - name: Cash Cow DX branding (CASHCOW_CORE)
         if: ${{ github.event.inputs.core_variant == 'cashcow' }}
         run: |
-          echo 'set_global_assignment -name VERILOG_MACRO "CASHCOW_CORE=1"' >> fpga/Maldita.qsf
+          # Maldita.qsf has no trailing newline: start on a fresh line.
+          printf '\nset_global_assignment -name VERILOG_MACRO "CASHCOW_CORE=1"\n' >> fpga/Maldita.qsf
           grep CASHCOW_CORE fpga/Maldita.qsf
 
       - name: Compile RBF (local Quartus Lite 17.0)
@@ -177,7 +178,8 @@ jobs:
       - name: Cash Cow DX branding (CASHCOW_CORE)
         if: ${{ github.event.inputs.core_variant == 'cashcow' }}
         run: |
-          echo 'set_global_assignment -name VERILOG_MACRO "CASHCOW_CORE=1"' >> fpga/Maldita.qsf
+          # Maldita.qsf has no trailing newline: start on a fresh line.
+          printf '\nset_global_assignment -name VERILOG_MACRO "CASHCOW_CORE=1"\n' >> fpga/Maldita.qsf
           grep CASHCOW_CORE fpga/Maldita.qsf
 
       - name: Free disk space (Quartus needs ~24 GB)
