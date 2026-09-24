@@ -55,12 +55,17 @@ on:
         description: 'Fitter SEED override (blank = use committed Maldita.qsf value)'
         type: string
         default: ''
+      core_variant:
+        description: 'Core branding: donutdodo (CORENAME DonutDodo) or cashcow (CORENAME CashCowDX, Cash Cow button labels); same RTL'
+        type: choice
+        options: [donutdodo, cashcow]
+        default: donutdodo
 
 # Key the concurrency group on the SDRAM phase + seed too (#34 sweeps) so sweep
 # dispatches do NOT cancel each other — each combo is its own group. Push builds
 # (empty inputs) still collapse to one group and cancel redundant runs.
 concurrency:
-  group: build-rbf-${{ github.ref }}-${{ github.event.inputs.sdram_phase }}-${{ github.event.inputs.seed }}
+  group: build-rbf-${{ github.ref }}-${{ github.event.inputs.sdram_phase }}-${{ github.event.inputs.seed }}-${{ github.event.inputs.core_variant }}
   cancel-in-progress: true
 
 jobs:
@@ -97,6 +102,12 @@ jobs:
         run: |
           sed -i 's/-name SEED [0-9]*/-name SEED ${{ github.event.inputs.seed }}/' fpga/Maldita.qsf
           grep "name SEED" fpga/Maldita.qsf
+
+      - name: Cash Cow DX branding (CASHCOW_CORE)
+        if: ${{ github.event.inputs.core_variant == 'cashcow' }}
+        run: |
+          echo 'set_global_assignment -name VERILOG_MACRO "CASHCOW_CORE=1"' >> fpga/Maldita.qsf
+          grep CASHCOW_CORE fpga/Maldita.qsf
 
       - name: Compile RBF (local Quartus Lite 17.0)
         run: |
@@ -162,6 +173,12 @@ jobs:
         run: |
           sed -i 's/-name SEED [0-9]*/-name SEED ${{ github.event.inputs.seed }}/' fpga/Maldita.qsf
           grep "name SEED" fpga/Maldita.qsf
+
+      - name: Cash Cow DX branding (CASHCOW_CORE)
+        if: ${{ github.event.inputs.core_variant == 'cashcow' }}
+        run: |
+          echo 'set_global_assignment -name VERILOG_MACRO "CASHCOW_CORE=1"' >> fpga/Maldita.qsf
+          grep CASHCOW_CORE fpga/Maldita.qsf
 
       - name: Free disk space (Quartus needs ~24 GB)
         uses: jlumbroso/free-disk-space@main

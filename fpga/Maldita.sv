@@ -264,8 +264,20 @@ assign LED_POWER[0]= FB ? led[2] : act_cnt2[26] ? act_cnt2[25:18] > act_cnt2[7:0
 
 
 `include "build_id.v"
+// CASHCOW_CORE (build-rbf.yml input core_variant=cashcow) brands the same
+// bitstream for Cash Cow DX: its own CORENAME (config, OSD maps, the handler
+// daemon's routing key) and button labels. The RTL is identical.
+`ifdef CASHCOW_CORE
+`define CORE_NAME_STR "CashCowDX;;"
+// Cash Cow's engine maps word bits 4.. to Godot A,B,X,Y,Start,Back,L,R; the
+// game binds A=jump/accept, B=cancel, Start, Back=select; nothing else.
+`define CORE_J1_STR "J1,Jump/OK,Back,Unused X,Unused Y,Start,Select,Unused L,Unused R;"
+`else
+`define CORE_NAME_STR "DonutDodo;;"
+`define CORE_J1_STR "J1,Jump/OK,Back,Unused,Options,Start,Select/Coin,Unused L,Unused R;"
+`endif
 localparam CONF_STR = {
-	"DonutDodo;;",
+	`CORE_NAME_STR,
 	"-;",
 	"OCE,H Position (CRT),0,+1,+2,+3,-3,-2,-1;",
 	"OFH,V Position (CRT),0,+1,+2,+3,-3,-2,-1;",
@@ -285,7 +297,7 @@ localparam CONF_STR = {
 	// matches it by SNES label (A right, B bottom, X top, Y left), so the
 	// positional order Godot expects is B,A,Y,X -- not A,B,X,Y, which put Jump
 	// on the right button.
-	"J1,Jump/OK,Back,Unused,Options,Start,Select/Coin,Unused L,Unused R;",
+	`CORE_J1_STR,
 	"jn,B,A,Y,X,Start,Select,L,R;",
 	"-;",
 	"V,v",`BUILD_DATE
