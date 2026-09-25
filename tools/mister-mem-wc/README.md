@@ -115,32 +115,39 @@ arm-linux-gnueabihf-objdump -d build/arm-linux-gnueabihf/gmloader/mister/raster_
 
 ## Build
 
-Needs the MiSTer kernel source prepared for out-of-tree modules, built with the
-same toolchain the kernel used (`arm-none-linux-gnueabihf-gcc 10.2.1` for
-5.15.1-MiSTer — check `/proc/version` on your device).
+`build_prebuilt.sh` does the whole thing in a throwaway `debian:bookworm`
+container (Docker is the only host dependency):
 
 ```sh
-# 1. Matching kernel source
-git clone https://github.com/MiSTer-devel/Linux-Kernel_MiSTer
-cd Linux-Kernel_MiSTer
-# check out the commit that produces the device's kernel version
-
-# 2. Prepare it with the DEVICE'S OWN config so vermagic matches
-scp root@<device>:/proc/config.gz . && zcat config.gz > .config
-export ARCH=arm
-export CROSS_COMPILE=/opt/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf/bin/arm-none-linux-gnueabihf-
-make olddefconfig
-make modules_prepare
-
-# 3. Build
-cd /path/to/maldita.castilla-mister/tools/mister-mem-wc
-make KDIR=/path/to/Linux-Kernel_MiSTer
+tools/mister-mem-wc/build_prebuilt.sh --host 192.168.20.81     # config + release from the device
+tools/mister-mem-wc/build_prebuilt.sh --config config --release 6.18.38-MiSTer
+#   [--ref <git ref>]   Linux-Kernel_MiSTer commit/branch (default: MiSTer-v6.18)
 ```
 
-Produces `mem_wc.ko`. The running kernel has `CONFIG_MODVERSIONS` and
-`CONFIG_MODULE_SIG` off, so there is no symbol-CRC matching and no signing —
-**only the vermagic string has to match**, which building against the same
-source + `.config` guarantees.
+It shallow-fetches `MiSTer-devel/Linux-Kernel_MiSTer` at `--ref`, applies the
+device's own `/proc/config.gz`, runs `modules_prepare` with the ARM GNU Toolchain
+10.2-2020.11 (the compiler `/proc/version` names for both 5.15.1 and 6.18.38),
+builds, strips, and writes `prebuilt/mem_wc-<release>.ko`. It fails unless the
+module's vermagic begins with exactly the device's `uname -r`, and unless every
+symbol the module imports has an `EXPORT_SYMBOL*` in the kernel source.
+
+Three things it handles that a hand build gets wrong:
+
+- **Case-sensitive checkout.** A macOS clone of the kernel silently drops one of
+  each `xt_CONNMARK`/`xt_connmark`-style case pair; the container's filesystem
+  does not.
+- **`-MiSTer` is not in the config** (`CONFIG_LOCALVERSION` is empty). The MiSTer
+  build passes it as `LOCALVERSION`; the script derives it from the release.
+- **No `Module.symvers`** after `modules_prepare`, so modpost runs with
+  `KBUILD_MODPOST_WARN=1` and the export check above stands in for it (6.18's
+  `/proc/kallsyms` no longer lists `__ksymtab_*`, so the device cannot be asked).
+
+The running kernel has `CONFIG_MODVERSIONS` and `CONFIG_MODULE_SIG` off, so
+there is no symbol-CRC matching and no signing — **only the vermagic string has
+to match**. The decisive check is still an `insmod` on the device.
+
+The `Makefile` remains for a hand build against an already-prepared tree
+(`make KDIR=/path/to/Linux-Kernel_MiSTer`).
 
 ## Prebuilt
 
@@ -148,6 +155,7 @@ source + `.config` guarantees.
 
 ```
 prebuilt/mem_wc-5.15.1-MiSTer.ko     5.3 KB, vermagic "5.15.1-MiSTer SMP mod_unload ARMv7 p2v8"
+prebuilt/mem_wc-6.18.38-MiSTer.ko    6.0 KB, vermagic "6.18.38-MiSTer SMP mod_unload ARMv7 p2v8"
 ```
 
 Committed rather than left to every user to build, because building it needs a
@@ -162,9 +170,15 @@ object for this release, say so and carry on", never "ship the 5.15.1 object to 
 device's `uname -r` for that reason. After building against a new kernel:
 
 ```sh
-make prebuilt KDIR=/path/to/Linux-Kernel_MiSTer   # strips + names it by vermagic
-git add prebuilt/mem_wc-<release>.ko
+tools/mister-mem-wc/build_prebuilt.sh --host <device>   # strips + names it by vermagic
+git add tools/mister-mem-wc/prebuilt/mem_wc-<release>.ko
 ```
+
+The 6.18.38 object was built at `Linux-Kernel_MiSTer@794ad00d1` and checked on
+`.81` (kernel built 2026-09-12): `insmod` clean, 1 MiB write/readback through
+`/dev/mem_wc` correct, an out-of-window `mmap` refused with `EPERM`, and
+Python `mmap` slice writes at **699 MB/s** through `/dev/mem_wc` against
+**78 MB/s** through `/dev/mem` into the same bytes.
 
 `mem_wc.ko` at the top of this directory is a local build and stays gitignored.
 

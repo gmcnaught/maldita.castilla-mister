@@ -143,9 +143,10 @@ engine map the FPGA's command rings and texture heap **write-combining**
 instead of strongly-ordered — measured on a DE10-Nano, `memcpy` into that
 window goes from 80 MB/s to 814 MB/s.
 
-Nothing about it is required. The module is built out-of-tree against one
-MiSTer kernel, so it ships under that kernel's name (`mem_wc-5.15.1-MiSTer.ko`)
-and the loader only uses it if it matches your `uname -r`. On any other kernel
+Nothing about it is required. The module is built out-of-tree per MiSTer
+kernel, so one object ships per kernel under that kernel's name
+(`mem_wc-5.15.1-MiSTer.ko`, `mem_wc-6.18.38-MiSTer.ko`) and the loader only
+uses the one that matches your `uname -r`. On any other kernel
 nothing is loaded and the engine uses the ordinary mapping — you lose frame
 rate, not the game. The loader also leaves a `mem_wc` module alone if another
 core already loaded one. Which of those happened is the `mem_wc:` line in
