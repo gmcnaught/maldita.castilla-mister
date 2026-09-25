@@ -529,8 +529,72 @@ fi
 attempt="$(cat "$FABRIC_RETRY_MARK" 2>/dev/null)"
 case "$attempt" in ''|*[!0-9]*) attempt=0 ;; esac
 
-./gmloader -c gmloader.json >> "$LOGDIR/maldita.log" 2>&1 &
+# --- CPU isolation (MALDITA_CPUISOLATE, default ON) ---------------------------
+# The engine keeps its render thread on CPU0 and moves its own other threads to
+# CPU1 (gmloader-next cpu_isolate.c). This is the other half: CPU0 also takes the
+# USB controller interrupt (dwc2, ~2,800/s on .81 with nothing plugged in but a
+# pad) and every polling shell on the system (Master_Daemon, other ports'
+# daemons, remote.sh), each of which preempts the render thread. The fps-dip
+# harness (scripts/fpsdip/) measured the render thread at ~210 involuntary
+# context switches/s. Move all of it to CPU1 for as long as the engine runs, and
+# restore the saved masks after `wait` below. Main_MiSTer (MiSTer, or our main=
+# build MiSTer_Maldita) pins itself and is never touched. Same split as the
+# Solarus core's solarus_run.sh and Cash Cow DX's launch.sh.
+#
+# A state file left by an `exec` path (which cannot restore) is restored first,
+# so a launch never inherits masks it did not save.
+CPU_STATE=/tmp/maldita_cpu_state
+cpu_restore() {
+    [ -f "$CPU_STATE" ] || return 0
+    local kind id mask
+    while read -r kind id mask; do
+        case "$kind" in
+            irq) echo "$mask" > "/proc/irq/$id/smp_affinity" 2>/dev/null ;;
+            pid) taskset -a -p "$mask" "$id" >/dev/null 2>&1 ;;
+        esac
+    done < "$CPU_STATE"
+    rm -f "$CPU_STATE"
+}
+cpu_isolate() {
+    [ "${MALDITA_CPUISOLATE:-1}" = 1 ] || return 0
+    [ "$(nproc 2>/dev/null || echo 1)" -ge 2 ] || return 0
+    local irq m d pid cmd comm k old
+    : > "$CPU_STATE"
+    irq=$(awk -F: '/dwc2_hsotg/{gsub(/ /,"",$1); print $1; exit}' /proc/interrupts 2>/dev/null)
+    if [ -n "$irq" ] && m=$(cat "/proc/irq/$irq/smp_affinity" 2>/dev/null) \
+       && echo 2 > "/proc/irq/$irq/smp_affinity" 2>/dev/null; then
+        echo "irq $irq $m" >> "$CPU_STATE"
+    fi
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        [ "$pid" = "$$" ] && continue                 # moved after the engine starts
+        cmd=""; read -r -d '' cmd 2>/dev/null < "$d/cmdline"
+        [ -n "$cmd" ] || continue                     # kernel threads, exited
+        comm=""; read -r comm 2>/dev/null < "$d/comm"
+        case "$comm" in MiSTer|MiSTer_Maldita) continue ;; esac
+        old=""
+        while read -r k old; do [ "$k" = "Cpus_allowed:" ] && break; old=""; done 2>/dev/null < "$d/status"
+        old=${old##*,}; old=${old#"${old%%[!0]*}"}   # "00000003" -> "3"
+        if [ -z "$old" ] || [ "$old" = 2 ]; then continue; fi
+        taskset -a -p 2 "$pid" >/dev/null 2>&1 && echo "pid $pid $old" >> "$CPU_STATE"
+    done
+    echo "cpu-isolate: USB IRQ ${irq:-none} and $(grep -c '^pid' "$CPU_STATE") processes -> CPU1; engine nice -10"
+}
+cpu_restore
+cpu_isolate >> "$LOGDIR/maldita.log" 2>&1
+
+# With isolation on, the engine runs at nice -10: pinning does not hold against a process that
+# re-applies its own affinity, and a nice-0 task that lands on CPU0 then gets a
+# small share while the render thread is runnable instead of half of it.
+# Its output goes through a pipe to a logger on CPU1: /media/fat is mounted
+# sync, so a line written straight to the log would block the render thread on
+# an SD write (~1.3 ms each, see the startup-time notes in launch history).
+engine_nice=""
+[ -s "$CPU_STATE" ] && engine_nice="nice -n -10"
+$engine_nice ./gmloader -c gmloader.json > >(exec taskset 2 cat >> "$LOGDIR/maldita.log") 2>&1 &
 engine_pid=$!
+# This shell polls during the fabric gate and then only waits; keep it off CPU0.
+taskset -p 2 $$ >/dev/null 2>&1
 fabric_verdict >> "$LOGDIR/maldita.log" 2>&1
 verdict=$?
 
@@ -575,4 +639,6 @@ else
 fi
 
 wait "$engine_pid"
-exit $?
+rc=$?
+cpu_restore
+exit $rc
