@@ -93,14 +93,14 @@ touch "$OUT/sampling"
 SHOT_S="${SHOT_S:-30}"
 ( while [ -f "$OUT/sampling" ]; do echo screenshot > /dev/MiSTer_cmd; sleep "$SHOT_S"; done ) &
 cat /proc/interrupts > "$OUT/irq_before.txt"
-for t in /proc/$pid/task/*; do echo "$(basename $t) $(cat $t/comm) $(taskset -p $(basename $t) 2>/dev/null | sed 's/.*: //') $(grep -E 'ctxt' $t/status | tr '\n' ' ')"; done > "$OUT/threads_before.txt"
+for t in /proc/$pid/task/*; do echo "$(basename $t) $(cat $t/comm) $(taskset -p "$(basename "$t")" 2>/dev/null | sed 's/.*: //') $(grep -E 'ctxt' $t/status | tr '\n' ' ')"; done > "$OUT/threads_before.txt"
 ps w > "$OUT/ps.txt"
 
 /tmp/fps_probe.armhf "$SECS" "$OUT/fps.csv" 500 1 > "$OUT/probe.txt" 2>&1
 
 rm -f "$OUT/sampling"
 cat /proc/interrupts > "$OUT/irq_after.txt"
-for t in /proc/$pid/task/*; do echo "$(basename $t) $(cat $t/comm) $(taskset -p $(basename $t) 2>/dev/null | sed 's/.*: //') $(grep -E 'ctxt' $t/status | tr '\n' ' ')"; done > "$OUT/threads_after.txt"
+for t in /proc/$pid/task/*; do echo "$(basename $t) $(cat $t/comm) $(taskset -p "$(basename "$t")" 2>/dev/null | sed 's/.*: //') $(grep -E 'ctxt' $t/status | tr '\n' ' ')"; done > "$OUT/threads_after.txt"
 echo "screenshot" > /dev/MiSTer_cmd; sleep 2
 alive=0; [ -d /proc/$pid ] && alive=1
 echo "engine_alive_at_end=$alive" >> "$OUT/info.txt"

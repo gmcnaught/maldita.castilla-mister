@@ -557,6 +557,9 @@ cpu_restore() {
 }
 cpu_isolate() {
     [ "${MALDITA_CPUISOLATE:-1}" = 1 ] || return 0
+    # MiSTer only (not the overridable $MISTER_CMD): a test sandbox must never
+    # re-pin its host's processes.
+    [ -e /dev/MiSTer_cmd ] || return 0
     [ "$(nproc 2>/dev/null || echo 1)" -ge 2 ] || return 0
     local irq m d pid cmd comm k old
     : > "$CPU_STATE"
@@ -591,7 +594,9 @@ cpu_isolate >> "$LOGDIR/maldita.log" 2>&1
 # an SD write (~1.3 ms each, see the startup-time notes in launch history).
 engine_nice=""
 [ -s "$CPU_STATE" ] && engine_nice="nice -n -10"
-$engine_nice ./gmloader -c gmloader.json > >(exec taskset 2 cat >> "$LOGDIR/maldita.log") 2>&1 &
+logger_cpu=""
+command -v taskset >/dev/null 2>&1 && logger_cpu="taskset 2"
+$engine_nice ./gmloader -c gmloader.json > >(exec $logger_cpu cat >> "$LOGDIR/maldita.log") 2>&1 &
 engine_pid=$!
 # This shell polls during the fabric gate and then only waits; keep it off CPU0.
 taskset -p 2 $$ >/dev/null 2>&1
