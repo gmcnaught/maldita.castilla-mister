@@ -3,7 +3,7 @@
 Room reported by the user as the slowdown location: **`level_1_4`**, room index 9
 of the device build's `game.droid` (1504x288; winery — `obj_butcher`, `obj_worm`,
 `obj_barrel_rolling/bouncing`, `obj_chain_lamp(_platform)`, `obj_winery_movement`).
-Reach it with the engine's dev mode (gmloader-next `feat/dev-testing-mode`):
+Reach it with the engine's dev mode (gmcnaught/gmloader-next#44):
 `GMLOADER_TESTING_MODE=1 GMLOADER_DEVSKIP_TO=9` in `games/gmloader/bench.env`.
 
 ## Capture (.81, live play, no engine profiling env)
@@ -59,7 +59,7 @@ with no input: 51–52 displayed frames per 1 s window, all < 58.
    Larger change (target/scanout plumbing); general headroom.
 3. **Per-pixel rate** (6.2 cyc/px, texwait 3.15 ms): RTL work, largest scope.
 
-## Fix 1 landed: occlusion cull (gmloader-next `feat/dev-testing-mode` worktree, uncommitted)
+## Fix 1 landed: occlusion cull (gmcnaught/gmloader-next#43)
 
 `gmloader/mister/mf_occlude.h` (+ `mf_occlude_test.cpp`, glue in `raster_backend_mfgpu.cpp`),
 knob `GMLOADER_MFGPU_OCCLUDE` (default 1). Triangles whose every pixel a later opaque
@@ -82,7 +82,7 @@ RTL: branch `perf/present-from-surface` (maldita), RBF run 36189558686 (emu setu
 -0.159 ns, 43 % ALMs, 46 % block bits). `fb_dma_src_mux` points the frame-end DMA at the
 surface bank when the frame's END carries BLT_F_SRC_SURFACE; C_STATUS bit2 advertises it.
 Sim: new `tb_present_surf` (+ mutation check), default tier 57/57.
-Refmodel/emitter (mfgpu, uncommitted in the gmloader-next-devmode submodule):
+Refmodel/emitter (gmcnaught/mister-fpga-blitter#5):
 `blt_present_buffer()`, `blt_end_frame_flags()`. Host: identity composite deferred,
 discharged if anything is emitted after it; knob `GMLOADER_MFGPU_PRESENT_SURF` (default 1,
 only with the capability bit). Host test `present-surf` (5 variants, byte-identical).
