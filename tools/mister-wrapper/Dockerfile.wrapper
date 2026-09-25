@@ -22,6 +22,18 @@
 #       -t maldita-mister-wrapper-hps tools/mister-wrapper
 FROM debian:bullseye-slim
 
+# Pin apt to the image's own snapshot.debian.org archive. bullseye is past end of
+# life and deb.debian.org/debian-security now 404s files its index still lists
+# (git, perl, openssl, ...). The official images ship a commented, build-date-
+# pinned snapshot line per source; those archives are immutable and match what
+# the image already has installed. Same fix as gmloader-next#42
+# (.github/scripts/apt_use_snapshot.sh), inlined: the build context is this
+# directory only.
+RUN sed -i -e 's|^deb |#live deb |' \
+      -e 's|^# deb http://snapshot.debian.org/|deb [check-valid-until=no] http://snapshot.debian.org/|' \
+      /etc/apt/sources.list \
+ && grep '^deb ' /etc/apt/sources.list
+
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
       make git rsync ca-certificates \
