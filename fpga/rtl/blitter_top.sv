@@ -93,6 +93,10 @@ module blitter_top #(
     // read during the copy is comp_fb_dma's own port, muxed onto comp_fbram at the emu top.
     output reg           fb_dma_start,    // 1-cyc pulse: kick the WORK->DDR framebuffer copy
     input  wire          fb_dma_busy,     // comp_fb_dma is mid-copy (WORK held stable meanwhile)
+    // [present-from-surface] this frame's END carried BLT_F_SRC_SURFACE: the frame-end DMA
+    // copies the APP-SURFACE bank instead of WORK (fb_dma_src_mux). Latched at OP_END, so it
+    // is stable for the whole S_SNAP_* tail and cannot move before the next frame's END.
+    output reg           fb_dma_src_surf,
     // ---- off-screen APP-SURFACE render-target port to comp_fbram (app-surface v1) ----
     // When BLT_OP_SET_TARGET binds APPSURF, the composite write/read is routed to this
     // independent off-screen surface instead of the WORK banks. The surface is never
@@ -1389,6 +1393,7 @@ module blitter_top #(
             stage_we_burst_fsm<=1'b0; stage_din64_fsm<=64'd0;
             stage_barrier<=1'b0; barrier_seen_busy<=1'b0;
             fb_dma_start<=1'b0; // [#104] vs edge-detect moved to the dedicated vs_sync 3-FF chain
+            fb_dma_src_surf<=1'b0;   // [present-from-surface] reset presents WORK
             snap_guard<=6'd0;
             tri_busy<=1'b0; tri_setup_start<=1'b0;
             // [W3 §2b] the prefetch engine comes out of reset quiescent.
@@ -1647,7 +1652,12 @@ module blitter_top #(
                 state<=S_SETUP;
             end
             S_SETUP: begin
-                if (c_opcode==OP_END)       state<=S_FRAME_VCTRL;
+                if (c_opcode==OP_END) begin
+                    // [present-from-surface] END.flags & BLT_F_SRC_SURFACE: present the app
+                    // surface this frame (the host dropped the identity surface->WORK copy).
+                    fb_dma_src_surf <= (c_flags & F_SRC_SURFACE) != 8'd0;
+                    state<=S_FRAME_VCTRL;
+                end
                 else if (c_opcode==OP_NOP)  state<=S_NEXT_CMD;
                 else if (c_opcode==OP_SET_TARGET) begin
                     // [app-surface v1] Bind the composite render target. The target id
@@ -2570,7 +2580,9 @@ module blitter_top #(
             S_WR_STATUS: begin
                 // low32 = OSD mirror bits (bit0=osd_restart_pending, the sticky-latched
                 // trigger — see the latch above; bit1=osd_fps_on, a genuine persistent
-                // level so it's read raw); high32 = compositor-busy (pipe_busy) cyc this
+                // level so it's read raw); bit2 = constant 1, [present-from-surface]
+                // capability: this RBF honours END.flags & BLT_F_SRC_SURFACE (an older
+                // RBF writes 0 here, and the host then never skips the composite); high32 = compositor-busy (pipe_busy) cyc this
                 // frame — unchanged.
                 // [profiling] high32 repurposed perf_pipe_cyc -> perf_texwait_cyc (the
                 // per-pixel texel-fetch stall). perf_pipe_cyc (~2.45ms) is already known.
@@ -2578,9 +2590,9 @@ module blitter_top #(
 `ifdef SOLARUS_DBG_PROBES
                 // [wedge probe v2] high32 = wedge_snap2 (bbox at peak stuck: maxx|maxy<<16) for the
                 // runaway-walk check; low32 OSD bits preserved. Host reads bbox at C_STATUS+4 = 0x3B000034.
-                bm_din<={wedge_snap2, wd_fire_count, 6'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={wedge_snap2, wd_fire_count, 5'd0, 1'b1, osd_fps_on, osd_restart_pending};
 `else
-                bm_din<={perf_texwait_cyc, wd_fire_count, 6'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={perf_texwait_cyc, wd_fire_count, 5'd0, 1'b1, osd_fps_on, osd_restart_pending};
 `endif
                 wr_ret<=S_WR_PERF;
                 state<=S_WR_WAIT;

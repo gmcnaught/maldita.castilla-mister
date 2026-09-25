@@ -491,9 +491,10 @@ wire        fb_wr_en;  wire [14:0] fb_wr_qw; wire [1:0] fb_wr_lane; wire [15:0] 
 // compositor idle (blt_fb_rd_en=0) — so a simple fb_dma_busy mux is race-free. [DDR-scanout]
 wire        blt_fb_rd_en; wire [14:0] blt_fb_rd_qw;      // compositor's WORK read (blitter_top)
 wire        dma_work_rd_en; wire [14:0] dma_work_rd_qw;  // comp_fb_dma's WORK read
-wire        fb_rd_en  = fb_dma_busy ? dma_work_rd_en : blt_fb_rd_en;
-wire [14:0] fb_rd_qw  = fb_dma_busy ? dma_work_rd_qw : blt_fb_rd_qw;
+wire        fb_rd_en;  wire [14:0] fb_rd_qw;               // -> comp_fbram rd_* (fb_dma_src_mux)
 wire [63:0] fb_rd_qword;   // comp_fbram registered read data -> both readers
+wire [63:0] dma_rd_qword;  // WORK or SURFACE read data -> comp_fb_dma (fb_dma_src_mux)
+wire        fb_dma_src_surf; // [present-from-surface] this frame's DMA copies the app surface
 
 // [DDR-scanout] vblank WORK->DDR framebuffer-DMA handshake (blitter_top <-> comp_fb_dma).
 wire        fb_dma_start;  // 1-cyc pulse from blitter_top's S_SNAP_* FSM
@@ -508,6 +509,28 @@ wire        reader_disp_active;
 // routing — previously these floated (surf_wr_en -> z -> no write -> surface read black).
 wire        surf_wr_en; wire [14:0] surf_wr_qw; wire [1:0] surf_wr_lane; wire [15:0] surf_wr_pix;
 wire        surf_rd_en; wire [14:0] surf_rd_qw; wire [63:0] surf_rd_qword;
+wire        blt_surf_rd_en; wire [14:0] blt_surf_rd_qw;   // blitter_top's surface read
+
+// [present-from-surface] WORK/SURFACE read-port arbitration between blitter_top and the
+// frame-end DMA, and the DMA's source select (WORK normally, the app surface when the frame's
+// END carried BLT_F_SRC_SURFACE). Race-free: the DMA only runs while blitter_top is parked.
+fb_dma_src_mux u_fb_dma_src (
+	.dma_busy      (fb_dma_busy),
+	.src_surf      (fb_dma_src_surf),
+	.dma_rd_en     (dma_work_rd_en),
+	.dma_rd_qw     (dma_work_rd_qw),
+	.dma_rd_qword  (dma_rd_qword),
+	.blt_fb_rd_en  (blt_fb_rd_en),
+	.blt_fb_rd_qw  (blt_fb_rd_qw),
+	.blt_surf_rd_en(blt_surf_rd_en),
+	.blt_surf_rd_qw(blt_surf_rd_qw),
+	.fb_rd_en      (fb_rd_en),
+	.fb_rd_qw      (fb_rd_qw),
+	.fb_rd_qword   (fb_rd_qword),
+	.surf_rd_en    (surf_rd_en),
+	.surf_rd_qw    (surf_rd_qw),
+	.surf_rd_qword (surf_rd_qword)
+);
 
 comp_fbram u_fbram (
 	.clk        (clk_sys),
@@ -534,7 +557,7 @@ comp_fb_dma #(.AW(15), .MAW(32)) u_fb_dma (
 	// WORK read (muxed onto comp_fbram rd_* by fb_dma_busy above)
 	.work_rd_en   (dma_work_rd_en),
 	.work_rd_qw   (dma_work_rd_qw),
-	.work_rd_qword(fb_rd_qword),
+	.work_rd_qword(dma_rd_qword),   // [present-from-surface] WORK or SURFACE per fb_dma_src_mux
 	// DDR write master -> arbiter reader slot (rdr_*)
 	.mem_wr       (dma_mem_wr),
 	.mem_addr     (dma_mem_addr),
@@ -675,13 +698,14 @@ blitter_top blitter
 	.osd_fps_on     (osd_fps_on),
 	.fb_dma_start   (fb_dma_start),
 	.fb_dma_busy    (fb_dma_busy),
+	.fb_dma_src_surf(fb_dma_src_surf),
 	// [app-surface v1] off-screen APPSURF render-target port -> comp_fbram u_fbram
 	.surf_wr_en     (surf_wr_en),
 	.surf_wr_qw     (surf_wr_qw),
 	.surf_wr_lane   (surf_wr_lane),
 	.surf_wr_pix    (surf_wr_pix),
-	.surf_rd_en     (surf_rd_en),
-	.surf_rd_qw     (surf_rd_qw),
+	.surf_rd_en     (blt_surf_rd_en),
+	.surf_rd_qw     (blt_surf_rd_qw),
 	.surf_rd_qword  (surf_rd_qword),
 	.idle           (),
 	.dbg            (blt_dbg_live)  // [wedge probe v4] live state -> reader vsync writeback
