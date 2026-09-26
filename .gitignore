@@ -47,7 +47,6 @@ __pycache__/
 *.pyc
 
 # Host-native test binaries for the main= wrapper overlay
-tools/mister-wrapper/test/build/
 
 # Out-of-tree kernel module build output (tools/mister-mem-wc/). A local build
 # is kernel-version-specific; the committed objects live in prebuilt/, named by

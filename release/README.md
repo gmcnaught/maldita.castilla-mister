@@ -14,13 +14,13 @@ FPGA blitter core.
    - `Scripts/MalditaCastilla.sh` — **the launcher: this is how you start it**
    - `Scripts/MalditaCastilla_CoresMenu.sh` — optional one-off setup, so the
      Cores browser can start the game too (see below)
-   - `games/Maldita Castilla/launch.sh` — engine launcher (run by the above)
-   - `games/Maldita Castilla/mem_wc_load.sh` + `mem_wc-*.ko` — an optional
-     kernel module that makes the engine's uploads to the FPGA ~10× faster
-     (see below)
+   - `games/gmloader/launch.sh` + `platform/` — engine launcher (run by
+     the above) and an optional kernel module (`platform/mem_wc/`) that makes
+     the engine's uploads to the FPGA ~10× faster (see below)
    - `games/gmloader/` — the game engine, GL runtime, and the game data
-   - `games/gmloader/MiSTer_Maldita` — an alternative MiSTer binary, used only
-     if you run the setup entry above; inert otherwise
+   - `linux/MiSTer_hybrid` + `linux/hybrid.d/Maldita Castilla.conf` — an
+     alternative MiSTer binary shared by hybrid ports, used only if you run the
+     setup entry above; inert otherwise
 2. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
    core and starts the engine in one step.
 
@@ -110,7 +110,7 @@ The entry adds one section to `MiSTer.ini`, after backing the file up to
 `MiSTer.ini.bak.<timestamp>`:
 
     [Maldita Castilla]
-    main=/media/fat/games/gmloader/MiSTer_Maldita
+    main=/media/fat/linux/MiSTer_hybrid
 
 **`main=` does not mean "also run this".** It names a **replacement for the
 `MiSTer` binary itself** — whatever you put there runs *instead of* MiSTer for
@@ -118,13 +118,18 @@ this core, inheriting the job of loading cores, driving the OSD and serving
 input. Pointing it at a shell script gives you a machine with no MiSTer running
 at all; do not hand-write this line at anything but the binary above.
 
-`MiSTer_Maldita` is that binary: a normal Main_MiSTer build — upstream `main()`
-and scheduler verbatim — plus one call that forks `launch.sh` **after** the FPGA
-readiness handshake. That ordering is the whole point: an earlier build that
+`MiSTer_hybrid` is that binary: a normal Main_MiSTer build — upstream `main()`
+and scheduler verbatim — plus one call that looks the loaded core up in
+`linux/hybrid.d/` and forks its `launch.sh` **after** the FPGA readiness
+handshake. For this core it also turns the OSD's **Reset** into an engine
+restart. That ordering is the whole point: an earlier build that
 started the engine before the readiness check wedged 3 launches in 5 on
 hardware, and the current one measured 0 in 5. MiSTer only runs a `main=`
-target that exists, so deleting `games/gmloader/MiSTer_Maldita` is also a way
-to switch this off, and the line left behind does nothing.
+target that exists; deleting `linux/hybrid.d/Maldita Castilla.conf` also
+switches this off (MiSTer_hybrid then behaves as stock MiSTer for this core).
+Older releases used `main=/media/fat/games/gmloader/MiSTer_Maldita`;
+**Scripts → MalditaCastilla** moves that line to `MiSTer_hybrid` and deletes the
+old binary.
 
 Two notes if you armed it:
 
@@ -137,8 +142,8 @@ Two notes if you armed it:
 
 ## The `mem_wc` module (optional, and safe to ignore)
 
-`games/Maldita Castilla/` contains a small kernel module and a loader script
-that `launch.sh` sources before starting the engine. All it does is let the
+`games/gmloader/platform/` contains a small kernel module and a loader
+script that `launch.sh` sources before starting the engine. All it does is let the
 engine map the FPGA's command rings and texture heap **write-combining**
 instead of strongly-ordered — measured on a DE10-Nano, `memcpy` into that
 window goes from 80 MB/s to 814 MB/s.

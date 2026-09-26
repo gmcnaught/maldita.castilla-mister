@@ -9,8 +9,9 @@ rasterisation.
 | path | what it is |
 |---|---|
 | `fpga/` | the MiSTer core — Quartus project, RTL, and the blitter fabric |
-| `games/Maldita Castilla/` | the core's `launch.sh` engine launcher |
-| `Scripts/MalditaCastilla.sh` | the Scripts-menu entry that starts the game |
+| `mister-port.toml` | launcher, Scripts entries, main= registry entry — rendered by the platform |
+| `external/mister-hybrid-platform` | submodule: shared launcher (`launch_lib.sh`), `MiSTer_hybrid` main= hook, mem_wc |
+| `dist/scripts-extra.sh` | clean-up of pre-platform files, run by the Scripts entry |
 | `external/gmloader-next` | submodule: the gmloader engine and its MiSTer port |
 | `deploy.py` | deploy to a device, with provenance gates |
 | `scripts/` | bench, diagnostic and release tooling |
@@ -38,10 +39,12 @@ tagged `v*` release publishes:
    (`/media/fat/`). It adds:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — the Scripts-menu launcher
-   - `games/Maldita Castilla/launch.sh` — the engine launcher it runs
-   - `games/Maldita Castilla/mem_wc_load.sh` + `mem_wc-<kernel>.ko` — the
-     optional write-combining DDR mapping; used only when the object matches
-     the device's `uname -r`, and worth ~10× on uploads to the fabric
+   - `Scripts/MalditaCastilla_CoresMenu.sh` — optional: make the Cores entry start the game
+   - `games/gmloader/launch.sh` + `platform/` — the engine launcher it runs,
+     and the optional write-combining DDR mapping (`platform/mem_wc/`, used only
+     when an object matches the device's `uname -r`, ~10× on uploads to the fabric)
+   - `linux/MiSTer_hybrid` + `linux/hybrid.d/Maldita Castilla.conf` — the shared
+     `main=` binary used by the CoresMenu option, and this core's entry for it
    - `games/gmloader/` — the engine, its GL runtime, and the game data
      (`mygame.apk`, `saves/game.droid`, `saves/options.ini`)
 2. Verify the copy against `sha256sums.txt` — FAT filesystems can silently
@@ -53,7 +56,8 @@ There is no separate game-data download. Re-extracting over an existing install
 rewrites `saves/game.droid` and `saves/options.ini` with identical bytes and
 leaves your save files alone.
 
-Launch from the **Scripts** menu, not the Cores menu: selecting the core alone
+Launch from the **Scripts** menu, or run **Scripts → MalditaCastilla_CoresMenu**
+once so the Cores entry starts the game too; without that, selecting the core alone
 loads the bitstream and starts no engine. No daemon is involved, and a leftover
 `games/Maldita Castilla/_handler.sh` from an older release must be deleted —
 Frontier's **Master_Daemon** discovers cores by exactly that filename, and a
@@ -61,11 +65,13 @@ daemon firing alongside the Scripts entry on the same core load puts two engines
 on one FPGA control block. The bundle's own `README.md` repeats these steps and
 covers manual launch for troubleshooting.
 
-The Cores-menu entry cannot be made to start the engine by editing `MiSTer.ini`
-alone: `main=` names a **replacement for the `MiSTer` binary**, not an extra
-program to run, so it needs the `MiSTer_Maldita` build (`tools/mister-wrapper/`)
-that `deploy.py` installs and releases do not carry. Pointing `main=` at
-`launch.sh` leaves the device with no MiSTer at all.
+`main=` names a **replacement for the `MiSTer` binary**, not an extra program to
+run: the CoresMenu entry points it at `linux/MiSTer_hybrid` (upstream Main_MiSTer
+plus the mister-hybrid-platform hook, shared by every hybrid port), which starts
+`launch.sh` after the FPGA-ready wait and restarts the engine on the OSD's
+**Reset**. Pointing `main=` at `launch.sh` leaves the device with no MiSTer at all.
+Installs from before the platform had `main=.../games/gmloader/MiSTer_Maldita`;
+the Scripts entry migrates that line and deletes the old binary.
 
 To update an existing install, copy just the release's `.rbf` into `_Other/`
 (replacing the old one) if the engine has not changed; otherwise re-extract the

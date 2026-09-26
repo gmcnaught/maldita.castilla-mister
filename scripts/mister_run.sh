@@ -7,7 +7,7 @@
 # halt point (33 vs 21) and an interactive shell masks the LD_LIBRARY_PATH
 # requirement launch.sh exports. Concretely: this
 # script stages diag knobs as scripts/../bench.env on the device, triggers
-# `load_core` on /dev/MiSTer_cmd, then runs games/Maldita Castilla/launch.sh
+# `load_core` on /dev/MiSTer_cmd, then runs games/gmloader/launch.sh
 # (maldita.castilla-mister) to spawn the engine and source that file. It uses
 # scripts/gmloader_diag.sh on the device ONLY to resolve CLI-style diag flags
 # to GMLOADER_* env vars (via --dry-run — it is never executed to launch the
@@ -37,10 +37,10 @@ REMOTE_LOG="/media/fat/logs/MalditaCastilla/maldita.log"
 REMOTE_BENCH_ENV="$GMDIR/bench.env"
 RBF_GLOB="/media/fat/_Other/MalditaCastilla_*.rbf"
 # Must equal the RBF's CONF_STR setname (fpga/Maldita.sv) — MiSTer writes it to
-# /tmp/CORENAME, and it is the directory launch.sh lives under.
+# /tmp/CORENAME.
 CORENAME="${CORENAME:-Maldita Castilla}"
 # The engine launcher. NOT _handler.sh — see load_core_and_wait.
-LAUNCHER="${LAUNCHER:-/media/fat/games/$CORENAME/launch.sh}"
+LAUNCHER="${LAUNCHER:-$GMDIR/launch.sh}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_DIAG="$HERE/gmloader_diag.sh"
 OUTDIR="${OUTDIR:-$HERE/../bench-results}"

@@ -2,15 +2,18 @@
 # assemble_bundle.sh -- stage, verify, and zip the Maldita Castilla MiSTer
 # release bundle from a built RBF + engine plus the repo's pinned sources.
 #
-# Usage: assemble_bundle.sh <rbf> <engine> <wrapper> <out_dir> <version>
+# Usage: assemble_bundle.sh <rbf> <engine> <hook> <out_dir> <version>
 #   rbf      built _Other/MalditaCastilla_YYYYMMDD.rbf
 #   engine   built armhf gmloader binary
-#   wrapper  built armhf MiSTer_Maldita (tools/mister-wrapper/build-hps.sh) --
-#            MiSTer.ini's `main=` target, what makes the Cores-browser entry
-#            start the engine. REQUIRED, not optional: releases up to v0.2.1
-#            shipped without it, so selecting the core from Cores -> _Other
-#            loaded the bitstream and started nothing, which is exactly what a
-#            broken build looks like.
+#   hook     built armhf MiSTer_hybrid (external/mister-hybrid-platform
+#            device/main-hook/build-hps.sh) -- MiSTer.ini's `main=` target, what
+#            makes the Cores-browser entry start the engine. REQUIRED: releases up
+#            to v0.2.1 shipped without a main= binary, so selecting the core from
+#            Cores -> _Other loaded the bitstream and started nothing.
+#
+# The launch path (games/gmloader/launch.sh + platform/, Scripts entries,
+# linux/hybrid.d registry entry, MGL, mem_wc modules) is rendered from
+# mister-port.toml by external/mister-hybrid-platform.
 #   out_dir  output dir (created); zip + sha256sums.txt + bundle/ land here
 #   version  release version string (e.g. v1.0.0)
 #
@@ -22,16 +25,15 @@
 # test (see docs/superpowers/plans/2026-07-30-release-ci.md Task 4).
 set -euo pipefail
 
-[ $# -eq 5 ] || { echo "usage: $0 <rbf> <engine> <wrapper> <out_dir> <version>" >&2; exit 2; }
+[ $# -eq 5 ] || { echo "usage: $0 <rbf> <engine> <hook> <out_dir> <version>" >&2; exit 2; }
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 RBF="$1"; ENGINE="$2"; WRAPPER="$3"; OUT="$4"; VERSION="$5"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 GAMEDATA="$REPO/release/gamedata"
 
-# This repo now owns launch.sh directly; the engine and its whole runtime
-# closure (including Mesa) come from the one submodule.
+# The engine and its whole runtime closure (including Mesa) come from gmloader-next.
 GMNEXT="$REPO/external/gmloader-next"
-MALDITA="$REPO"
+PLAT="$REPO/external/mister-hybrid-platform"
 
 fail() { echo "ASSEMBLE FAIL: $*" >&2; exit 1; }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
@@ -39,7 +41,7 @@ sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasu
 # --- input gates -------------------------------------------------------------
 [ -f "$RBF" ]     || fail "RBF not found: $RBF"
 [ -f "$ENGINE" ]  || fail "engine not found: $ENGINE"
-[ -f "$WRAPPER" ] || fail "MiSTer_Maldita wrapper not found: $WRAPPER (build it with tools/mister-wrapper/build-hps.sh)"
+[ -f "$WRAPPER" ] || fail "MiSTer_hybrid not found: $WRAPPER (build it with $PLAT/device/main-hook/build-hps.sh)"
 [ -d "$GAMEDATA" ] || fail "game data not found: $GAMEDATA"
 RBF_SIZE=$(wc -c < "$RBF")
 [ "$RBF_SIZE" -ge 1000000 ] || fail "RBF implausibly small ($RBF_SIZE bytes)"
@@ -57,9 +59,9 @@ file "$WRAPPER" | grep "ELF 32-bit" | grep -q "ARM" \
 #
 # Applied to the wrapper too, and there it is worse than a dead binary: MiSTer
 # only execs `main=` if FileExists() (user_io.cpp:1436), not if it LOADS, so an
-# unloadable MiSTer_Maldita is exec'd and dies, taking the OSD with it. It is
-# built from tools/mister-wrapper/Dockerfile.wrapper -- a different bullseye
-# image from the engine's, and therefore a second thing that can be bumped.
+# unloadable MiSTer_hybrid is exec'd and dies, taking the OSD with it. It is
+# built from the platform's cross image -- a different bullseye image from the
+# engine's, and therefore a second thing that can be bumped.
 GLIBC_CEILING="2.29"
 command -v strings >/dev/null 2>&1 \
     || fail "strings not available -- cannot verify GLIBC ceilings"
@@ -77,76 +79,37 @@ check_glibc_ceiling() {
 check_glibc_ceiling engine  "$ENGINE"
 check_glibc_ceiling wrapper "$WRAPPER"
 
-# The wrapper is a Main_MiSTer build, so "it is an armhf ELF called
-# MiSTer_Maldita" is satisfied by a STOCK MiSTer renamed -- which would exec
-# fine, show the OSD, and never start the engine. The overlay's one job is the
-# maldita_hook.cpp fork, and the path it forks is a .rodata string that
-# survives stripping. Gate on that string: it proves both that the hook is in
-# this binary and that its target is the launch.sh this bundle stages.
-WRAPPER_FORKS="/media/fat/games/Maldita Castilla/launch.sh"
+# The hook is a Main_MiSTer build, so "an armhf ELF called MiSTer_hybrid" is
+# satisfied by a STOCK MiSTer renamed -- which would exec fine, show the OSD, and
+# never start the engine. Gate on the registry path and the OSD Reset string
+# (.rodata, survives stripping): this core's entry opts in to the Reset restart.
 # Process substitution, not `strings ... | grep -q`: -q exits on the first match
-# and SIGPIPEs strings, which under `set -o pipefail` fails the whole pipeline
-# on the binaries that DO contain the string.
-grep -qxF "$WRAPPER_FORKS" <(strings "$WRAPPER") \
-    || fail "wrapper has no '$WRAPPER_FORKS' string -- this is not the Maldita overlay build (stock Main_MiSTer renamed?), or the hook's target path changed without this gate"
+# and SIGPIPEs strings, which under `set -o pipefail` fails the whole pipeline.
+for s in "/media/fat/linux/hybrid.d" "OSD Reset armed on status bit %d"; do
+    grep -qF "$s" <(strings "$WRAPPER") \
+        || fail "hook has no '$s' string -- not the MiSTer_hybrid build with OSD Reset (stock Main_MiSTer renamed, or a platform older than feat/osd-reset?)"
+done
 
 # --- stage the SD-card tree --------------------------------------------------
 BUNDLE="$OUT/bundle"
 rm -rf "$BUNDLE"
 GMDIR="$BUNDLE/games/gmloader"
-mkdir -p "$BUNDLE/_Other" "$BUNDLE/games/Maldita Castilla" "$BUNDLE/Scripts" \
-         "$GMDIR/mesa" "$GMDIR/lib/armeabi-v7a" "$GMDIR/APKs" "$GMDIR/saves"
+mkdir -p "$BUNDLE/_Other" "$GMDIR/mesa" "$GMDIR/lib/armeabi-v7a" "$GMDIR/APKs" "$GMDIR/saves"
 
 cp "$RBF" "$BUNDLE/_Other/"
-# launch.sh, NOT _handler.sh: that name is Master_Daemon's discovery predicate,
-# and a daemon that also spawns it puts a second engine on the fabric control
-# block. The Scripts entry ships with it because it is now the only thing that
-# invokes it — without it a bundle install loads the core and starts nothing.
-cp "$MALDITA/games/Maldita Castilla/launch.sh" "$BUNDLE/games/Maldita Castilla/"
-cp "$MALDITA/Scripts/MalditaCastilla.sh" "$BUNDLE/Scripts/"
-# The second Scripts entry arms MiSTer.ini's `main=` at the wrapper below, so
-# the Cores-browser entry starts the engine as well as loading the bitstream.
-# It is a separate, explicit action and not something the extract does: a zip
-# cannot run code, and MiSTer.ini is the user's file (their video mode, their
-# inputs, every other core's settings). deploy.py makes the same edit on a
-# development device.
-cp "$MALDITA/Scripts/MalditaCastilla_CoresMenu.sh" "$BUNDLE/Scripts/"
-chmod +x "$BUNDLE/games/Maldita Castilla/launch.sh" \
-         "$BUNDLE/Scripts/MalditaCastilla.sh" \
-         "$BUNDLE/Scripts/MalditaCastilla_CoresMenu.sh"
-
-# The `main=` target itself, at the same absolute path deploy.py installs it
-# to. That path is written independently in two places -- the line the arming
-# script puts in MiSTer.ini, and deploy.py's MAIN_LINE -- and MiSTer resolves
-# it as an absolute path, so a mismatch is silent: FileExists() is false, no
-# exec happens, and the Cores entry just loads the bitstream. The assertion
-# below ties the staged binary to the script that will point at it.
-cp "$WRAPPER" "$GMDIR/MiSTer_Maldita"; chmod +x "$GMDIR/MiSTer_Maldita"
-WRAPPER_INSTALLED_AT="/media/fat/games/gmloader/MiSTer_Maldita"
-grep -qF "\"$WRAPPER_INSTALLED_AT\"" "$BUNDLE/Scripts/MalditaCastilla_CoresMenu.sh" \
-    || fail "Scripts/MalditaCastilla_CoresMenu.sh does not name $WRAPPER_INSTALLED_AT -- it would arm MiSTer.ini at a path this bundle does not install"
-
-# The write-combining mapping (mem_wc): the loader plus every prebuilt module
-# object we have. deploy.py picks the object by the device's `uname -r` and
-# installs the winner as plain mem_wc.ko; a bundle is assembled once for every
-# device, so it ships them all under their vermagic names and mem_wc_load.sh
-# does the match on-device.
-#
-# Both halves are needed or neither does anything: without this the bundle's
-# engine maps the fabric window strongly-ordered (~80 MB/s vs ~814).
-# Not shipping the objects is safe but slow, so the count is asserted below
-# rather than left to a glob that can quietly match nothing.
+# Launcher, platform/ (launch_lib, mem_wc loader + every prebuilt module, DDR map),
+# Scripts/MalditaCastilla.sh (starts the game; also migrates a pre-platform
+# [Maldita Castilla] main=MiSTer_Maldita to MiSTer_hybrid), the CoresMenu toggle,
+# linux/hybrid.d/Maldita Castilla.conf, linux/MiSTer_hybrid and the MGL. The
+# launcher is launch.sh, NOT _handler.sh: that name is Master_Daemon's discovery
+# predicate and would put a second engine on the fabric control block.
+python3 "$PLAT/tools/mister_platform.py" render "$REPO/mister-port.toml" --out "$BUNDLE" --hook-binary "$WRAPPER" \
+    || fail "mister-platform render failed"
 MEMWC_KOS=()
 while IFS= read -r ko; do MEMWC_KOS+=("$ko"); done < <(
-    find "$REPO/tools/mister-mem-wc/prebuilt" -maxdepth 1 -name 'mem_wc-*.ko' \
-        | LC_ALL=C sort)
+    find "$BUNDLE/games/gmloader/platform/mem_wc" -maxdepth 1 -name 'mem_wc-*.ko' | LC_ALL=C sort)
 [ "${#MEMWC_KOS[@]}" -ge 1 ] \
-    || fail "no tools/mister-mem-wc/prebuilt/mem_wc-*.ko to ship -- the bundle's engine would map DDR strongly-ordered"
-cp "$MALDITA/games/Maldita Castilla/mem_wc_load.sh" "$BUNDLE/games/Maldita Castilla/"
-cp "${MEMWC_KOS[@]}" "$BUNDLE/games/Maldita Castilla/"
-# Sourced, not executed; insmod'd, not run. 644 on both, matching deploy.py.
-chmod 644 "$BUNDLE/games/Maldita Castilla/mem_wc_load.sh" \
-          "$BUNDLE/games/Maldita Castilla/"mem_wc-*.ko
+    || fail "no platform/mem_wc/mem_wc-*.ko rendered -- the bundle's engine would map DDR strongly-ordered"
 cp "$ENGINE" "$GMDIR/gmloader"; chmod +x "$GMDIR/gmloader"
 cp "$GMNEXT/gmloader.json" "$GMDIR/"
 cp "$GMNEXT/runtime/mesa/"*.so* "$GMDIR/mesa/"
@@ -194,13 +157,18 @@ RBF_NAME=$(basename "$RBF")
 EXPECTED=$(cat <<EOF
 README.md
 _Other/$RBF_NAME
+_Other/Maldita Castilla.mgl
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
-games/Maldita Castilla/launch.sh
-games/Maldita Castilla/mem_wc_load.sh
+games/gmloader/launch.sh
+games/gmloader/platform/ini_main.sh
+games/gmloader/platform/launch_lib.sh
+games/gmloader/platform/mem_wc_load.sh
+games/gmloader/platform/mister_cores.tsv
+games/gmloader/platform/mister_map_gm_fabric.env
+games/gmloader/platform/mister_mem_wc.env
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
-games/gmloader/MiSTer_Maldita
 games/gmloader/gmloader
 games/gmloader/gmloader.json
 games/gmloader/lib/armeabi-v7a/libstdc++.so
@@ -215,6 +183,8 @@ games/gmloader/mesa/swrast_dri.so
 games/gmloader/mygame.apk
 games/gmloader/saves/game.droid
 games/gmloader/saves/options.ini
+linux/MiSTer_hybrid
+linux/hybrid.d/Maldita Castilla.conf
 EOF
 )
 # The module objects are the one part of the manifest that is not a fixed list:
@@ -224,7 +194,7 @@ EOF
 # the tree still fails the comparison.
 for ko in "${MEMWC_KOS[@]}"; do
     EXPECTED="$EXPECTED
-games/Maldita Castilla/$(basename "$ko")"
+games/gmloader/platform/mem_wc/$(basename "$ko")"
 done
 ACTUAL=$(cd "$BUNDLE" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
 if [ "$ACTUAL" != "$(printf '%s\n' "$EXPECTED" | LC_ALL=C sort)" ]; then

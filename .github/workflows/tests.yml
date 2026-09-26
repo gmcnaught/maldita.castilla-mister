@@ -58,9 +58,9 @@ name: Tests
 #                                 job below BUILDS a real engine first, the
 #                                 same recipe release.yml's build-engine job
 #                                 uses, so the skip path is never exercised
-#                                 here. It also requires a real MiSTer_Maldita
-#                                 (the `main=` wrapper), built the same way, for
-#                                 the same reason.
+#                                 here. It also requires a real MiSTer_hybrid
+#                                 (the `main=` hook, external/mister-hybrid-
+#                                 platform), built the same way, for the same reason.
 #
 # No added dependencies: system python3 (stdlib unittest) and bash only,
 # matching the "no pytest, no deps" rule in scripts/tests/.
@@ -92,22 +92,13 @@ jobs:
       - name: scripts/lib/resolve_rbf.py tests
         run: python3 scripts/tests/test_resolve_rbf.py
 
-      - name: Scripts/MalditaCastilla_CoresMenu.sh tests
-        run: bash scripts/tests/test_cores_menu_toggle.sh
-
-      - name: launch.sh fabric recovery gate tests
-        run: bash scripts/tests/test_launch_fabric_gate.sh
-
-      - name: launch.sh single-instance lock tests
-        run: bash scripts/tests/test_launch_single_instance.sh
-
-      # Host-native: maldita_child.cpp and maldita_reset.cpp are plain POSIX with
-      # no Main_MiSTer dependencies, so the OSD-Reset restart policy is testable
-      # without the armhf cross-build. check-hook additionally syntax-checks
-      # maldita_hook.cpp against a stub user_io.h — the real link is proven by
-      # the build-hps.sh step in the assemble_bundle job below.
-      - name: main= wrapper host tests (child spawn + OSD Reset restart policy)
-        run: make -C tools/mister-wrapper/test
+      # The launcher, Scripts entries, CoresMenu toggle and main= hook (OSD Reset
+      # policy included) are rendered from mister-port.toml by
+      # external/mister-hybrid-platform and tested there (tests/run_all.sh).
+      - name: mister-port.toml validates against the pinned platform
+        run: |
+          git submodule update --init external/mister-hybrid-platform
+          python3 external/mister-hybrid-platform/tools/mister_platform.py validate mister-port.toml
 
   assemble-bundle-test:
     name: assemble_bundle.sh (builds a real engine so the gate actually runs)
@@ -130,11 +121,11 @@ jobs:
             arm32v7/debian:bullseye-slim \
             bash .github/scripts/build_mister_arm.sh
 
-      - name: Build MiSTer_Maldita (same recipe as release.yml's build-wrapper)
-        # The assembler now requires the main= wrapper and gates it on its ELF
-        # arch, GLIBC ceiling and the maldita_hook string, so like the engine it
-        # has to be a real build here or the test's skip path swallows the gate.
-        run: bash tools/mister-wrapper/build-hps.sh
+      - name: Build MiSTer_hybrid (same recipe as release.yml's build-wrapper)
+        # The assembler requires the main= hook and gates it on its ELF arch,
+        # GLIBC ceiling and hook strings, so like the engine it has to be a real
+        # build here or the test's skip path swallows the gate.
+        run: bash external/mister-hybrid-platform/device/main-hook/build-hps.sh
 
       - name: scripts/release/assemble_bundle.sh tests
         run: bash scripts/tests/test_assemble_bundle.sh

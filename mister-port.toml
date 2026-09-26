@@ -1,0 +1,35 @@
+# Maldita Castilla on mister-hybrid-platform (external/mister-hybrid-platform).
+# `mister-platform render` turns this into games/gmloader/launch.sh + platform/,
+# Scripts/MalditaCastilla{,_CoresMenu}.sh, linux/hybrid.d/Maldita Castilla.conf and
+# _Other/Maldita Castilla.mgl; scripts/release/assemble_bundle.sh and deploy.py call it.
+#
+# Paths keep the pre-platform install: the CONF_STR core name (/tmp/CORENAME and the
+# MiSTer.ini section) is "Maldita Castilla" and the engine payload (gmloader,
+# mygame.apk, saves/, mesa/) stays in games/gmloader, which now also holds the
+# launcher. The pre-platform launcher dir games/Maldita Castilla is removed by
+# dist/scripts-extra.sh.
+[port]
+name     = "MalditaCastilla"          # logs/MalditaCastilla, Scripts/MalditaCastilla*.sh, RBF prefix
+title    = "Maldita Castilla"
+corename = "Maldita Castilla"
+gamedir  = "gmloader"
+mgl      = "Maldita Castilla"
+profile  = "gm-fabric"
+engine   = "gmloader"
+
+[launch]
+process       = "gmloader"
+# nice -10: the old launcher ran the engine at -10 whenever it isolated the CPUs.
+command       = ["nice", "-n", "-10", "./gmloader", "-c", "gmloader.json"]
+engine_log    = "maldita.log"          # scripts/mister_run.sh pulls this name
+ready_pattern = "fabric bring-up"
+fail_pattern  = "fabric bring-up SOFT-FAILED"
+test_env      = "$MH_GAMEDIR/bench.env" # scripts/mister_run.sh stages diag knobs here
+osd_reset     = 19                     # CONF_STR "TJ,Reset;" (fpga/Maldita.sv)
+env = { GMLOADER_BLITTER = "2", GMLOADER_RASTER = "mfgpu", LD_LIBRARY_PATH = "$MH_GAMEDIR/mesa:$MH_GAMEDIR" }
+
+[scripts]
+required_files = [ ["mygame.apk", "extract the release zip over /media/fat again"],
+                   ["gmloader.json", "extract the release zip over /media/fat again"] ]
+extra          = "dist/scripts-extra.sh"
+legacy_main    = ["/media/fat/games/gmloader/MiSTer_Maldita"]
