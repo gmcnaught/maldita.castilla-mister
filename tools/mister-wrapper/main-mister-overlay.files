@@ -1,9 +1,0 @@
-scheduler.cpp
-user_io.cpp
-user_io.h
-maldita_hook.cpp
-maldita_hook.h
-maldita_child.cpp
-maldita_child.h
-maldita_reset.cpp
-maldita_reset.h

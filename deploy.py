@@ -30,7 +30,6 @@ lays them into the device gmloader tree:
 Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
   /media/fat/games/gmloader/
     gmloader            engine binary (this deploy)             <- ENGINE
-    MiSTer_Maldita      HPS wrapper binary (this deploy)         <- WRAPPER
     gmloader.json       apk_path = "mygame.apk"                 <- ENGINE
     mygame.apk          PortMaster malditacastilla.apk          <- CONTENT
     saves/game.droid    49MB game data                          <- CONTENT
@@ -39,6 +38,19 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
     mesa/               surfaceless Mesa closure                 <- runtime (opt-in)
     libGLES_sw.so       = mesa libGLESv2.so.2                    <- runtime (opt-in)
   /media/fat/_Other/MalditaCastilla_*.rbf                        <- RBF
+  launch path, rendered from mister-port.toml by external/mister-hybrid-platform
+  (every deploy):
+    games/Maldita Castilla/launch.sh + platform/   launcher, launch_lib, mem_wc
+    Scripts/MalditaCastilla.sh, _CoresMenu.sh      Scripts entry, main= toggle
+    linux/hybrid.d/Maldita Castilla.conf           registry entry (OSD Reset bit 19)
+    linux/MiSTer_hybrid                            shared main= hook      <- HOOK
+    _Other/Maldita Castilla.mgl
+
+PLATFORM (2026-09-26): the launcher, Scripts entries, mem_wc and the main= binary
+now come from mister-hybrid-platform. MiSTer.ini [Maldita Castilla]
+main=/media/fat/linux/MiSTer_hybrid replaces main=.../MiSTer_Maldita; the old
+wrapper is deleted once no section names it. The history below explains why each
+piece exists; the file names in it are the pre-platform ones.
 
 AUTO-LAUNCH (changed 2026-08-05): the engine is started by
   /media/fat/games/Maldita Castilla/launch.sh
@@ -92,21 +104,16 @@ wedges, ~59fps, rendering correct — the gate the 2026-07-25 revert set. That
 gate being met is what makes arming it by default defensible; the black-screen
 deploy above is what makes it necessary.
 
-HPS TAKEOVER (2026-08-04, opt-in, default OFF): games/<CORENAME>/mister_takeover.sh
-ships alongside launch.sh and is INERT unless a takeover.env sits next to it.
-Armed, it lets stock MiSTer main load the core and satisfy its readiness contract,
-waits for the engine to prove itself live on the fabric (C_DONE advancing), then
-kills MiSTer and restarts it on every exit path — the DreamSTer model, taken late.
---takeover / --no-takeover manage that marker; neither flag leaves it untouched.
-Design: docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md.
+HPS TAKEOVER (2026-08-04): not carried onto the platform (it was default-off and
+never armed on a device); deploy.py removes any takeover.env / mister_takeover.sh.
 
 Usage:
   ./deploy.py                      RBF + engine + content (the moving pieces)
   ./deploy.py --no-rbf             engine + content only
   ./deploy.py --no-content         RBF + engine only (skip the 49MB game.droid)
   ./deploy.py --engine-only        just the gmloader binary + gmloader.json
-  ./deploy.py --no-engine          launch path only (launch.sh, Scripts entry, MGL,
-                                   wrapper, main=/takeover markers) — leaves the
+  ./deploy.py --no-engine          launch path only (launch.sh, Scripts entries, MGL,
+                                   MiSTer_hybrid, main=) — leaves the
                                    device's engine binary alone, and skips its
                                    staleness gate with it
   ./deploy.py --with-runtime DIR   also push mesa/ + libGLES_sw.so + lib/ from DIR
@@ -163,7 +170,10 @@ _SIBLING_GM   = SIBLINGS / "gmloader-next"
 GMNEXT = _SUBMODULE_GM if (_SUBMODULE_GM / "Makefile.gmloader").is_file() else _SIBLING_GM
 
 ENGINE_DEFAULT  = GMNEXT / "build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
-WRAPPER_DEFAULT = REPO / "build/mister-wrapper-hps/MiSTer_Maldita"
+PLATFORM = REPO / "external/mister-hybrid-platform"
+HOOK_DEFAULT = PLATFORM / "build/main-hook/MiSTer_hybrid"
+HOOK_PATH = "/media/fat/linux/MiSTer_hybrid"
+LEGACY_WRAPPER = f"{GAMEDIR}/MiSTer_Maldita"
 JSON_DEFAULT    = GMNEXT / "games/gmloader/gmloader.json"
 # The game data is checked in (release/gamedata/, see its SOURCE.txt), so a
 # fresh clone can deploy without a PortMaster-New checkout beside it.
@@ -440,49 +450,48 @@ def scp_verified(host, src, dst, retries=3):
     raise SystemExit(f"FATAL: {dst} failed sha1 verification after {retries} tries")
 
 
-def install_mem_wc(host):
-    """Ship the write-combining /dev/mem driver + its loader, if one matches.
+def install_launch_path(host, hook, arm_main):
+    """Render mister-port.toml with the platform and install the tree.
 
-    The engine maps the fabric window's rings and SRC heap through /dev/mem_wc
-    when it can (raster_backend_mfgpu.cpp, mf_map_wc_overlay) and falls back to
-    the strongly-ordered /dev/mem when it cannot. Nothing below is fatal:
-    shipping no module leaves today's behaviour exactly intact.
-
-    The .ko is KERNEL-KEYED, and that is the whole reason this is a function
-    rather than one more scp_verified line. An out-of-tree module carries the
-    vermagic of the tree it was built against, so the wrong one does not
-    misbehave — it simply refuses to insmod, on the device, inside a launcher
-    that deliberately swallows errors, where the only evidence is a dmesg line
-    nobody reads. Matching `uname -r` here turns that into a message at deploy
-    time, next to the decision the user can actually act on.
+    One tar stream (no xattrs, no owner) instead of a scp per file: the tree has
+    ~20 files, two of them in a directory whose name has a space. Then, on the
+    device: remove what pre-platform deploys installed, point (or un-point)
+    MiSTer.ini [Maldita Castilla] main= at MiSTer_hybrid through the platform's
+    section-scoped ini_main.sh, and delete MiSTer_Maldita once no section names it.
     """
-    kdir = REPO / "tools" / "mister-mem-wc"
-    loader_src = REPO / "games" / CORENAME / "mem_wc_load.sh"
-    if not loader_src.exists():
-        return
-
-    krel = ssh(host, "uname -r").stdout.strip()
-    ko = kdir / "prebuilt" / f"mem_wc-{krel}.ko"
-
-    print("\n-- Write-combining DDR mapping (mem_wc) --")
-    if ko.exists():
-        scp_verified(host, ko, f"{HANDLER_DIR}/mem_wc.ko")
-        ssh(host, f"chmod 644 '{HANDLER_DIR}/mem_wc.ko'", check=True)
-        print(f"   module for kernel {krel} installed")
-    else:
-        # Leave any previously-shipped .ko alone rather than removing it: it may
-        # be the right one for a kernel this checkout has no prebuilt for.
-        have = sorted(p.name for p in (kdir / "prebuilt").glob("*.ko"))
-        print(f"   ! no prebuilt module for kernel {krel} "
-              f"(have: {', '.join(have) or 'none'})")
-        print(f"   ! DDR stays strongly-ordered (~80 MB/s vs ~814). Build one: "
-              f"{kdir.relative_to(REPO)}/README.md")
-
-    # The loader ships either way — it is a no-op without a .ko next to it, and
-    # shipping it unconditionally keeps the device from ending up with a stale
-    # copy that hardcodes a different window.
-    scp_verified(host, loader_src, f"{HANDLER_DIR}/mem_wc_load.sh")
-    ssh(host, f"chmod 644 '{HANDLER_DIR}/mem_wc_load.sh'", check=True)
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        sh([sys.executable, str(PLATFORM / "tools/mister_platform.py"), "render",
+            str(REPO / "mister-port.toml"), "--out", tmp, "--hook-binary", str(hook)], check=True)
+        print("\n-- Installing the platform launch path (mister-port.toml) --")
+        tar = subprocess.Popen(["tar", "--no-xattrs", "-C", tmp, "-cf", "-", "."],
+                               stdout=subprocess.PIPE, env={**os.environ, "COPYFILE_DISABLE": "1"})
+        r = subprocess.run(["ssh", f"{USER}@{host}", "tar --no-same-owner -C /media/fat -xf -"],
+                           stdin=tar.stdout)
+        tar.stdout.close()
+        if tar.wait() != 0 or r.returncode != 0:
+            raise SystemExit("FATAL: launch-path install failed")
+    hd = shlex.quote(HANDLER_DIR)
+    ini_cmd = (f'mh_ini_set_main {HOOK_PATH} && echo "   main= -> {HOOK_PATH}"' if arm_main else
+               f'if [ "$(mh_ini_main)" = {HOOK_PATH} ]; then mh_ini_disable_main {HOOK_PATH} deploy.py '
+               '&& echo "   main= disarmed (--no-main-wrapper)"; fi')
+    script = f"""
+set -e
+chmod 755 {hd}/launch.sh {HOOK_PATH} /media/fat/Scripts/MalditaCastilla.sh /media/fat/Scripts/MalditaCastilla_CoresMenu.sh
+rm -f {hd}/_handler.sh {hd}/mem_wc_load.sh {hd}/mem_wc.ko {hd}/mem_wc-*.ko {hd}/mister_takeover.sh {hd}/takeover.env
+test -e {hd}/_handler.sh && {{ echo "FATAL: _handler.sh survived"; exit 1; }}
+MH_INI_FILE=/media/fat/MiSTer.ini MH_INI_SECTION={shlex.quote(CORENAME)}
+. {hd}/platform/ini_main.sh
+{ini_cmd}
+if [ -f {LEGACY_WRAPPER} ] && ! grep -q '^main={LEGACY_WRAPPER}' /media/fat/MiSTer.ini; then
+    rm -f {LEGACY_WRAPPER} && echo "   removed {LEGACY_WRAPPER}"
+fi
+"""
+    r = ssh(host, script)
+    print((r.stdout or "").rstrip())
+    if r.returncode != 0:
+        raise SystemExit(f"FATAL: launch-path setup failed: {(r.stderr or '').strip()}")
 
 
 def main():
@@ -490,8 +499,9 @@ def main():
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--engine", type=Path, default=ENGINE_DEFAULT,
                     help="gmloader armhf binary (default: gmloader-next build)")
-    ap.add_argument("--wrapper", type=Path, default=WRAPPER_DEFAULT,
-                    help="MiSTer_Maldita HPS wrapper binary (default: build/mister-wrapper-hps)")
+    ap.add_argument("--hook", "--wrapper", dest="wrapper", type=Path, default=HOOK_DEFAULT,
+                    help="MiSTer_hybrid main= hook (default: external/mister-hybrid-platform/"
+                         "build/main-hook, from its device/main-hook/build-hps.sh)")
     ap.add_argument("--no-rbf", action="store_true", help="skip the FPGA core RBF")
     ap.add_argument("--no-content", action="store_true",
                     help="skip the APK + 49MB game.droid + options.ini")
@@ -510,22 +520,6 @@ def main():
                     help="download the CI RBF built from THIS repo's HEAD, then deploy it")
     ap.add_argument("--force", action="store_true",
                     help="ship artifacts that fail the provenance/staleness gate")
-    # ── HPS takeover (docs/superpowers/specs/2026-08-04-hps-takeover-launcher-design.md)
-    # Default is NEITHER flag: the on-device takeover.env is left exactly as it
-    # is, so a redeploy never silently arms or disarms a device.
-    ap.add_argument("--takeover", action="store_true",
-                    help="arm the HPS takeover: once the engine proves live on the "
-                         "fabric, Main_MiSTer is killed and restarted on exit. NO "
-                         "GAMEPAD until gmloader-next lands GMLOADER_JOY=sdl — keep "
-                         "an SSH session open. Use .62, not production.")
-    ap.add_argument("--takeover-dryrun", action="store_true",
-                    help="with --takeover: run and log every takeover step but kill "
-                         "nothing and change no cpufreq setting")
-    ap.add_argument("--takeover-governor", action="store_true",
-                    help="with --takeover: performance governor + 1 GHz while the "
-                         "game runs, restored on exit")
-    ap.add_argument("--no-takeover", action="store_true",
-                    help="disarm the HPS takeover (removes the device's takeover.env)")
     # ON BY DEFAULT. With Master_Daemon out of the launch path, this is the only
     # thing that makes a Cores-browser core load start the engine, and a deploy
     # that leaves the core selectable but dead is a broken deploy -- see the
@@ -540,8 +534,6 @@ def main():
                          "Scripts entry as the only launch route. A Cores-browser load "
                          "will then start no engine and the screen stays black.")
     args = ap.parse_args()
-    if args.takeover and args.no_takeover:
-        ap.error("--takeover and --no-takeover are mutually exclusive")
     if args.no_engine and args.engine_only:
         ap.error("--no-engine and --engine-only are mutually exclusive")
     if args.main_wrapper and args.no_main_wrapper:
@@ -561,8 +553,9 @@ def main():
     if missing:
         for p in missing:
             print(f"MISSING: {p}", file=sys.stderr)
-        print("\n(build the engine in gmloader-next, the wrapper via "
-              "tools/mister-wrapper/build-hps.sh, or pass --engine / --wrapper / --no-content)",
+        print("\n(build the engine in gmloader-next, the hook via "
+              "external/mister-hybrid-platform/device/main-hook/build-hps.sh, "
+              "or pass --engine / --hook / --no-content)",
               file=sys.stderr)
         sys.exit(1)
 
@@ -658,199 +651,7 @@ def main():
         scp_verified(host, engine, f"{GAMEDIR}/gmloader")
         scp_verified(host, gmjson, f"{GAMEDIR}/gmloader.json")
 
-    print("\n-- Uploading HPS wrapper binary (sha1-verified; this is MiSTer.ini's MAIN) --")
-    scp_verified(host, wrapper, f"{GAMEDIR}/MiSTer_Maldita")
-
-    # --- launcher install, and the Master_Daemon deconflict --------------------
-    # The directory name MUST equal the CONF_STR setname exactly ("Maldita
-    # Castilla") — the `main=` hook and the Scripts entry both hardcode that path.
-    #
-    # The FILE name must NOT be _handler.sh. That is Master_Daemon's entire
-    # discovery predicate (Master_Daemon.sh: discover_cores() tests
-    # `-f "$dir/_handler.sh"`, the dispatch loop tests `-x`), and there is no
-    # config file to opt out of. Under that name the daemon spawns the launcher
-    # on every /tmp/CORENAME change and respawns it whenever its child exits,
-    # both of which collide with the two entry points that now own the launch.
-    # We do not own Master_Daemon, so we deconflict from our side: install as
-    # launch.sh, and delete any _handler.sh already on the device.
-    handler_src = REPO / "games" / CORENAME / "launch.sh"
-    if handler_src.exists():
-        print(f"\n-- Installing engine launcher for '{CORENAME}' --")
-        ssh(host, f"mkdir -p '{HANDLER_DIR}' /media/fat/logs/MalditaCastilla", check=True)
-        scp_verified(host, handler_src, f"{HANDLER_DIR}/launch.sh")
-        ssh(host, f"chmod 755 '{HANDLER_DIR}/launch.sh'", check=True)
-
-        # Remove ourselves from the daemon's discovery. Not best-effort: a
-        # survivor means the daemon still spawns a second engine onto the same
-        # fabric control block on the next core load, which shows up as C_DONE
-        # running backwards rather than as anything that looks like a deploy
-        # failure. A daemon mid-flight needs no further handling — its dispatch
-        # and respawn arms both re-test the path, so the deletion takes effect
-        # on its next poll.
-        # Demand a positive GONE rather than "not PRESENT": a dropped ssh returns
-        # empty stdout, which would satisfy a not-PRESENT test while having
-        # verified nothing at all. Fail closed.
-        r = ssh(host, f"rm -f '{HANDLER_DIR}/_handler.sh'; "
-                      f"test -e '{HANDLER_DIR}/_handler.sh' && echo PRESENT || echo GONE")
-        if (r.stdout or "").strip().splitlines()[-1:] != ["GONE"]:
-            sys.exit(f"FATAL: could not confirm {HANDLER_DIR}/_handler.sh is gone "
-                     f"(got {(r.stdout or '')!r}) — Master_Daemon would spawn a "
-                     "second engine on core load.")
-        print("   Master_Daemon deconflict: no _handler.sh under "
-              f"'{HANDLER_DIR}' (daemon left untouched)")
-
-        # HPS takeover harness — always shipped, INERT unless takeover.env arms
-        # it. The handler sources it from its own directory, so it has to land
-        # here rather than in GAMEDIR.
-        takeover_src = REPO / "games" / CORENAME / "mister_takeover.sh"
-        if takeover_src.exists():
-            scp_verified(host, takeover_src, f"{HANDLER_DIR}/mister_takeover.sh")
-            ssh(host, f"chmod 644 '{HANDLER_DIR}/mister_takeover.sh'", check=True)
-
-        install_mem_wc(host)
-
-        # Daemon-free entry point. Appears in MiSTer's OSD under Scripts and
-        # does the core load itself, so Master_Daemon is not in the loop at
-        # all. Shipped unconditionally — installing it changes nothing until
-        # the user selects it.
-        launcher_src = REPO / "Scripts" / "MalditaCastilla.sh"
-        if launcher_src.exists():
-            print("   installing the daemon-free Scripts launcher")
-            ssh(host, "mkdir -p /media/fat/Scripts", check=True)
-            scp_verified(host, launcher_src, "/media/fat/Scripts/MalditaCastilla.sh")
-            ssh(host, "chmod 755 /media/fat/Scripts/MalditaCastilla.sh", check=True)
-
-        # The `main=` toggle, which is how a RELEASE BUNDLE arms what the block
-        # further down arms here (a zip extract cannot run code). Installed on
-        # development devices too, so the thing users get is the thing that was
-        # exercised — and so disarming does not require this script and an SSH
-        # session. It makes the same edit; running it is harmless either way.
-        coresmenu_src = REPO / "Scripts" / "MalditaCastilla_CoresMenu.sh"
-        if coresmenu_src.exists():
-            print("   installing the Scripts main= toggle")
-            ssh(host, "mkdir -p /media/fat/Scripts", check=True)
-            scp_verified(host, coresmenu_src,
-                         "/media/fat/Scripts/MalditaCastilla_CoresMenu.sh")
-            ssh(host, "chmod 755 /media/fat/Scripts/MalditaCastilla_CoresMenu.sh",
-                check=True)
-
-        if args.takeover:
-            # Written here, not baked into launch.sh, so arming survives a
-            # handler redeploy and disarming is one file removal — including
-            # from a rescue SSH session on a box whose OSD is gone.
-            print("   ! arming the HPS takeover (MiSTer will be killed once the "
-                  "engine proves live)")
-            env = "MALDITA_TAKEOVER=1\n"
-            if args.takeover_dryrun:
-                env += "MALDITA_TAKEOVER_DRYRUN=1\n"
-            if args.takeover_governor:
-                env += "MALDITA_TAKEOVER_GOVERNOR=1\n"
-            ssh(host, f"printf '%s' '{env}' > '{HANDLER_DIR}/takeover.env'", check=True)
-        elif args.no_takeover:
-            print("   disarming the HPS takeover (removing takeover.env)")
-            ssh(host, f"rm -f '{HANDLER_DIR}/takeover.env'")
-        # Stable Cores-browser entry. The RBF name changes on every build, so
-        # without this the visible entry moves around.
-        #
-        # Installed HERE, with the launch path, and NOT under `if not no_rbf`:
-        # the MGL is a launch-path artifact, not an RBF one. Gating it on the
-        # RBF meant `--main-wrapper --no-rbf` armed the wrapper and shipped no
-        # entry for it to be reached from.
-        #
-        # Shipped verbatim, with no path rewriting: MiSTer's <rbf> tag is a
-        # PREFIX, not a filename. get_rbf() (support/arcade/mra_loader.cpp:1223)
-        # scans _Other for .rbf files starting with it whose next character is
-        # '.' or '_', and keeps the LEXICOGRAPHICALLY GREATEST match.
-        #
-        # CAUTION, and it is not what the original note here claimed: greatest
-        # is only "newest" while the names sort chronologically. This project
-        # now builds COMMIT-HASH names (MalditaCastilla_2509573,
-        # MalditaCastilla_a723aa5, ...), and hashes do not sort by date —
-        # _a723aa5 (Jul 30) sorts above _2509573 (Jul 31). So the MGL resolves
-        # to an ARBITRARY installed build, and any hand-named one
-        # (MalditaCastilla_issue15fix) outranks every hex name forever. Keep
-        # one build in _Other/ if you care which one runs, or select the .rbf
-        # directly instead of the MGL.
-        mgl_src = REPO / "games" / CORENAME / f"{CORENAME}.mgl"
-        if mgl_src.exists():
-            print(f"   installing the Cores-browser entry '_Other/{CORENAME}.mgl'")
-            ssh(host, "mkdir -p /media/fat/_Other", check=True)
-            scp_verified(host, mgl_src, f"/media/fat/_Other/{CORENAME}.mgl")
-
-        # --- MiSTer.ini `main=` handoff -------------------------------------
-        # The absolute path matters: MiSTer's getFullPath() passes absolute
-        # paths through unchanged (file_io.cpp:154-166) and getappname() reads
-        # /proc/self/exe, so once the wrapper is running cfg.main and
-        # /proc/self/exe compare equal and the exec does not loop.
-        MAIN_LINE = "main=/media/fat/games/gmloader/MiSTer_Maldita"
-        backup = "cp /media/fat/MiSTer.ini /media/fat/MiSTer.ini.bak.$(date +%s); "
-        r = ssh(host, f"grep -q '^{MAIN_LINE}' /media/fat/MiSTer.ini "
-                      "&& echo PRESENT || echo ABSENT")
-        active = (r.stdout or "").strip() == "PRESENT"
-
-        # ARMED BY DEFAULT since 2026-08-06, and the reason is a deploy that
-        # bricked the entry point. Removing _handler.sh took Master_Daemon out
-        # of the launch path, which was the point — but on a device that had
-        # been relying on the daemon it left NOTHING able to start the engine:
-        # the Scripts entry has to be selected by hand, and `main=` shipped
-        # disarmed. Selecting the core from the Cores browser loaded the
-        # bitstream, no engine ran, C_SUBMIT stayed 0, and the reader's
-        # stale-frame watchdog blanked the screen. Measured on .81 the first
-        # time this deploy reached it: gmloader procs 0, no maldita.log at all.
-        #
-        # A black screen after a successful deploy is indistinguishable from a
-        # broken build to anyone who was not in the room when the launch path
-        # changed, so the default has to leave the core launchable the way it
-        # has always been launched — from the Cores browser. --no-main-wrapper
-        # is the opt-out for a device that wants the Scripts entry only.
-        #
-        # Safe to arm only because of the 2026-08-04 overlay rework: upstream
-        # main() and the scheduler now run verbatim and the whole local change
-        # is one call inserted AFTER scheduler_wait_fpga_ready(), so the
-        # readiness contract is honoured by the code that owns it. The
-        # 2026-07-25 measurement that disabled this (wrapper 3/5 frame-1 wedges
-        # vs stock main 0/5) was against the old overlay, which replaced main()
-        # with a hand-rolled loop that never ran that guard; the reworked one
-        # measured 0/5 on .62.
-        #
-        # The wrapper binary is shipped unconditionally a few lines above and
-        # deploy.py refuses to run without it, so arming this can never point
-        # MiSTer at a missing MAIN.
-        if not args.no_main_wrapper:
-            if active:
-                print("   main= wrapper handoff already active")
-            else:
-                print("   ! arming the main= wrapper handoff — the Cores-browser entry "
-                      "now starts the engine, with no daemon")
-                # Prefer un-commenting an existing line to appending, so repeated
-                # deploys cannot accumulate duplicate [Maldita Castilla] sections.
-                ssh(host, backup +
-                    f"if grep -q '^;{MAIN_LINE}' /media/fat/MiSTer.ini; then "
-                    f"  sed -i 's|^;{MAIN_LINE}.*|{MAIN_LINE}|' /media/fat/MiSTer.ini; "
-                    "else "
-                    f"  printf '\\n[{CORENAME}]\\n{MAIN_LINE}\\n' >> /media/fat/MiSTer.ini; "
-                    "fi", check=True)
-        elif args.no_main_wrapper and active:
-            print("   disarming the main= wrapper handoff — commenting it out")
-            ssh(host, backup +
-                      f"sed -i 's|^{MAIN_LINE}|"
-                      f";{MAIN_LINE}  ; disabled by deploy.py|' "
-                      "/media/fat/MiSTer.ini", check=True)
-        # No Master_Daemon handling here, deliberately. Earlier revisions killed
-        # and restarted it so it would re-enumerate a newly installed
-        # _handler.sh; with the deconflict above there is nothing of ours left
-        # for it to enumerate, and it may well be serving OTHER hybrid cores on
-        # this device (it auto-discovers every games/*/ with an _handler.sh).
-        # It is a third-party script we do not own — leave it running and leave
-        # it alone.
-        #
-        # An engine the daemon spawned BEFORE this deploy is not killed here.
-        # It keeps the pre-deploy binaries it already mapped, and the daemon
-        # will not respawn it once the file is gone, so it clears on the next
-        # core change. Kill gmloader over SSH if a stale one is in the way.
-    else:
-        print(f"\n   WARN: {handler_src} missing — engine launcher NOT installed. "
-              "Neither the Scripts entry nor the main= handoff can start the engine.")
+    install_launch_path(host, wrapper, not args.no_main_wrapper)
 
     if not args.no_content:
         print("\n-- Uploading content (APK + game.droid + options.ini, sha1-verified) --")
@@ -882,10 +683,9 @@ def main():
         scp_verified(host, rbf, f"/media/fat/_Other/{rbf.name}")
 
 
-    print("\n-- Fixing exec bit on the engine + wrapper --")
-    targets = f"{GAMEDIR}/MiSTer_Maldita" if args.no_engine \
-        else f"{GAMEDIR}/gmloader {GAMEDIR}/MiSTer_Maldita"
-    ssh(host, f"chmod 755 {targets}", check=True)
+    if not args.no_engine:
+        print("\n-- Fixing exec bit on the engine --")
+        ssh(host, f"chmod 755 {GAMEDIR}/gmloader", check=True)
 
     print("\n-- Deployed tree --")
     r = ssh(host, f"ls -la {GAMEDIR}/ {GAMEDIR}/saves/ 2>/dev/null | head -40; "

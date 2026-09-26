@@ -120,42 +120,35 @@ jobs:
           if-no-files-found: error
 
   build-wrapper:
-    # MiSTer_Maldita — MiSTer.ini's `main=` target, the only thing that can make
+    # MiSTer_hybrid — MiSTer.ini's `main=` target, the only thing that can make
     # the Cores browser start the engine (that browser lists .rbf/.mra/.mgl
-    # only, and MAIN is the sole per-core exec hook). Releases up to v0.2.1 did
-    # not build it, so a bundle install could only be started from the Scripts
-    # menu; selecting the core looked like a broken build.
+    # only, and MAIN is the sole per-core exec hook). Shared by every hybrid
+    # port: upstream Main_MiSTer + external/mister-hybrid-platform's hook, which
+    # reads linux/hybrid.d/Maldita Castilla.conf (launcher, OSD Reset bit).
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # No submodules: the wrapper is vendor/Main_MiSTer overlay files plus the
-      # pinned upstream tree, which build-hps.sh clones itself.
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Build MiSTer_Maldita
-        run: |
-          # Docker path: ubuntu-latest has no arm-none-linux-gnueabihf on PATH,
-          # so build-hps.sh selects its Dockerfile.wrapper image (Debian
-          # bullseye + Debian's armhf cross-toolchain) and builds native amd64
-          # — no QEMU. The script fetches Main_MiSTer at its pinned commit and
-          # fails the build if our overlay has drifted from upstream by
-          # anything other than added lines.
-          bash tools/mister-wrapper/build-hps.sh
+      - name: Build MiSTer_hybrid
+        # Debian bullseye armhf cross image, native amd64 (no QEMU). Fails if the
+        # scheduler/user_io anchors moved upstream or the hook strings are not linked.
+        run: bash external/mister-hybrid-platform/device/main-hook/build-hps.sh
 
-      - name: Wrapper sanity (32-bit ARM ELF with the hook in it)
+      - name: Hook sanity (32-bit ARM ELF with the hook and OSD Reset in it)
         run: |
           set -euo pipefail
-          W=build/mister-wrapper-hps/MiSTer_Maldita
+          W=external/mister-hybrid-platform/build/main-hook/MiSTer_hybrid
           file "$W" | tee /dev/stderr | grep "ELF 32-bit" | grep -q "ARM"
-          # Same gate assemble_bundle.sh applies, run here so a stock-upstream
-          # build fails in the job that produced it.
-          grep -qxF "/media/fat/games/Maldita Castilla/launch.sh" <(strings "$W")
+          grep -qF "OSD Reset armed on status bit" <(strings "$W")
 
-      - name: Upload wrapper
+      - name: Upload hook
         uses: actions/upload-artifact@v4
         with:
           name: mister-wrapper
-          path: build/mister-wrapper-hps/MiSTer_Maldita
+          path: external/mister-hybrid-platform/build/main-hook/MiSTer_hybrid
           if-no-files-found: error
 
   assemble-release:
@@ -200,7 +193,7 @@ jobs:
           fi
           RBF=$(ls dist/rbf/MalditaCastilla_*.rbf)
           bash scripts/release/assemble_bundle.sh "$RBF" \
-            dist/engine/gmloader dist/wrapper/MiSTer_Maldita dist/out "$VERSION"
+            dist/engine/gmloader dist/wrapper/MiSTer_hybrid dist/out "$VERSION"
 
       - name: Write provenance notes
         run: |
@@ -209,7 +202,8 @@ jobs:
             echo '```'
             echo "maldita.castilla-mister: ${GITHUB_SHA}"
             echo "gmloader-next:           $(git -C external/gmloader-next rev-parse HEAD)"
-            echo "Main_MiSTer (main= wrapper): $(sed -n 's/.*MISTER_WRAPPER_HPS_UPSTREAM_COMMIT:-\([0-9a-f]*\)}.*/\1/p' tools/mister-wrapper/build-hps.sh)"
+            echo "mister-hybrid-platform:  $(git -C external/mister-hybrid-platform rev-parse HEAD)"
+            echo "Main_MiSTer (main= hook): $(sed -n 's/.*UPSTREAM_COMMIT:-\([0-9a-f]*\)}.*/\1/p' external/mister-hybrid-platform/device/main-hook/build-hps.sh)"
             echo "fpga/ tree hash:         ${{ needs.resolve-rbf.outputs.fpga_tree }}"
             echo "RBF from build-rbf.yml:  run ${{ needs.resolve-rbf.outputs.run_id }} (commit ${{ needs.resolve-rbf.outputs.built_sha }})"
             echo '```'

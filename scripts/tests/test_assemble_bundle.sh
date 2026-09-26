@@ -30,12 +30,13 @@ if [ ! -f "$ENGINE" ]; then
     exit 1
 fi
 
-# Same rule for the main= wrapper: the assembler gates on its ELF arch, its
-# GLIBC ceiling and a .rodata string only the overlay build contains, none of
-# which a stub can satisfy honestly.
-WRAPPER="$REPO/build/mister-wrapper-hps/MiSTer_Maldita"
+# Same rule for the main= hook: the assembler gates on its ELF arch, its GLIBC
+# ceiling and .rodata strings only the platform build contains, none of which a
+# stub can satisfy honestly.
+PLAT="$REPO/external/mister-hybrid-platform"
+WRAPPER="${HOOK_BIN:-$PLAT/build/main-hook/MiSTer_hybrid}"
 if [ ! -f "$WRAPPER" ]; then
-    echo "SKIP: no wrapper at $WRAPPER (run tools/mister-wrapper/build-hps.sh first) -- NOT VERIFIED, exiting non-zero so a CI runner checking only the exit code cannot report green"
+    echo "SKIP: no hook at $WRAPPER (run $PLAT/device/main-hook/build-hps.sh first) -- NOT VERIFIED, exiting non-zero so a CI runner checking only the exit code cannot report green"
     exit 1
 fi
 
@@ -43,22 +44,27 @@ bash "$ASSEMBLE" \
     "$TMP/MalditaCastilla_test.rbf" "$ENGINE" "$WRAPPER" "$TMP/out" "v0.0.0-test" || {
     echo "FAIL: assemble_bundle.sh exited non-zero"; exit 1; }
 
-PREBUILT="$REPO/tools/mister-mem-wc/prebuilt"
+PREBUILT="$PLAT/device/mem_wc/prebuilt"
 KOS=$(find "$PREBUILT" -maxdepth 1 -name 'mem_wc-*.ko' -exec basename {} \; \
-        | sed 's|^|games/Maldita Castilla/|')
+        | sed 's|^|games/Maldita Castilla/platform/mem_wc/|')
 [ -n "$KOS" ] || { echo "FAIL: no mem_wc-*.ko in $PREBUILT to expect"; exit 1; }
 
 ACTUAL=$(cd "$TMP/out/bundle" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
 EXPECTED=$(cat - <(printf '%s\n' "$KOS") <<'EOF' | LC_ALL=C sort
 README.md
+_Other/Maldita Castilla.mgl
 _Other/MalditaCastilla_test.rbf
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
 games/Maldita Castilla/launch.sh
-games/Maldita Castilla/mem_wc_load.sh
+games/Maldita Castilla/platform/ini_main.sh
+games/Maldita Castilla/platform/launch_lib.sh
+games/Maldita Castilla/platform/mem_wc_load.sh
+games/Maldita Castilla/platform/mister_cores.tsv
+games/Maldita Castilla/platform/mister_map_gm_fabric.env
+games/Maldita Castilla/platform/mister_mem_wc.env
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
-games/gmloader/MiSTer_Maldita
 games/gmloader/gmloader
 games/gmloader/gmloader.json
 games/gmloader/lib/armeabi-v7a/libstdc++.so
@@ -73,6 +79,8 @@ games/gmloader/mesa/swrast_dri.so
 games/gmloader/mygame.apk
 games/gmloader/saves/game.droid
 games/gmloader/saves/options.ini
+linux/MiSTer_hybrid
+linux/hybrid.d/Maldita Castilla.conf
 EOF
 )
 
@@ -102,7 +110,7 @@ while IFS= read -r ko; do
     cmp -s "$PREBUILT/$(basename "$ko")" "$TMP/out/bundle/$ko" \
         || { echo "FAIL: staged $ko differs from $PREBUILT/$(basename "$ko")"; exit 1; }
 done <<< "$KOS"
-grep -q 'mem_wc-\$(uname -r)\.ko' "$TMP/out/bundle/games/Maldita Castilla/mem_wc_load.sh" \
+grep -q 'mem_wc-\$(uname -r)\.ko' "$TMP/out/bundle/games/Maldita Castilla/platform/mem_wc_load.sh" \
     || { echo "FAIL: bundled mem_wc_load.sh does not resolve the vermagic-named object"; exit 1; }
 
 # The GL runtime is the one thing here with no on-device fallback: get it wrong
@@ -116,23 +124,24 @@ cmp -s "$GLDIR/libGLES_sw.so" "$REPO/external/gmloader-next/3rdparty/gles2-sw/li
 [ -f "$GLDIR/mesa/libtinfo.so.6" ] \
     || { echo "FAIL: mesa/libtinfo.so.6 missing -- static-LLVM swrast_dri.so cannot load, engine dies at eglInitialize"; exit 1; }
 
-# The main= wrapper. Staged bytes must be the built binary, and it must sit at
-# the exact path the arming script writes into MiSTer.ini -- MiSTer execs that
-# path or (FileExists() being false) silently does nothing, and "nothing" is
-# indistinguishable from a broken core to whoever installed the zip.
-cmp -s "$WRAPPER" "$GLDIR/MiSTer_Maldita" \
-    || { echo "FAIL: staged games/gmloader/MiSTer_Maldita differs from $WRAPPER"; exit 1; }
-grep -qF '"/media/fat/games/gmloader/MiSTer_Maldita"' \
-    "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
-    || { echo "FAIL: bundled MalditaCastilla_CoresMenu.sh does not point main= at the path the bundle installs the wrapper to"; exit 1; }
+# The main= hook. Staged bytes must be the built binary at the path the
+# CoresMenu toggle writes into MiSTer.ini, and the registry entry must opt this
+# core in to the OSD Reset restart (CONF_STR "TJ,Reset;" = status bit 19).
+cmp -s "$WRAPPER" "$TMP/out/bundle/linux/MiSTer_hybrid" \
+    || { echo "FAIL: staged linux/MiSTer_hybrid differs from $WRAPPER"; exit 1; }
+grep -qF '/media/fat/linux/MiSTer_hybrid' "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
+    || { echo "FAIL: CoresMenu toggle does not point main= at linux/MiSTer_hybrid"; exit 1; }
+REG="$TMP/out/bundle/linux/hybrid.d/Maldita Castilla.conf"
+for l in "launcher=/media/fat/games/Maldita Castilla/launch.sh" "osd_reset=19"; do
+    grep -qxF "$l" "$REG" || { echo "FAIL: registry entry lacks '$l'"; exit 1; }
+done
 
-# Negative: a plain armhf ELF that is NOT the overlay build must be rejected.
-# The engine stands in for the realistic version of this mistake -- a stock
-# Main_MiSTer renamed MiSTer_Maldita, which passes every arch/glibc gate, execs
-# fine, shows the OSD and never starts the engine.
+# Negative: a plain armhf ELF that is NOT the hook build must be rejected. The
+# engine stands in for a stock Main_MiSTer renamed MiSTer_hybrid, which passes
+# every arch/glibc gate, execs fine, shows the OSD and never starts the engine.
 if bash "$ASSEMBLE" "$TMP/MalditaCastilla_test.rbf" "$ENGINE" "$ENGINE" \
         "$TMP/out-neg" "v0.0.0-neg" >/dev/null 2>&1; then
-    echo "FAIL: assemble_bundle.sh accepted a binary with no maldita_hook launch.sh string as the wrapper"; exit 1
+    echo "FAIL: assemble_bundle.sh accepted a binary without the MiSTer_hybrid strings as the hook"; exit 1
 fi
 
-echo "PASS: $(printf '%s\n' "$ACTUAL" | wc -l | tr -d ' ')-file manifest, zip and checksums present, game data + mem_wc objects staged byte-identical, main= wrapper staged and gated"
+echo "PASS: $(printf '%s\n' "$ACTUAL" | wc -l | tr -d ' ')-file manifest, zip and checksums present, game data + mem_wc objects staged byte-identical, main= hook staged and gated"
