@@ -1,7 +1,7 @@
 [submodule "external/gmloader-next"]
 	path = external/gmloader-next
-	url = git@github.com:gmcnaught/gmloader-next.git
+	url = https://github.com/gmcnaught/gmloader-next.git
 	branch = master
 [submodule "external/mister-hybrid-platform"]
 	path = external/mister-hybrid-platform
-	url = git@github.com:gmcnaught/mister-hybrid-platform.git
+	url = https://github.com/gmcnaught/mister-hybrid-platform.git
