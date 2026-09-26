@@ -4,6 +4,6 @@
 #   test  the pair staged in games/gmloader/fpsdip-test/
 set -eu
 HOST="${MISTER_HOST:-root@192.168.20.81}"
-ssh "$HOST" "set -e; G=/media/fat/games/gmloader; L='/media/fat/games/Maldita Castilla/launch.sh'
+ssh "$HOST" "set -e; G=/media/fat/games/gmloader; L='/media/fat/games/gmloader/launch.sh'
   cp -p \$G/fpsdip-$1/gmloader \$G/gmloader; cp -p \$G/fpsdip-$1/launch.sh \"\$L\"
   md5sum \$G/gmloader \"\$L\""

@@ -46,7 +46,7 @@ bash "$ASSEMBLE" \
 
 PREBUILT="$PLAT/device/mem_wc/prebuilt"
 KOS=$(find "$PREBUILT" -maxdepth 1 -name 'mem_wc-*.ko' -exec basename {} \; \
-        | sed 's|^|games/Maldita Castilla/platform/mem_wc/|')
+        | sed 's|^|games/gmloader/platform/mem_wc/|')
 [ -n "$KOS" ] || { echo "FAIL: no mem_wc-*.ko in $PREBUILT to expect"; exit 1; }
 
 ACTUAL=$(cd "$TMP/out/bundle" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
@@ -56,13 +56,13 @@ _Other/Maldita Castilla.mgl
 _Other/MalditaCastilla_test.rbf
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
-games/Maldita Castilla/launch.sh
-games/Maldita Castilla/platform/ini_main.sh
-games/Maldita Castilla/platform/launch_lib.sh
-games/Maldita Castilla/platform/mem_wc_load.sh
-games/Maldita Castilla/platform/mister_cores.tsv
-games/Maldita Castilla/platform/mister_map_gm_fabric.env
-games/Maldita Castilla/platform/mister_mem_wc.env
+games/gmloader/launch.sh
+games/gmloader/platform/ini_main.sh
+games/gmloader/platform/launch_lib.sh
+games/gmloader/platform/mem_wc_load.sh
+games/gmloader/platform/mister_cores.tsv
+games/gmloader/platform/mister_map_gm_fabric.env
+games/gmloader/platform/mister_mem_wc.env
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
 games/gmloader/gmloader
@@ -110,7 +110,7 @@ while IFS= read -r ko; do
     cmp -s "$PREBUILT/$(basename "$ko")" "$TMP/out/bundle/$ko" \
         || { echo "FAIL: staged $ko differs from $PREBUILT/$(basename "$ko")"; exit 1; }
 done <<< "$KOS"
-grep -q 'mem_wc-\$(uname -r)\.ko' "$TMP/out/bundle/games/Maldita Castilla/platform/mem_wc_load.sh" \
+grep -q 'mem_wc-\$(uname -r)\.ko' "$TMP/out/bundle/games/gmloader/platform/mem_wc_load.sh" \
     || { echo "FAIL: bundled mem_wc_load.sh does not resolve the vermagic-named object"; exit 1; }
 
 # The GL runtime is the one thing here with no on-device fallback: get it wrong
@@ -132,7 +132,7 @@ cmp -s "$WRAPPER" "$TMP/out/bundle/linux/MiSTer_hybrid" \
 grep -qF '/media/fat/linux/MiSTer_hybrid' "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
     || { echo "FAIL: CoresMenu toggle does not point main= at linux/MiSTer_hybrid"; exit 1; }
 REG="$TMP/out/bundle/linux/hybrid.d/Maldita Castilla.conf"
-for l in "launcher=/media/fat/games/Maldita Castilla/launch.sh" "osd_reset=19"; do
+for l in "launcher=/media/fat/games/gmloader/launch.sh" "osd_reset=19"; do
     grep -qxF "$l" "$REG" || { echo "FAIL: registry entry lacks '$l'"; exit 1; }
 done
 

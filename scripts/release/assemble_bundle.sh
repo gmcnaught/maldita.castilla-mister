@@ -11,7 +11,7 @@
 #            to v0.2.1 shipped without a main= binary, so selecting the core from
 #            Cores -> _Other loaded the bitstream and started nothing.
 #
-# The launch path (games/Maldita Castilla/launch.sh + platform/, Scripts entries,
+# The launch path (games/gmloader/launch.sh + platform/, Scripts entries,
 # linux/hybrid.d registry entry, MGL, mem_wc modules) is rendered from
 # mister-port.toml by external/mister-hybrid-platform.
 #   out_dir  output dir (created); zip + sha256sums.txt + bundle/ land here
@@ -107,7 +107,7 @@ python3 "$PLAT/tools/mister_platform.py" render "$REPO/mister-port.toml" --out "
     || fail "mister-platform render failed"
 MEMWC_KOS=()
 while IFS= read -r ko; do MEMWC_KOS+=("$ko"); done < <(
-    find "$BUNDLE/games/Maldita Castilla/platform/mem_wc" -maxdepth 1 -name 'mem_wc-*.ko' | LC_ALL=C sort)
+    find "$BUNDLE/games/gmloader/platform/mem_wc" -maxdepth 1 -name 'mem_wc-*.ko' | LC_ALL=C sort)
 [ "${#MEMWC_KOS[@]}" -ge 1 ] \
     || fail "no platform/mem_wc/mem_wc-*.ko rendered -- the bundle's engine would map DDR strongly-ordered"
 cp "$ENGINE" "$GMDIR/gmloader"; chmod +x "$GMDIR/gmloader"
@@ -160,13 +160,13 @@ _Other/$RBF_NAME
 _Other/Maldita Castilla.mgl
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
-games/Maldita Castilla/launch.sh
-games/Maldita Castilla/platform/ini_main.sh
-games/Maldita Castilla/platform/launch_lib.sh
-games/Maldita Castilla/platform/mem_wc_load.sh
-games/Maldita Castilla/platform/mister_cores.tsv
-games/Maldita Castilla/platform/mister_map_gm_fabric.env
-games/Maldita Castilla/platform/mister_mem_wc.env
+games/gmloader/launch.sh
+games/gmloader/platform/ini_main.sh
+games/gmloader/platform/launch_lib.sh
+games/gmloader/platform/mem_wc_load.sh
+games/gmloader/platform/mister_cores.tsv
+games/gmloader/platform/mister_map_gm_fabric.env
+games/gmloader/platform/mister_mem_wc.env
 games/gmloader/APKs/README.txt
 games/gmloader/LICENSE.malditacastilla.txt
 games/gmloader/gmloader
@@ -194,7 +194,7 @@ EOF
 # the tree still fails the comparison.
 for ko in "${MEMWC_KOS[@]}"; do
     EXPECTED="$EXPECTED
-games/Maldita Castilla/platform/mem_wc/$(basename "$ko")"
+games/gmloader/platform/mem_wc/$(basename "$ko")"
 done
 ACTUAL=$(cd "$BUNDLE" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
 if [ "$ACTUAL" != "$(printf '%s\n' "$EXPECTED" | LC_ALL=C sort)" ]; then

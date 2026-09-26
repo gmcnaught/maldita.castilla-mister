@@ -14,7 +14,7 @@ FPGA blitter core.
    - `Scripts/MalditaCastilla.sh` — **the launcher: this is how you start it**
    - `Scripts/MalditaCastilla_CoresMenu.sh` — optional one-off setup, so the
      Cores browser can start the game too (see below)
-   - `games/Maldita Castilla/launch.sh` + `platform/` — engine launcher (run by
+   - `games/gmloader/launch.sh` + `platform/` — engine launcher (run by
      the above) and an optional kernel module (`platform/mem_wc/`) that makes
      the engine's uploads to the FPGA ~10× faster (see below)
    - `games/gmloader/` — the game engine, GL runtime, and the game data
@@ -142,7 +142,7 @@ Two notes if you armed it:
 
 ## The `mem_wc` module (optional, and safe to ignore)
 
-`games/Maldita Castilla/platform/` contains a small kernel module and a loader
+`games/gmloader/platform/` contains a small kernel module and a loader
 script that `launch.sh` sources before starting the engine. All it does is let the
 engine map the FPGA's command rings and texture heap **write-combining**
 instead of strongly-ordered — measured on a DE10-Nano, `memcpy` into that

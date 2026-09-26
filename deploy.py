@@ -40,7 +40,7 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
   /media/fat/_Other/MalditaCastilla_*.rbf                        <- RBF
   launch path, rendered from mister-port.toml by external/mister-hybrid-platform
   (every deploy):
-    games/Maldita Castilla/launch.sh + platform/   launcher, launch_lib, mem_wc
+    games/gmloader/launch.sh + platform/           launcher, launch_lib, mem_wc
     Scripts/MalditaCastilla.sh, _CoresMenu.sh      Scripts entry, main= toggle
     linux/hybrid.d/Maldita Castilla.conf           registry entry (OSD Reset bit 19)
     linux/MiSTer_hybrid                            shared main= hook      <- HOOK
@@ -154,13 +154,11 @@ REPO = Path(__file__).resolve().parent            # maldita.castilla-mister
 SIBLINGS = REPO.parent                            # ~/MisterFPGA-Projects
 GAMEDIR = "/media/fat/games/gmloader"
 
-# ── Auto-launch (launch.sh, driven by the Scripts entry or the main= hook) ─────
-# Both entry points hardcode /media/fat/games/<CORENAME>/launch.sh, and the
-# `main=` hook additionally compares user_io_get_core_name() against this
-# string, so it MUST match the RBF's CONF_STR setname exactly
-# (fpga/Maldita.sv:270) — including the space.
+# ── Auto-launch (games/gmloader/launch.sh, rendered from mister-port.toml) ─────
+# MiSTer_hybrid finds the launcher through linux/hybrid.d/<CORENAME>.conf, so
+# CORENAME MUST match the RBF's CONF_STR setname exactly (fpga/Maldita.sv) —
+# including the space. It is also the MiSTer.ini section name.
 CORENAME    = "Maldita Castilla"
-HANDLER_DIR = f"/media/fat/games/{CORENAME}"
 
 # ── Source paths (sibling repos). Override any with the matching CLI flag. ──────
 # Prefer the submodule so a fresh clone is self-sufficient; fall back to a
@@ -454,8 +452,8 @@ def install_launch_path(host, hook, arm_main):
     """Render mister-port.toml with the platform and install the tree.
 
     One tar stream (no xattrs, no owner) instead of a scp per file: the tree has
-    ~20 files, two of them in a directory whose name has a space. Then, on the
-    device: remove what pre-platform deploys installed, point (or un-point)
+    ~20 files, some with a space in their path. Then, on the device: remove what
+    pre-platform deploys installed (dist/scripts-extra.sh, as the Scripts entry does), point (or un-point)
     MiSTer.ini [Maldita Castilla] main= at MiSTer_hybrid through the platform's
     section-scoped ini_main.sh, and delete MiSTer_Maldita once no section names it.
     """
@@ -472,17 +470,19 @@ def install_launch_path(host, hook, arm_main):
         tar.stdout.close()
         if tar.wait() != 0 or r.returncode != 0:
             raise SystemExit("FATAL: launch-path install failed")
-    hd = shlex.quote(HANDLER_DIR)
+    gd = shlex.quote(GAMEDIR)
+    cleanup = (REPO / "dist/scripts-extra.sh").read_text()
     ini_cmd = (f'mh_ini_set_main {HOOK_PATH} && echo "   main= -> {HOOK_PATH}"' if arm_main else
                f'if [ "$(mh_ini_main)" = {HOOK_PATH} ]; then mh_ini_disable_main {HOOK_PATH} deploy.py '
                '&& echo "   main= disarmed (--no-main-wrapper)"; fi')
     script = f"""
 set -e
-chmod 755 {hd}/launch.sh {HOOK_PATH} /media/fat/Scripts/MalditaCastilla.sh /media/fat/Scripts/MalditaCastilla_CoresMenu.sh
-rm -f {hd}/_handler.sh {hd}/mem_wc_load.sh {hd}/mem_wc.ko {hd}/mem_wc-*.ko {hd}/mister_takeover.sh {hd}/takeover.env
-test -e {hd}/_handler.sh && {{ echo "FATAL: _handler.sh survived"; exit 1; }}
+chmod 755 {gd}/launch.sh {HOOK_PATH} /media/fat/Scripts/MalditaCastilla.sh /media/fat/Scripts/MalditaCastilla_CoresMenu.sh
+GAMEDIR={gd}
+{cleanup}
+test -e {gd}/_handler.sh && {{ echo "FATAL: _handler.sh survived"; exit 1; }}
 MH_INI_FILE=/media/fat/MiSTer.ini MH_INI_SECTION={shlex.quote(CORENAME)}
-. {hd}/platform/ini_main.sh
+. {gd}/platform/ini_main.sh
 {ini_cmd}
 if [ -f {LEGACY_WRAPPER} ] && ! grep -q '^main={LEGACY_WRAPPER}' /media/fat/MiSTer.ini; then
     rm -f {LEGACY_WRAPPER} && echo "   removed {LEGACY_WRAPPER}"

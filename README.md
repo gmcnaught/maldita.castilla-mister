@@ -40,7 +40,7 @@ tagged `v*` release publishes:
    - `_Other/MalditaCastilla_YYYYMMDD.rbf` — the FPGA core
    - `Scripts/MalditaCastilla.sh` — the Scripts-menu launcher
    - `Scripts/MalditaCastilla_CoresMenu.sh` — optional: make the Cores entry start the game
-   - `games/Maldita Castilla/launch.sh` + `platform/` — the engine launcher it runs,
+   - `games/gmloader/launch.sh` + `platform/` — the engine launcher it runs,
      and the optional write-combining DDR mapping (`platform/mem_wc/`, used only
      when an object matches the device's `uname -r`, ~10× on uploads to the fabric)
    - `linux/MiSTer_hybrid` + `linux/hybrid.d/Maldita Castilla.conf` — the shared

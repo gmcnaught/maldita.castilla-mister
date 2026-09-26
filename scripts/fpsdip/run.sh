@@ -47,7 +47,7 @@ fi
 ( taskset 2 /tmp/joy_play.armhf /dev/shm/maldita-joy "$SEED" > "$OUT/joy.txt" 2>&1 & )
 
 { echo "tag=$TAG secs=$SECS warm=$WARM seed=$SEED"; echo "rbf=$RBF"; date
-  md5sum "$GMDIR/gmloader" "$RBF" "/media/fat/games/Maldita Castilla/launch.sh"
+  md5sum "$GMDIR/gmloader" "$RBF" "/media/fat/games/gmloader/launch.sh"
   cat "$D/test.env" 2>/dev/null; uname -r; } > "$OUT/info.txt"
 
 # The engine aborts during RunnerLoadGame on ~1 in 3 cold starts (malloc(): invalid
