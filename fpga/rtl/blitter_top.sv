@@ -717,7 +717,11 @@ module blitter_top #(
                      // entered ONLY when c_blend==BLEND_PALPHA (every other mode keeps its
                      // exact cycle count). New encoding, not the 4/5 hole, so historical
                      // wedge-probe pb values still decode as B_DSTW/B_DSTC.
-                     B_WRP=4'd11;
+                     B_WRP=4'd11,
+                     // [TRILIST PALPHA / STA] second half of the combine: B_WRP registers
+                     // the 17*a4*ea product, B_WRP2 rounds it. One state did both and
+                     // failed setup by -2.09 ns (b1_ea/b1_a4 -> b1_na, CI 2026-09-27).
+                     B_WRP2=4'd12;
     reg  [3:0]   pa;                       // address-gen sub-FSM state
     reg  [3:0]   pb;                       // consume+blend sub-FSM state
 
@@ -1114,6 +1118,7 @@ module blitter_top #(
     reg  [3:0]  b1_a4;   // [TRILIST PALPHA] texel A4 (4'hF = opaque: RGB565 page / surface)
     reg  [11:0] pp_t;    // [TRILIST PALPHA] B_WRP temps: a4*ea, a8*ea = 17*a4*ea, round
     reg  [15:0] pa_t;
+    reg  [15:0] pa_q;    // [TRILIST PALPHA / STA] registered a8*ea, B_WRP -> B_WRP2
     reg  [16:0] pa_m;
     reg  [7:0]  pa_r;
     reg  [15:0] tx_rgb;  // [TRILIST PALPHA] stage-A texel decoded to RGB565
@@ -2400,12 +2405,15 @@ module blitter_top #(
             // already carries the ca*g_alpha multiply that is the fabric clock's
             // critical path, and this is a second multiply in series with it. The
             // multiply here is only 4x8 (the x17 is a shift-add). na = 255-pa = ~pa.
-            // Cost: +1 pb cycle per PALPHA pixel; other modes never enter this state.
+            // Cost: +2 pb cycles per PALPHA pixel (B_WRP, B_WRP2); other modes never enter them.
             // A4=15 (RGB565 page) gives a8=255 and pa==ea exactly.
             B_WRP: begin
                 pp_t  = b1_a4 * b1_ea;                       // <= 15*255 = 3825
-                pa_t  = {pp_t, 4'd0} + {4'd0, pp_t};         // a8*ea <= 65025
-                pa_m  = {1'b0, pa_t} + 17'd128;              // blt_div255_round
+                pa_q  <= {pp_t, 4'd0} + {4'd0, pp_t};        // a8*ea = 17*a4*ea <= 65025
+                pb<=B_WRP2;
+            end
+            B_WRP2: begin
+                pa_m  = {1'b0, pa_q} + 17'd128;              // blt_div255_round
                 pa_r  = ({1'b0, pa_m} + {9'd0, pa_m[16:8]}) >> 8;
                 b1_ea <= pa_r;
                 b1_na <= ~pa_r;                              // 255 - pa

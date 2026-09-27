@@ -23,7 +23,7 @@
 //
 // CYCLE CONTRACT (the design's "other modes unchanged" claim): for every pixel that
 // took no B_WAIT, pb latency pop->B_WR3 inclusive must be exactly 6 cycles for
-// non-PALPHA modes and exactly 7 for PALPHA (the one B_WRP cycle). Checked per pixel.
+// non-PALPHA modes and exactly 8 for PALPHA (B_WRP + B_WRP2). Checked per pixel.
 `timescale 1ns/1ps
 `default_nettype none
 `include "blitter_defs.vh"
@@ -143,6 +143,7 @@ module `PALPHA_TB_NAME;
       if (!blt.fill_busy && blt.tri_need_dst) retry_reissue <= retry_reissue + 1;
     end
     // B_WRP must be entered by PALPHA pixels ONLY
+    if (blt.pb == blt.B_WRP2 && blt.c_blend != BL_PALPHA) pp_wrp_bad <= pp_wrp_bad + 1;
     if (blt.pb == blt.B_WRP) begin
       pp_wrp <= pp_wrp + 1;
       if (blt.c_blend != BL_PALPHA) pp_wrp_bad <= pp_wrp_bad + 1;
@@ -155,7 +156,7 @@ module `PALPHA_TB_NAME;
       if (!px_waited) begin
         if (blt.c_blend == BL_PALPHA) begin
           hit_px_pal <= hit_px_pal + 1; lat_cyc_pal <= lat_cyc_pal + lat + 1;
-          if (lat + 1 != 7) lat_bad <= lat_bad + 1;
+          if (lat + 1 != 8) lat_bad <= lat_bad + 1;
         end else begin
           hit_px_oth <= hit_px_oth + 1; lat_cyc_oth <= lat_cyc_oth + lat + 1;
           if (lat + 1 != 6) lat_bad <= lat_bad + 1;
