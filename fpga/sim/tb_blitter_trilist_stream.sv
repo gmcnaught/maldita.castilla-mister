@@ -406,7 +406,10 @@ module `STREAM_TB_NAME;
                 || ((blt.state == blt.S_RD_WAIT) && (blt.rd_ret >= blt.S_TRI_VFETCH));
   wire in_setup  = (blt.state == blt.S_TRI_SETUP) || (blt.state == blt.S_TRI_SWAIT);
   wire in_texw   = umbrella && (blt.pb == blt.B_WAIT);
-  wire in_wr     = umbrella && ((blt.pb == blt.B_WR) || (blt.pb == blt.B_WR2) || (blt.pb == blt.B_WR3));
+  // [TRILIST PALPHA] B_WRP (PALPHA draws only) is a blend-write state too; the captured
+  // frames predate PALPHA so it never occurs here, but the partition must stay complete.
+  wire in_wr     = umbrella && ((blt.pb == blt.B_WR) || (blt.pb == blt.B_WRP)
+                             || (blt.pb == blt.B_WR2) || (blt.pb == blt.B_WR3));
   // [span walk] the walk is now three pa states: A_PIX emits (and its coverage test
   // doubles as the span-end test), A_SEEK locates the next row's span start, A_ROWY
   // steps the row. pix_emit is kept SEPARATE from the partition condition because

@@ -712,7 +712,12 @@ module blitter_top #(
                      B_WR=4'd6, B_WR2=4'd7, B_WR3=4'd8,
                      // [app-surface v1] surface texel read: issue surf_rd (B_SURF_W is the
                      // 1-cyc BRAM latency), latch the texel (B_SURF_C), then dst/blend.
-                     B_SURF_W=4'd9, B_SURF_C=4'd10;
+                     B_SURF_W=4'd9, B_SURF_C=4'd10,
+                     // [TRILIST PALPHA] per-texel alpha combine, between B_WR and B_WR2,
+                     // entered ONLY when c_blend==BLEND_PALPHA (every other mode keeps its
+                     // exact cycle count). New encoding, not the 4/5 hole, so historical
+                     // wedge-probe pb values still decode as B_DSTW/B_DSTC.
+                     B_WRP=4'd11;
     reg  [3:0]   pa;                       // address-gen sub-FSM state
     reg  [3:0]   pb;                       // consume+blend sub-FSM state
 
@@ -820,6 +825,7 @@ module blitter_top #(
     // OP_TRILIST setup. The surface texel read is a 1-cyc comp_fbram surf_rd BRAM hit
     // (NO tq cache / P_SRC): surf_qw_q/lane computed in A_ADDR2, read in B_SURF_*.
     reg          tri_src_surface;
+    reg          tri_is4444;   // [TRILIST PALPHA] texel page is ARGB4444 (never for a surface source)
     reg          tri_surf_rd_en; reg [14:0] tri_surf_rd_qw;   // drive comp_fbram surf_rd port
     reg  [14:0]  surf_qw_q;      // A_ADDR2 surface qword (itv*stride + itu>>2), pushed to the FIFO
 
@@ -989,7 +995,8 @@ module blitter_top #(
     wire [31:0] wedge_snap2 = max_fbdma_run;
 `endif
 
-    wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
+    wire tri_need_dst = (c_blend==BLEND_ALPHA)||(c_blend==BLEND_PALPHA)
+                      ||(c_blend==BLEND_ADD)||(c_blend==BLEND_MULTIPLY);
 
 `ifndef SYNTHESIS
     // ── [Phase 1 A2] sim-only invariants for the hoisted dst read ─────────────────
@@ -1104,6 +1111,12 @@ module blitter_top #(
     reg  [5:0]  b1_tsr, b1_tsg, b1_tsb, b1_dr, b1_dg, b1_db;
     reg  [7:0]  b1_ea, b1_na;
     reg         b1_we;
+    reg  [3:0]  b1_a4;   // [TRILIST PALPHA] texel A4 (4'hF = opaque: RGB565 page / surface)
+    reg  [11:0] pp_t;    // [TRILIST PALPHA] B_WRP temps: a4*ea, a8*ea = 17*a4*ea, round
+    reg  [15:0] pa_t;
+    reg  [16:0] pa_m;
+    reg  [7:0]  pa_r;
+    reg  [15:0] tx_rgb;  // [TRILIST PALPHA] stage-A texel decoded to RGB565
     reg  [16:0] b2_r, b2_g, b2_b;
     reg         b2_we;
     // combinational (blocking) temps: stage-A alpha-combine, stage-C reduce/clamp/pack
@@ -1403,6 +1416,7 @@ module blitter_top #(
             comp_target<=`BLT_TARGET_WORK;   // [app-surface v1] default target = WORK
             tri_p0_rd<=1'b0; tri_fb_rd_en<=1'b0; tri_fb_wr_en<=1'b0;
             tri_surf_rd_en<=1'b0; tri_src_surface<=1'b0;   // [app-surface v1]
+            tri_is4444<=1'b0;                              // [TRILIST PALPHA]
             pa<=A_PIX; pb<=B_IDLE; pf_wr<=0; pf_rd<=0;
             fill_busy<=1'b0; tq_valid<={TEXQ_N{1'b0}}; last_pf_qtag<=24'hFFFFFF;
             wd_stall<=13'd0; wd_fire_count<=24'd0;
@@ -1699,6 +1713,10 @@ module blitter_top #(
                     // [app-surface v1] texel source = off-screen APPSURF surface when set,
                     // else the SDRAM heap. Stable for the whole command (drains before next).
                     tri_src_surface <= (c_flags & F_SRC_SURFACE) != 8'd0;
+                    // [TRILIST PALPHA] a triangle-constant select for stage A's decode
+                    // mux, registered here so B_WR sees one flop, not a compare chain.
+                    // The app surface is always RGB565 (blt_tri.c: !from_surface).
+                    tri_is4444 <= (c_format == FMT_ARGB4444) && ((c_flags & F_SRC_SURFACE) == 8'd0);
                     if (c_w == 16'd0) begin tri_busy<=1'b0; state<=S_NEXT_CMD; end
                     else                    state<=S_TRI_VFETCH;
                 end
@@ -2344,9 +2362,17 @@ module blitter_top #(
             // na=255-ea. Register everything the MAC needs. One small multiply-or-
             // reduce per lane, no chain — mirrors blt_tri.sv:122-129 exactly.
             B_WR: begin
-                b1_tsr <= modch({1'b0, texel_q[15:11]}, b_cr);   // tinted source channels
-                b1_tsg <= modch(texel_q[10:5],          b_cg);
-                b1_tsb <= modch({1'b0, texel_q[4:0]},   b_cb);
+                // [TRILIST PALPHA] An ARGB4444 page ({A4,R4,G4,B4}) is decoded to RGB565
+                // for EVERY blend mode (blt_argb4444_to_565: R5={r4,r4[3]},
+                // G6={g4,g4[3:2]}, B5={b4,b4[3]}); the tint uses the decoded colour.
+                // tri_is4444 is a registered triangle constant, so this is one 2:1 mux
+                // level ahead of modch's multiply.
+                tx_rgb = tri_is4444 ? { texel_q[11:8], texel_q[11], texel_q[7:4], texel_q[7:6],
+                                        texel_q[3:0],  texel_q[3] } : texel_q;
+                b1_tsr <= modch({1'b0, tx_rgb[15:11]}, b_cr);   // tinted source channels
+                b1_tsg <= modch(tx_rgb[10:5],          b_cg);
+                b1_tsb <= modch({1'b0, tx_rgb[4:0]},   b_cb);
+                b1_a4  <= tri_is4444 ? texel_q[15:12] : 4'hF;
                 b1_dr  <= {1'b0, dst_q[15:11]};  // dst channels (dr/db 5-bit, dg 6-bit)
                 b1_dg  <= dst_q[10:5];
                 b1_db  <= {1'b0, dst_q[4:0]};
@@ -2361,8 +2387,28 @@ module blitter_top #(
                 ea_t   = ( ({8'd0, xa_t} << 8) + {8'd0, xa_t} + 24'd257 ) >> 16;
                 b1_ea  <= ea_t;
                 b1_na  <= 8'd255 - ea_t;
-                // colorkey cull (stable inputs; carried to the write stage)
-                b1_we  <= !((c_blend==BLEND_KEY) && (texel_q==c_colorkey));
+                // colorkey cull (stable inputs; carried to the write stage). COLORKEY
+                // compares the RAW fetched texel, also on an ARGB4444 page.
+                // [TRILIST PALPHA] a transparent texel (A4==0) is a skip under PALPHA.
+                b1_we  <= !((c_blend==BLEND_KEY) && (texel_q==c_colorkey))
+                       && !((c_blend==BLEND_PALPHA) && tri_is4444 && (texel_q[15:12]==4'd0));
+                pb <= (c_blend==BLEND_PALPHA) ? B_WRP : B_WR2;
+            end
+            // ── [TRILIST PALPHA] per-texel alpha combine (PALPHA draws only) ─────
+            // pa = div255_round(a8*ea), a8={a4,a4}=17*a4, then pa/na replace ea/na for
+            // the CONST_ALPHA MAC. A state of its own, NOT folded into B_WR: stage A
+            // already carries the ca*g_alpha multiply that is the fabric clock's
+            // critical path, and this is a second multiply in series with it. The
+            // multiply here is only 4x8 (the x17 is a shift-add). na = 255-pa = ~pa.
+            // Cost: +1 pb cycle per PALPHA pixel; other modes never enter this state.
+            // A4=15 (RGB565 page) gives a8=255 and pa==ea exactly.
+            B_WRP: begin
+                pp_t  = b1_a4 * b1_ea;                       // <= 15*255 = 3825
+                pa_t  = {pp_t, 4'd0} + {4'd0, pp_t};         // a8*ea <= 65025
+                pa_m  = {1'b0, pa_t} + 17'd128;              // blt_div255_round
+                pa_r  = ({1'b0, pa_m} + {9'd0, pa_m[16:8]}) >> 8;
+                b1_ea <= pa_r;
+                b1_na <= ~pa_r;                              // 255 - pa
                 pb<=B_WR2;
             end
             // ── blend stage B (comp_mixer stage B analogue) ──────────────────────
@@ -2371,7 +2417,7 @@ module blitter_top #(
             // source (COPY/KEY). One multiply-or-add layer, reduced next stage.
             B_WR2: begin
                 case (c_blend)
-                  BLEND_ALPHA: begin   // BM_CALPHA: tsr*ea + dr*na  (reduced /255 in C)
+                  BLEND_ALPHA, BLEND_PALPHA: begin   // BM_CALPHA: tsr*ea + dr*na  (reduced /255 in C)
                     b2_r <= b1_tsr*b1_ea + b1_dr*b1_na;
                     b2_g <= b1_tsg*b1_ea + b1_dg*b1_na;
                     b2_b <= b1_tsb*b1_ea + b1_db*b1_na;
@@ -2400,7 +2446,7 @@ module blitter_top #(
             // write if not culled. Byte-identical result to blt_tri.sv:132-148.
             B_WR3: begin
                 case (c_blend)
-                  BLEND_ALPHA: begin
+                  BLEND_ALPHA, BLEND_PALPHA: begin
                     bl_or = red255(b2_r); bl_og = red255(b2_g); bl_ob = red255(b2_b);
                   end
                   BLEND_ADD: begin
@@ -2582,7 +2628,11 @@ module blitter_top #(
                 // trigger — see the latch above; bit1=osd_fps_on, a genuine persistent
                 // level so it's read raw); bit2 = constant 1, [present-from-surface]
                 // capability: this RBF honours END.flags & BLT_F_SRC_SURFACE (an older
-                // RBF writes 0 here, and the host then never skips the composite); high32 = compositor-busy (pipe_busy) cyc this
+                // RBF writes 0 here, and the host then never skips the composite);
+                // bit3 = constant 1, [TRILIST PALPHA] capability: this RBF implements
+                // BLEND_PALPHA and the ARGB4444 texel decode on BLT_OP_TRILIST (an older
+                // RBF writes 0, and the host must never emit PALPHA against it);
+                // bits[7:4] = 0; bits[31:8] = wd_fire_count; high32 = compositor-busy (pipe_busy) cyc this
                 // frame — unchanged.
                 // [profiling] high32 repurposed perf_pipe_cyc -> perf_texwait_cyc (the
                 // per-pixel texel-fetch stall). perf_pipe_cyc (~2.45ms) is already known.
@@ -2590,9 +2640,9 @@ module blitter_top #(
 `ifdef SOLARUS_DBG_PROBES
                 // [wedge probe v2] high32 = wedge_snap2 (bbox at peak stuck: maxx|maxy<<16) for the
                 // runaway-walk check; low32 OSD bits preserved. Host reads bbox at C_STATUS+4 = 0x3B000034.
-                bm_din<={wedge_snap2, wd_fire_count, 5'd0, 1'b1, osd_fps_on, osd_restart_pending};
+                bm_din<={wedge_snap2, wd_fire_count, 4'd0, 1'b1, 1'b1, osd_fps_on, osd_restart_pending};
 `else
-                bm_din<={perf_texwait_cyc, wd_fire_count, 5'd0, 1'b1, osd_fps_on, osd_restart_pending};
+                bm_din<={perf_texwait_cyc, wd_fire_count, 4'd0, 1'b1, 1'b1, osd_fps_on, osd_restart_pending};
 `endif
                 wr_ret<=S_WR_PERF;
                 state<=S_WR_WAIT;
