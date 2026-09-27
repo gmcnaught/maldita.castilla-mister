@@ -256,3 +256,33 @@ G0 is done (§1a). Step 1 of the host work is now the blend-tracking fix.
   out of scope for v1.
 - EX's painted menu art keeps hard edges under v1 (G0c). Revisit with the
   1-bit-escape format only if that is visible.
+
+## 7. Implementation and device results (2026-09-27, `.62`)
+
+Branches (all `feat/trilist-palpha` unless noted): mister-fpga-blitter `b5e0c50`;
+gmloader-next `2a8a945` (blend-state fix), `a7fc14e` (pin), `216dd12` (PALPHA),
+`8bf81c2` (faded-rule fix); maldita.castilla-mister `5f42b7a`, `c4b418d`, `dc40e68`;
+Cursed engine integration `integ/cursed-palpha` (gmloader-next, cursed/savepath-fix merged).
+
+- **G3:** run_sims 59/59 (two new PALPHA benches, exact match). PALPHA costs 8 cycles
+  per pixel, every other mode 6.
+- **G4:** two CI fits failed the timing gate on the new logic and were fixed:
+  −2.093 ns (combine in one state → split into `B_WRP`/`B_WRP2`), then −0.912 ns
+  (decode mux ahead of `modch` → decode at the texel latch, `texel_rgb_q`). Run
+  36340618097: gates pass, worst setup −0.159 ns on the SDRAM DQ capture path (the
+  shipping baseline).
+- **G5 Maldita**, windmill room (level_2_3), 60 s, new RBF: production engine / new
+  engine PALPHA off / on — all 60 displayed fps in every window, 0 repeated frames,
+  fabric doorbell→done p50 11.46 / 11.44 / 11.44 ms. `cap=1`, `staged4444=0`: nothing
+  in Maldita's boot, title or rooms 0–14 qualifies, so PALPHA is inert there.
+- **G5 Cursed** (integration engine on the new Maldita RBF, title screen): with the
+  §3.4 policy as first written the magenta band remained, PALPHA on or off. Cause:
+  `bck_check` (painted, colour-lossy under 4444) is drawn faded; the lossless rule kept
+  it RGB565 → CONST_ALPHA → sentinel. **Policy changed:** a faded draw on any rect with
+  transparency takes ARGB4444 regardless of colour loss; unfaded keeps "soft edges,
+  lossless only". After: 0 CONST_ALPHA fallbacks on `bck_check`, ~34.5k PALPHA px per
+  frame, no magenta in 11 screenshots over 50 s.
+
+Not yet verified on device: EX small text (`system_font`), EX gameplay, EX on its own
+core (needs #56 + PALPHA RTL cherry-picked to `cursed.castilla-mister`), and a
+Maldita scene that uses `spr_torch_darkness`.
