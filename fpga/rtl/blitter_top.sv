@@ -660,6 +660,13 @@ module blitter_top #(
     // stall having gone away.
     reg  [23:0]  pa_qtag;                  // pa-private: this pixel's SDRAM qword tag
     reg  [15:0]  texel_q, dst_q;           // fetched texel + dst pixel
+    // [TRILIST PALPHA / STA] texel_q decoded to RGB565 (ARGB4444 pages), latched beside
+    // texel_q so the decode mux is off B_WR's modch path. CI 2026-09-27 run 36339804469:
+    // the mux in B_WR (tri_is4444 -> tx_rgb -> modch -> b1_ts*) failed setup by -0.912 ns.
+    reg  [15:0]  texel_rgb_q;
+    function automatic [15:0] dec4444(input [15:0] t, input is4444);
+        dec4444 = is4444 ? { t[11:8], t[11], t[7:4], t[7:6], t[3:0], t[3] } : t;
+    endfunction
     reg  [14:0]  dst_qw_q;                 // comp_fbram qword index for this pixel
     reg  [1:0]   dst_lane_q;               // x[1:0]
 
@@ -2300,6 +2307,7 @@ module blitter_top #(
             // surface texel. Mirrors the B_FILL hit tail.
             B_SURF_C: begin
                 texel_q <= surf_rd_qword[b_tex_lane*16 +: 16];
+                texel_rgb_q <= surf_rd_qword[b_tex_lane*16 +: 16];   // surface: always RGB565
                 if (tri_need_dst) dst_q <= comp_rd_qword[b_dst_lane*16 +: 16];
                 else              dst_q <= 16'd0;
                 pb<=B_WR;
@@ -2316,6 +2324,7 @@ module blitter_top #(
             B_FILL: begin
                 if (!tq_rdw_bad && tq_rvalid && (tq_rtag == b_qtag[23:TEXQ_AW])) begin
                     texel_q <= tq_rdata[b_tex_lane*16 +: 16];
+                    texel_rgb_q <= dec4444(tq_rdata[b_tex_lane*16 +: 16], tri_is4444);
                     // [Phase 1 A2] The dst read was issued in B_IDLE and B_LOOK served as
                     // its latency cycle, so comp_rd_qword is valid NOW. Latch it and go
                     // straight to blend — B_DSTW/B_DSTC are gone.
@@ -2370,10 +2379,9 @@ module blitter_top #(
                 // [TRILIST PALPHA] An ARGB4444 page ({A4,R4,G4,B4}) is decoded to RGB565
                 // for EVERY blend mode (blt_argb4444_to_565: R5={r4,r4[3]},
                 // G6={g4,g4[3:2]}, B5={b4,b4[3]}); the tint uses the decoded colour.
-                // tri_is4444 is a registered triangle constant, so this is one 2:1 mux
-                // level ahead of modch's multiply.
-                tx_rgb = tri_is4444 ? { texel_q[11:8], texel_q[11], texel_q[7:4], texel_q[7:6],
-                                        texel_q[3:0],  texel_q[3] } : texel_q;
+                // The decode happens where the texel is latched (texel_rgb_q), not here:
+                // a mux ahead of modch's multiply failed setup on the fabric clock.
+                tx_rgb = texel_rgb_q;   // decoded when latched (B_FILL / B_SURF_C), see texel_rgb_q
                 b1_tsr <= modch({1'b0, tx_rgb[15:11]}, b_cr);   // tinted source channels
                 b1_tsg <= modch(tx_rgb[10:5],          b_cg);
                 b1_tsb <= modch({1'b0, tx_rgb[4:0]},   b_cb);
