@@ -283,6 +283,21 @@ Cursed engine integration `integ/cursed-palpha` (gmloader-next, cursed/savepath-
   lossless only". After: 0 CONST_ALPHA fallbacks on `bck_check`, ~34.5k PALPHA px per
   frame, no magenta in 11 screenshots over 50 s.
 
-Not yet verified on device: EX small text (`system_font`), EX gameplay, EX on its own
-core (needs #56 + PALPHA RTL cherry-picked to `cursed.castilla-mister`), and a
-Maldita scene that uses `spr_torch_darkness`.
+**Title-band speckle (resolved, and not a PALPHA defect).** With the faded-rule fix
+the band still showed green/purple speckle on some runs. Debug modes on `.62` isolated it
+to the freshly staged copy of the glow page, independent of format (an RGB565 copy failed
+the same way), blend and heap address. A COPY readback showed that copy as colour stripes.
+The cause was that the page was uploaded in the one frame per run that hits "publish
+barrier timed out ... batch dropped". Its `BLT_OP_STAGE` died with that frame's ring,
+but the host kept the page cached, so the fabric sampled stale SDRAM. Fixed host-side:
+slots staged in a dropped frame are evicted so they re-stage (gmloader-next "re-stage
+texture pages whose STAGE died with a dropped frame"). Validated: 3/3 runs hit the drop
+and re-staged, with 0 noisy pixels in 36 screenshots. This bug predates PALPHA and applies
+to any title; PALPHA exposed it by adding a 2.3 MB upload at fade start. The sim could not
+see it because the replay harness backdoor-loads SDRAM and never drops a frame.
+
+**On its own core.** `cursed.castilla-mister` `feat/palpha` carries this RTL plus #56
+(CI RBF passes the gates at −0.159 ns). EX on `.81`: title band, intro text (glyphs
+now blended at their real alpha) and controls verified by the user.
+
+Still unverified: a Maldita scene that uses `spr_torch_darkness`.
