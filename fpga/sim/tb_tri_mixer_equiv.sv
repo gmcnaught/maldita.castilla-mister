@@ -46,7 +46,7 @@ module tb_tri_mixer_equiv;
   wire [15:0] blend_pix;
   blt_blend dut_blend(.texel(in_src), .dst(in_dst),
     .cr(8'd255), .cg(8'd255), .cb(8'd255), .ca(in_alpha), .g_alpha(8'd255),
-    .blend_mode(in_mode), .colorkey(in_key),
+    .blend_mode(in_mode), .colorkey(in_key), .tex_argb4444(1'b0),
     .write_en(blend_we), .out_pix(blend_pix));
 
   // ±1 LSB per RGB565 channel (same tolerance contract as the trilist pipe TBs).

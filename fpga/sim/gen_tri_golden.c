@@ -114,6 +114,24 @@
  *                 form an axis-aligned quad, sampling a 4-quadrant 8x8 checker
  *                 texture across the whole quad, BLT_BLEND_COPY, untinted --
  *                 proves the two-triangle seam lines up pixel-for-pixel.
+ *    tri_palpha / tri_palpha_miss - [TRILIST PALPHA] MULTI-PASS scenes; see
+ *                 section 3 below.
+ *
+ *  ===========================================================================
+ *  3. [TRILIST PALPHA] multi-pass scenes (tri_palpha, tri_palpha_miss)
+ *  ===========================================================================
+ *
+ *  Per-texel alpha needs a NON-UNIFORM destination (over the flat blue clear a
+ *  wrong dst read or a wrong alpha can cancel out), so these scenes put SEVERAL
+ *  TRILIST headers in the ring: pass 0 is an opaque full-screen COPY of a
+ *  patterned RGB565 texture, and the later passes blend over it. The layout
+ *  generalises section 1 without changing it:
+ *      C_CMDCOUNT = npass + 1 (the passes, then END), ring contiguous as before;
+ *      every pass carries its OWN src_off (texture) and its OWN vertex-array byte
+ *      offset in dst_x|dst_y<<16 (qword-aligned; see set_pass()).
+ *  The golden is blt_raster_tri() applied pass by pass, in ring order, onto the
+ *  blue clear. The single-pass scenarios above take the unchanged legacy path, so
+ *  their vectors are byte-identical to before this section existed.
  *
  *  GPL-3.0.
  */
@@ -173,6 +191,12 @@ static uint16_t  fb[FB_W*FB_H];
  * so the RTL testbench backdoor-loads the SAME image into comp_fbram's surface bank. */
 static uint16_t  surface_img[FB_W*FB_H];
 static int       uses_surface = 0;
+
+/* [TRILIST PALPHA] multi-pass scene state (section 3). npass==0 -> legacy path. */
+#define MAXPASS 6
+typedef struct { blt_cmd_t hdr; blt_vtx_t v[6]; int ntris; } pass_t;
+static pass_t    passes[MAXPASS];
+static int       npass = 0;
 
 static blt_vtx_t VTX(int px, int py, int u, int v, uint8_t cr, uint8_t cg, uint8_t cb, uint8_t ca) {
     blt_vtx_t t;
@@ -245,6 +269,80 @@ static void set_hdr(uint8_t blend, uint16_t tw, uint16_t th, uint16_t stride,
     hdr.dst_y = (int16_t)(EOFF >> 16);
     hdr.colorkey = colorkey;
     hdr.alpha = alpha;
+}
+
+/* [TRILIST PALPHA] append one TRILIST pass: n verts (3 or 6) stored at heap byte
+ * offset voff (qword-aligned), texture at tex_off with the given geometry/format. */
+static void add_pass(uint8_t blend, uint8_t format, uint32_t tex_off,
+                     uint16_t tw, uint16_t th, uint16_t stride,
+                     uint16_t colorkey, uint8_t alpha,
+                     uint32_t voff, const blt_vtx_t *v, int n) {
+    if (npass >= MAXPASS || (voff & 7u)) { fprintf(stderr, "add_pass: bad pass\n"); exit(2); }
+    pass_t *p = &passes[npass++];
+    memcpy(p->v, v, (size_t)n*sizeof(blt_vtx_t));
+    p->ntris = n/3;
+    memcpy(heap+voff, v, (size_t)n*sizeof(blt_vtx_t));
+    size_t end = voff + (size_t)n*sizeof(blt_vtx_t);
+    if (heap_len < end) heap_len = (uint32_t)end;
+    memset(&p->hdr, 0, sizeof p->hdr);
+    p->hdr.opcode = BLT_OP_TRILIST;
+    p->hdr.blend_mode = blend;
+    p->hdr.format = format;
+    p->hdr.src_off = tex_off;
+    p->hdr.src_stride = stride;
+    p->hdr.src_x = tw; p->hdr.src_y = th;
+    p->hdr.w = (uint16_t)p->ntris;
+    p->hdr.dst_x = (int16_t)(voff & 0xFFFFu);
+    p->hdr.dst_y = (int16_t)(voff >> 16);
+    p->hdr.colorkey = colorkey;
+    p->hdr.alpha = alpha;
+}
+static void put16(uint32_t off, uint16_t c) { heap[off]=(uint8_t)c; heap[off+1]=(uint8_t)(c>>8); }
+static uint16_t get16(uint32_t off) { return (uint16_t)(heap[off] | (heap[off+1]<<8)); }
+
+/* 16x16 RGB565 background pattern (stride 32) at `off`: every texel distinct in
+ * R and G, so a full-screen stretch gives a destination that varies everywhere. */
+static void tex_bg16(uint32_t off) {
+    for (int v=0;v<16;v++) for (int u=0;u<16;u++)
+        put16(off + (uint32_t)(v*16+u)*2,
+              (uint16_t)(((u*2)&0x1F)<<11 | ((v*4+u)&0x3F)<<5 | ((31-u-v)&0x1F)));
+    if (heap_len < off+512u) heap_len = off+512u;
+}
+/* 16x16 ARGB4444 page (stride 32) at `off`: A4 cycles 0,1,8,15,4,11 so the four
+ * required levels (0 = skip, 1, 8, 15 = opaque) each cover several texel blocks;
+ * R4/G4/B4 follow u/v so a wrong texel address or a wrong 4->5/6-bit expansion
+ * is visible. */
+static const uint8_t PALPHA_A4[6] = { 0, 1, 8, 15, 4, 11 };
+static void tex_argb16(uint32_t off) {
+    for (int v=0;v<16;v++) for (int u=0;u<16;u++) {
+        unsigned a4 = PALPHA_A4[(u + 2*v) % 6];
+        put16(off + (uint32_t)(v*16+u)*2,
+              (uint16_t)(a4<<12 | (unsigned)u<<8 | (unsigned)(15-v)<<4 | (unsigned)((u^v)&15)));
+    }
+    if (heap_len < off+512u) heap_len = off+512u;
+}
+/* 128x128 ARGB4444 page (stride 256) at `off`: tri_missdst's thrash geometry, with
+ * A4 varying at 4-texel granularity (all 16 levels, including 0). */
+static void tex_argb128(uint32_t off) {
+    for (int v=0;v<128;v++) for (int u=0;u<128;u++) {
+        unsigned a4 = ((unsigned)(u>>2) ^ (unsigned)(v>>3)) & 15u;
+        put16(off + (uint32_t)(v*128+u)*2,
+              (uint16_t)(a4<<12 | (unsigned)(u>>3)<<8 | (unsigned)(v>>3)<<4 | (unsigned)((u^v)&15)));
+    }
+    if (heap_len < off+128u*128u*2u) heap_len = off+128u*128u*2u;
+}
+/* pass 0 of every PALPHA scene: opaque full-screen COPY of the bg pattern. */
+static void add_bg_pass(uint32_t tex_off, uint32_t voff) {
+    tex_bg16(tex_off);
+    blt_vtx_t v[6] = {
+        VTX(0,   0,    0,     0,     255,255,255,255),
+        VTX(FB_W,0,    16*16, 0,     255,255,255,255),
+        VTX(FB_W,FB_H, 16*16, 16*16, 255,255,255,255),
+        VTX(0,   0,    0,     0,     255,255,255,255),
+        VTX(FB_W,FB_H, 16*16, 16*16, 255,255,255,255),
+        VTX(0,   FB_H, 0,     16*16, 255,255,255,255),
+    };
+    add_pass(BLT_BLEND_COPY, BLT_FMT_RGB565, tex_off, 16,16,32, 0, 255, voff, v, 6);
 }
 
 static int build(const char *s) {
@@ -409,6 +507,69 @@ static int build(const char *s) {
         put_verts(v,6);
         set_hdr(BLT_BLEND_CONST_ALPHA, 128,128,256, 0, 255);
         hdr.src_off = TEX_OFF;
+    } else if (!strcmp(s, "tri_palpha")) {
+        /* [TRILIST PALPHA] heap: 0x000 ARGB4444 16x16 page, 0x200 RGB565 bg 16x16,
+         * 0x400.. per-pass vertex arrays. Passes, in ring order:
+         *   0 COPY    RGB565   full-screen bg (non-uniform dst for everything below)
+         *   1 PALPHA  ARGB4444 96x96 quad, 6 px/texel so every A4 level covers whole
+         *                      blocks; per-corner vertex alpha 255/128/40/0 (a gradient
+         *                      down to ea==0, i.e. pa==0 writes dst back unchanged),
+         *                      per-corner tint, header alpha 200 (<255)
+         *   2 COLORKEY ARGB4444 same page; key = one RAW texel, so the compare must use
+         *                      the raw 16 bits while the written colour is decoded
+         *   3 COPY    ARGB4444 same page, tinted: the decode applies to COPY too, and
+         *                      A4 is ignored (A4==0 texels are still written)
+         *   4 PALPHA  RGB565   the bg page, vertex alpha 100: an opaque page under PALPHA
+         *                      is pa == ea, i.e. CONST_ALPHA */
+        tex_argb16(0x000);
+        add_bg_pass(0x200, 0x400);
+        blt_vtx_t q[6] = {
+            VTX(24,24,    0,     0,  255,200,128,255),
+            VTX(120,24,  16*16,  0,  128,255,255,128),
+            VTX(120,120, 16*16, 16*16, 255,255,255,40),
+            VTX(24,24,    0,     0,  255,200,128,255),
+            VTX(120,120, 16*16, 16*16, 255,255,255,40),
+            VTX(24,120,   0,    16*16, 200,160,255,0),
+        };
+        add_pass(BLT_BLEND_PALPHA, BLT_FMT_ARGB4444, 0x000, 16,16,32, 0, 200, 0x480, q, 6);
+        uint16_t key = get16((5*16+3)*2);   /* raw texel (u=3,v=5) */
+        blt_vtx_t k[3] = {
+            VTX(150,20,    0,     0, 255,255,255,255),
+            VTX(270,20,  16*16,   0, 255,255,255,255),
+            VTX(210,110,  8*16, 16*16, 255,255,255,255),
+        };
+        add_pass(BLT_BLEND_COLORKEY, BLT_FMT_ARGB4444, 0x000, 16,16,32, key, 255, 0x500, k, 3);
+        blt_vtx_t c[3] = {
+            VTX(150,120,   0,     0, 255,128,255,255),
+            VTX(270,120, 16*16,   0, 255,128,255,255),
+            VTX(210,205,  8*16, 16*16, 255,128,255,255),
+        };
+        add_pass(BLT_BLEND_COPY, BLT_FMT_ARGB4444, 0x000, 16,16,32, 0, 255, 0x540, c, 3);
+        blt_vtx_t o[3] = {
+            VTX(20,140,    0,     0, 255,255,255,100),
+            VTX(110,140, 16*16,   0, 255,255,255,100),
+            VTX(60,210,   8*16, 16*16, 255,255,255,100),
+        };
+        add_pass(BLT_BLEND_PALPHA, BLT_FMT_RGB565, 0x200, 16,16,32, 0, 255, 0x580, o, 3);
+    } else if (!strcmp(s, "tri_palpha_miss")) {
+        /* [TRILIST PALPHA] tri_missdst's thrash geometry under PALPHA: a 128x128
+         * stride-256 ARGB4444 page with u,v sweeping 0..127, so the direct-mapped tq
+         * cache misses constantly WHILE every pixel reads its destination (PALPHA sets
+         * tri_need_dst). Drawn over the patterned bg so the dst is non-uniform. Heap:
+         * 0x0000 ARGB4444 page (32 KiB), 0x8000 bg page, 0x8200/0x8280 vertex arrays.
+         * Vertex alpha 160 with a tint, header alpha 230: never the 255/255 case where
+         * a stale dst could hide. */
+        tex_argb128(0x0000);
+        add_bg_pass(0x8000, 0x8200);
+        blt_vtx_t v[6] = {
+            VTX(40,40,        0,      0, 255,220,200,160),
+            VTX(168,40,  127*16,      0, 255,220,200,160),
+            VTX(168,168, 127*16, 127*16, 255,220,200,160),
+            VTX(40,40,        0,      0, 255,220,200,160),
+            VTX(168,168, 127*16, 127*16, 255,220,200,160),
+            VTX(40,168,       0, 127*16, 255,220,200,160),
+        };
+        add_pass(BLT_BLEND_PALPHA, BLT_FMT_ARGB4444, 0x0000, 128,128,256, 0, 230, 0x8280, v, 6);
     } else {
         fprintf(stderr, "unknown scenario '%s'\n", s);
         return -1;
@@ -423,7 +584,11 @@ int main(int argc, char **argv) {
     /* --- golden framebuffer: blue clear + blt_raster_tri (THE golden math) --- */
     for (int i=0;i<FB_W*FB_H;i++) fb[i] = (uint16_t)BLUE;
     blt_surface_heap_t sh = { heap, heap_len, 0, 0 };
-    blt_raster_tri(fb, &sh, &hdr, verts, ntris, surface_img);
+    if (npass == 0)
+        blt_raster_tri(fb, &sh, &hdr, verts, ntris, surface_img);
+    else  /* [TRILIST PALPHA] section 3: passes in ring order */
+        for (int p=0;p<npass;p++)
+            blt_raster_tri(fb, &sh, &passes[p].hdr, passes[p].v, passes[p].ntris, surface_img);
 
     /* --- ring: TRILIST header + END, wire-packed --- */
     blt_cmd_t end_cmd; memset(&end_cmd, 0, sizeof end_cmd);
@@ -441,9 +606,18 @@ int main(int argc, char **argv) {
 
     fprintf(fd, "@%x\n", CTRL_OFF);
     uint64_t ctrl[8] = { 1, 2, 0, BLUE, 1, 0, 0, 0 }; /* SUBMIT,CMDCOUNT,TARGET,CLEAR,FLAGS,DONE,STATUS,SRCSEL */
+    if (npass) ctrl[1] = (uint64_t)npass + 1u;        /* [TRILIST PALPHA] passes + END */
     for (int i=0;i<8;i++) fprintf(fd, "%016llx\n", (unsigned long long)ctrl[i]);
     /* RING_OFF == CTRL_OFF+8: contiguous, no new @addr needed */
-    for (int q=0;q<4;q++) { uint64_t v; memcpy(&v, w0+q*8, 8); fprintf(fd, "%016llx\n", (unsigned long long)v); }
+    if (npass == 0) {
+        for (int q=0;q<4;q++) { uint64_t v; memcpy(&v, w0+q*8, 8); fprintf(fd, "%016llx\n", (unsigned long long)v); }
+    } else {
+        for (int p=0;p<npass;p++) {
+            uint8_t wp[BLT_CMD_BYTES];
+            pack_cmd(&passes[p].hdr, wp);
+            for (int q=0;q<4;q++) { uint64_t v; memcpy(&v, wp+q*8, 8); fprintf(fd, "%016llx\n", (unsigned long long)v); }
+        }
+    }
     for (int q=0;q<4;q++) { uint64_t v; memcpy(&v, w1+q*8, 8); fprintf(fd, "%016llx\n", (unsigned long long)v); }
 
     fprintf(fd, "@%x\n", SRC_OFF);
@@ -471,8 +645,8 @@ int main(int argc, char **argv) {
         fclose(fs);
     }
 
-    printf("gen_tri_golden: scenario=%s ntris=%d heap=%uB -> %s , %s%s\n",
-           argv[1], ntris, (unsigned)heap_len, ddrpath, exppath,
+    printf("gen_tri_golden: scenario=%s ntris=%d npass=%d heap=%uB -> %s , %s%s\n",
+           argv[1], ntris, npass, (unsigned)heap_len, ddrpath, exppath,
            uses_surface ? " (+surf.hex)" : "");
     return 0;
 }

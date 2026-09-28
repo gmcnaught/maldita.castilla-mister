@@ -61,7 +61,7 @@ module tb_tri_setup;
     .vr2(VR2),.vg2(VG2),.vb2(VB2),.va2(VA2),
     .tex_w(TEX_W),.tex_h(TEX_H),.px(px),.py(py),
     .hit(g_hit),.tu(g_tu),.tv(g_tv),.cr(g_cr),.cg(g_cg),.cb(g_cb),.ca(g_ca),
-    .texel(16'd0),.dst(16'd0),.g_alpha(8'd0),.blend_mode(8'd0),.colorkey(16'd0),
+    .texel(16'd0),.dst(16'd0),.g_alpha(8'd0),.blend_mode(8'd0),.colorkey(16'd0),.tex_argb4444(1'b0),
     .write_en(),.out_pix() );
 
   // ---- setup under test (registered; start->valid) ----
