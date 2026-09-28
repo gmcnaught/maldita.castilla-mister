@@ -1,7 +1,7 @@
 # Maldita Castilla on mister-hybrid-platform (external/mister-hybrid-platform).
 # `mister-platform render` turns this into games/gmloader/launch.sh + platform/,
-# Scripts/MalditaCastilla{,_CoresMenu}.sh, linux/hybrid.d/Maldita Castilla.conf and
-# _Other/Maldita Castilla.mgl; scripts/release/assemble_bundle.sh and deploy.py call it.
+# Scripts/MalditaCastilla{,_CoresMenu}.sh, platform/hybrid.d/Maldita Castilla.conf
+# (+ platform/MiSTer_hybrid with --hook-binary) and _Other/Maldita Castilla.mgl; scripts/release/assemble_bundle.sh and deploy.py call it.
 #
 # Paths keep the pre-platform install: the CONF_STR core name (/tmp/CORENAME and the
 # MiSTer.ini section) is "Maldita Castilla" and the engine payload (gmloader,

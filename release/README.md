@@ -18,9 +18,10 @@ FPGA blitter core.
      the above) and an optional kernel module (`platform/mem_wc/`) that makes
      the engine's uploads to the FPGA ~10× faster (see below)
    - `games/gmloader/` — the game engine, GL runtime, and the game data
-   - `linux/MiSTer_hybrid` + `linux/hybrid.d/Maldita Castilla.conf` — an
-     alternative MiSTer binary shared by hybrid ports, used only if you run the
-     setup entry above; inert otherwise
+   - `games/gmloader/platform/MiSTer_hybrid` +
+     `games/gmloader/platform/hybrid.d/Maldita Castilla.conf` — an alternative
+     MiSTer binary and this core's entry for it, used only if you run the setup
+     entry above; inert otherwise. Nothing is installed under `linux/`.
 2. Start it from the MiSTer OSD: **Scripts → MalditaCastilla**. That loads the
    core and starts the engine in one step.
 
@@ -110,7 +111,7 @@ The entry adds one section to `MiSTer.ini`, after backing the file up to
 `MiSTer.ini.bak.<timestamp>`:
 
     [Maldita Castilla]
-    main=/media/fat/linux/MiSTer_hybrid
+    main=/media/fat/games/gmloader/platform/MiSTer_hybrid
 
 **`main=` does not mean "also run this".** It names a **replacement for the
 `MiSTer` binary itself** — whatever you put there runs *instead of* MiSTer for
@@ -119,17 +120,28 @@ input. Pointing it at a shell script gives you a machine with no MiSTer running
 at all; do not hand-write this line at anything but the binary above.
 
 `MiSTer_hybrid` is that binary: a normal Main_MiSTer build — upstream `main()`
-and scheduler verbatim — plus one call that looks the loaded core up in
-`linux/hybrid.d/` and forks its `launch.sh` **after** the FPGA readiness
+and scheduler verbatim — plus one call that looks the loaded core up in the
+`hybrid.d/` folder next to it and forks its `launch.sh` **after** the FPGA readiness
 handshake. For this core it also turns the OSD's **Reset** into an engine
 restart. That ordering is the whole point: an earlier build that
 started the engine before the readiness check wedged 3 launches in 5 on
 hardware, and the current one measured 0 in 5. MiSTer only runs a `main=`
-target that exists; deleting `linux/hybrid.d/Maldita Castilla.conf` also
+target that exists; deleting `platform/hybrid.d/Maldita Castilla.conf` also
 switches this off (MiSTer_hybrid then behaves as stock MiSTer for this core).
 Older releases used `main=/media/fat/games/gmloader/MiSTer_Maldita`;
 **Scripts → MalditaCastilla** moves that line to `MiSTer_hybrid` and deletes the
 old binary.
+
+**Upgrading from v0.4.0.** v0.4.0 installed the `main=` binary as
+`/media/fat/linux/MiSTer_hybrid` with its entry in `/media/fat/linux/hybrid.d/`.
+From v0.4.1 both live in `games/gmloader/platform/`, because MiSTer's
+downloader (update_all) cannot install anything under `linux/`. If you had
+turned on the CoresMenu option, run **Scripts → MalditaCastilla** once (or
+re-run **Scripts → MalditaCastilla_CoresMenu**): it moves the `main=` line to
+`/media/fat/games/gmloader/platform/MiSTer_hybrid`, removes
+`linux/hybrid.d/Maldita Castilla.conf`, and deletes the old
+`/media/fat/linux/MiSTer_hybrid` once no `MiSTer.ini` section uses it. Until
+then the old binary keeps working as before.
 
 Two notes if you armed it:
 

@@ -43,8 +43,10 @@ tagged `v*` release publishes:
    - `games/gmloader/launch.sh` + `platform/` — the engine launcher it runs,
      and the optional write-combining DDR mapping (`platform/mem_wc/`, used only
      when an object matches the device's `uname -r`, ~10× on uploads to the fabric)
-   - `linux/MiSTer_hybrid` + `linux/hybrid.d/Maldita Castilla.conf` — the shared
-     `main=` binary used by the CoresMenu option, and this core's entry for it
+   - `games/gmloader/platform/MiSTer_hybrid` +
+     `games/gmloader/platform/hybrid.d/Maldita Castilla.conf` — the `main=`
+     binary used by the CoresMenu option, and this core's entry for it
+     (nothing is installed under `linux/`)
    - `games/gmloader/` — the engine, its GL runtime, and the game data
      (`mygame.apk`, `saves/game.droid`, `saves/options.ini`)
 2. Verify the copy against `sha256sums.txt` — FAT filesystems can silently
@@ -66,12 +68,22 @@ on one FPGA control block. The bundle's own `README.md` repeats these steps and
 covers manual launch for troubleshooting.
 
 `main=` names a **replacement for the `MiSTer` binary**, not an extra program to
-run: the CoresMenu entry points it at `linux/MiSTer_hybrid` (upstream Main_MiSTer
-plus the mister-hybrid-platform hook, shared by every hybrid port), which starts
+run: the CoresMenu entry points it at `/media/fat/games/gmloader/platform/MiSTer_hybrid`
+(upstream Main_MiSTer plus the mister-hybrid-platform hook; each port ships its own
+copy, which reads the `hybrid.d/` folder next to it), which starts
 `launch.sh` after the FPGA-ready wait and restarts the engine on the OSD's
 **Reset**. Pointing `main=` at `launch.sh` leaves the device with no MiSTer at all.
 Installs from before the platform had `main=.../games/gmloader/MiSTer_Maldita`;
 the Scripts entry migrates that line and deletes the old binary.
+
+**Upgrading from v0.4.0:** v0.4.0 put the hook at `/media/fat/linux/MiSTer_hybrid`
+and its entry in `/media/fat/linux/hybrid.d/`, which MiSTer's downloader
+(update_all) refuses to install for any database but the main distribution. From
+v0.4.1 both are in `games/gmloader/platform/`. If you turned on the CoresMenu
+option, run **Scripts → MalditaCastilla** once (or re-run
+**Scripts → MalditaCastilla_CoresMenu**): it moves `main=` to the new path, removes
+the old `linux/hybrid.d` entry, and deletes `/media/fat/linux/MiSTer_hybrid` once
+no `MiSTer.ini` section uses it.
 
 To update an existing install, copy just the release's `.rbf` into `_Other/`
 (replacing the old one) if the engine has not changed; otherwise re-extract the
