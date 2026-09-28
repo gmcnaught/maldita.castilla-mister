@@ -12,8 +12,10 @@
 #            Cores -> _Other loaded the bitstream and started nothing.
 #
 # The launch path (games/gmloader/launch.sh + platform/, Scripts entries,
-# linux/hybrid.d registry entry, MGL, mem_wc modules) is rendered from
-# mister-port.toml by external/mister-hybrid-platform.
+# MiSTer_hybrid + its platform/hybrid.d registry entry, MGL, mem_wc modules) is
+# rendered from mister-port.toml by external/mister-hybrid-platform. Nothing is
+# staged under linux/: the Downloader refuses that root folder (and screenshots/,
+# savestates/, downloader/) for every database but distribution_mister.
 #   out_dir  output dir (created); zip + sha256sums.txt + bundle/ land here
 #   version  release version string (e.g. v1.0.0)
 #
@@ -85,7 +87,9 @@ check_glibc_ceiling wrapper "$WRAPPER"
 # (.rodata, survives stripping): this core's entry opts in to the Reset restart.
 # Process substitution, not `strings ... | grep -q`: -q exits on the first match
 # and SIGPIPEs strings, which under `set -o pipefail` fails the whole pipeline.
-for s in "/media/fat/linux/hybrid.d" "OSD Reset armed on status bit %d"; do
+# The registry marker is platform v0.4.0+ (hybrid.d next to the binary); a v0.3.x
+# hook would look in /media/fat/linux/hybrid.d, which this bundle no longer ships.
+for s in "MiSTer_hybrid registry: <binary dir>/hybrid.d" "OSD Reset armed on status bit %d"; do
     grep -qF "$s" <(strings "$WRAPPER") \
         || fail "hook has no '$s' string -- not the MiSTer_hybrid build with OSD Reset (stock Main_MiSTer renamed, or a platform older than feat/osd-reset?)"
 done
@@ -100,7 +104,7 @@ cp "$RBF" "$BUNDLE/_Other/"
 # Launcher, platform/ (launch_lib, mem_wc loader + every prebuilt module, DDR map),
 # Scripts/MalditaCastilla.sh (starts the game; also migrates a pre-platform
 # [Maldita Castilla] main=MiSTer_Maldita to MiSTer_hybrid), the CoresMenu toggle,
-# linux/hybrid.d/Maldita Castilla.conf, linux/MiSTer_hybrid and the MGL. The
+# games/gmloader/platform/{MiSTer_hybrid,hybrid.d/Maldita Castilla.conf} and the MGL. The
 # launcher is launch.sh, NOT _handler.sh: that name is Master_Daemon's discovery
 # predicate and would put a second engine on the fabric control block.
 python3 "$PLAT/tools/mister_platform.py" render "$REPO/mister-port.toml" --out "$BUNDLE" --hook-binary "$WRAPPER" \
@@ -161,6 +165,8 @@ _Other/Maldita Castilla.mgl
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
 games/gmloader/launch.sh
+games/gmloader/platform/MiSTer_hybrid
+games/gmloader/platform/hybrid.d/Maldita Castilla.conf
 games/gmloader/platform/ini_main.sh
 games/gmloader/platform/launch_lib.sh
 games/gmloader/platform/mem_wc_load.sh
@@ -183,8 +189,6 @@ games/gmloader/mesa/swrast_dri.so
 games/gmloader/mygame.apk
 games/gmloader/saves/game.droid
 games/gmloader/saves/options.ini
-linux/MiSTer_hybrid
-linux/hybrid.d/Maldita Castilla.conf
 EOF
 )
 # The module objects are the one part of the manifest that is not a fixed list:
@@ -201,6 +205,11 @@ if [ "$ACTUAL" != "$(printf '%s\n' "$EXPECTED" | LC_ALL=C sort)" ]; then
     echo "--- expected ---" >&2; printf '%s\n' "$EXPECTED" | LC_ALL=C sort >&2
     echo "--- actual ---" >&2;   printf '%s\n' "$ACTUAL" >&2
     fail "bundle manifest mismatch"
+fi
+# Belt and braces over the manifest: a root folder the Downloader refuses makes
+# the whole release unpublishable through a MiSTer database.
+if printf '%s\n' "$ACTUAL" | grep -qE '^(linux|screenshots|savestates|downloader)/'; then
+    fail "bundle has files under a Downloader-reserved root folder: $(printf '%s\n' "$ACTUAL" | grep -E '^(linux|screenshots|savestates|downloader)/' | tr '\n' ' ')"
 fi
 
 # --- zip + checksums ---------------------------------------------------------

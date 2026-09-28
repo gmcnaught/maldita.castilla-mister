@@ -122,9 +122,10 @@ jobs:
   build-wrapper:
     # MiSTer_hybrid — MiSTer.ini's `main=` target, the only thing that can make
     # the Cores browser start the engine (that browser lists .rbf/.mra/.mgl
-    # only, and MAIN is the sole per-core exec hook). Shared by every hybrid
-    # port: upstream Main_MiSTer + external/mister-hybrid-platform's hook, which
-    # reads linux/hybrid.d/Maldita Castilla.conf (launcher, OSD Reset bit).
+    # only, and MAIN is the sole per-core exec hook). Upstream Main_MiSTer +
+    # external/mister-hybrid-platform's hook, installed at
+    # games/gmloader/platform/MiSTer_hybrid; it reads the hybrid.d/ next to it
+    # (platform/hybrid.d/Maldita Castilla.conf: launcher, OSD Reset bit).
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

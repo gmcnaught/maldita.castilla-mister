@@ -42,15 +42,18 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
   (every deploy):
     games/gmloader/launch.sh + platform/           launcher, launch_lib, mem_wc
     Scripts/MalditaCastilla.sh, _CoresMenu.sh      Scripts entry, main= toggle
-    linux/hybrid.d/Maldita Castilla.conf           registry entry (OSD Reset bit 19)
-    linux/MiSTer_hybrid                            shared main= hook      <- HOOK
+    games/gmloader/platform/hybrid.d/Maldita Castilla.conf  registry entry (OSD Reset bit 19)
+    games/gmloader/platform/MiSTer_hybrid          this port's main= hook <- HOOK
     _Other/Maldita Castilla.mgl
 
 PLATFORM (2026-09-26): the launcher, Scripts entries, mem_wc and the main= binary
 now come from mister-hybrid-platform. MiSTer.ini [Maldita Castilla]
-main=/media/fat/linux/MiSTer_hybrid replaces main=.../MiSTer_Maldita; the old
-wrapper is deleted once no section names it. The history below explains why each
-piece exists; the file names in it are the pre-platform ones.
+main=/media/fat/games/gmloader/platform/MiSTer_hybrid replaces main=.../MiSTer_Maldita;
+the old wrapper is deleted once no section names it. Platform v0.4.0 moved the hook
+and its registry out of linux/ (the Downloader refuses that root folder for every
+database but distribution_mister); deploy.py moves a v0.3.x main= off
+/media/fat/linux/MiSTer_hybrid the same way the Scripts entry does. The history
+below explains why each piece exists; the file names in it are the pre-platform ones.
 
 AUTO-LAUNCH (changed 2026-08-05): the engine is started by
   /media/fat/games/Maldita Castilla/launch.sh
@@ -155,7 +158,7 @@ SIBLINGS = REPO.parent                            # ~/MisterFPGA-Projects
 GAMEDIR = "/media/fat/games/gmloader"
 
 # ── Auto-launch (games/gmloader/launch.sh, rendered from mister-port.toml) ─────
-# MiSTer_hybrid finds the launcher through linux/hybrid.d/<CORENAME>.conf, so
+# MiSTer_hybrid finds the launcher through platform/hybrid.d/<CORENAME>.conf, so
 # CORENAME MUST match the RBF's CONF_STR setname exactly (fpga/Maldita.sv) —
 # including the space. It is also the MiSTer.ini section name.
 CORENAME    = "Maldita Castilla"
@@ -170,7 +173,10 @@ GMNEXT = _SUBMODULE_GM if (_SUBMODULE_GM / "Makefile.gmloader").is_file() else _
 ENGINE_DEFAULT  = GMNEXT / "build/arm-linux-gnueabihf/gmloader/gmloadernext.armhf"
 PLATFORM = REPO / "external/mister-hybrid-platform"
 HOOK_DEFAULT = PLATFORM / "build/main-hook/MiSTer_hybrid"
-HOOK_PATH = "/media/fat/linux/MiSTer_hybrid"
+HOOK_PATH = f"{GAMEDIR}/platform/MiSTer_hybrid"
+# Platform v0.3.x shared hook + registry; deploy.py migrates off them.
+LEGACY_HOOK = "/media/fat/linux/MiSTer_hybrid"
+LEGACY_REGISTRY = "/media/fat/linux/hybrid.d"
 LEGACY_WRAPPER = f"{GAMEDIR}/MiSTer_Maldita"
 JSON_DEFAULT    = GMNEXT / "games/gmloader/gmloader.json"
 # The game data is checked in (release/gamedata/, see its SOURCE.txt), so a
@@ -473,8 +479,8 @@ def install_launch_path(host, hook, arm_main):
     gd = shlex.quote(GAMEDIR)
     cleanup = (REPO / "dist/scripts-extra.sh").read_text()
     ini_cmd = (f'mh_ini_set_main {HOOK_PATH} && echo "   main= -> {HOOK_PATH}"' if arm_main else
-               f'if [ "$(mh_ini_main)" = {HOOK_PATH} ]; then mh_ini_disable_main {HOOK_PATH} deploy.py '
-               '&& echo "   main= disarmed (--no-main-wrapper)"; fi')
+               f'for h in {HOOK_PATH} {LEGACY_HOOK}; do if [ "$(mh_ini_main)" = "$h" ]; then '
+               'mh_ini_disable_main "$h" deploy.py && echo "   main= disarmed (--no-main-wrapper)"; fi; done')
     script = f"""
 set -e
 chmod 755 {gd}/launch.sh {HOOK_PATH} /media/fat/Scripts/MalditaCastilla.sh /media/fat/Scripts/MalditaCastilla_CoresMenu.sh
@@ -486,6 +492,13 @@ MH_INI_FILE=/media/fat/MiSTer.ini MH_INI_SECTION={shlex.quote(CORENAME)}
 {ini_cmd}
 if [ -f {LEGACY_WRAPPER} ] && ! grep -q '^main={LEGACY_WRAPPER}' /media/fat/MiSTer.ini; then
     rm -f {LEGACY_WRAPPER} && echo "   removed {LEGACY_WRAPPER}"
+fi
+if [ "$(mh_ini_main)" != {LEGACY_HOOK} ] && [ -f {shlex.quote(LEGACY_REGISTRY + "/" + CORENAME + ".conf")} ]; then
+    rm -f {shlex.quote(LEGACY_REGISTRY + "/" + CORENAME + ".conf")} && echo "   removed {LEGACY_REGISTRY}/{CORENAME}.conf"
+    rmdir {LEGACY_REGISTRY} 2>/dev/null || true
+fi
+if [ -f {LEGACY_HOOK} ] && ! grep -q '^main={LEGACY_HOOK}' /media/fat/MiSTer.ini; then
+    rm -f {LEGACY_HOOK} && echo "   removed {LEGACY_HOOK}"
 fi
 """
     r = ssh(host, script)

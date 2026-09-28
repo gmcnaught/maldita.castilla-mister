@@ -57,6 +57,8 @@ _Other/MalditaCastilla_test.rbf
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
 games/gmloader/launch.sh
+games/gmloader/platform/MiSTer_hybrid
+games/gmloader/platform/hybrid.d/Maldita Castilla.conf
 games/gmloader/platform/ini_main.sh
 games/gmloader/platform/launch_lib.sh
 games/gmloader/platform/mem_wc_load.sh
@@ -79,8 +81,6 @@ games/gmloader/mesa/swrast_dri.so
 games/gmloader/mygame.apk
 games/gmloader/saves/game.droid
 games/gmloader/saves/options.ini
-linux/MiSTer_hybrid
-linux/hybrid.d/Maldita Castilla.conf
 EOF
 )
 
@@ -92,6 +92,15 @@ fi
 
 [ -f "$TMP/out/MalditaCastilla-MiSTer-v0.0.0-test.zip" ] || { echo "FAIL: no zip"; exit 1; }
 [ -f "$TMP/out/sha256sums.txt" ] || { echo "FAIL: no sha256sums.txt"; exit 1; }
+
+# The Downloader (update_all) refuses linux/, screenshots/, savestates/ and
+# downloader/ as root folders for every database but distribution_mister
+# (theypsilon/MultiDatabases_MiSTer#9 blocked v0.4.0 on linux/MiSTer_hybrid).
+# Checked on the zip itself, since that is what a database indexes.
+ZIPMEMBERS=$(python3 -c 'import sys,zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' \
+    "$TMP/out/MalditaCastilla-MiSTer-v0.0.0-test.zip")
+BAD=$(printf '%s\n' "$ZIPMEMBERS" | sed 's|^\./||' | grep -E '^(linux|screenshots|savestates|downloader)(/|$)' || true)
+[ -z "$BAD" ] || { echo "FAIL: zip has members under a Downloader-reserved root folder:"; echo "$BAD"; exit 1; }
 
 # The game data is redistributed unmodified under CC BY-NC-ND, so assert the
 # staged bytes are the checked-in bytes rather than trusting the copy.
@@ -127,11 +136,11 @@ cmp -s "$GLDIR/libGLES_sw.so" "$REPO/external/gmloader-next/3rdparty/gles2-sw/li
 # The main= hook. Staged bytes must be the built binary at the path the
 # CoresMenu toggle writes into MiSTer.ini, and the registry entry must opt this
 # core in to the OSD Reset restart (CONF_STR "TJ,Reset;" = status bit 19).
-cmp -s "$WRAPPER" "$TMP/out/bundle/linux/MiSTer_hybrid" \
-    || { echo "FAIL: staged linux/MiSTer_hybrid differs from $WRAPPER"; exit 1; }
-grep -qF '/media/fat/linux/MiSTer_hybrid' "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
-    || { echo "FAIL: CoresMenu toggle does not point main= at linux/MiSTer_hybrid"; exit 1; }
-REG="$TMP/out/bundle/linux/hybrid.d/Maldita Castilla.conf"
+cmp -s "$WRAPPER" "$TMP/out/bundle/games/gmloader/platform/MiSTer_hybrid" \
+    || { echo "FAIL: staged games/gmloader/platform/MiSTer_hybrid differs from $WRAPPER"; exit 1; }
+grep -qF '/media/fat/games/gmloader/platform/MiSTer_hybrid' "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
+    || { echo "FAIL: CoresMenu toggle does not point main= at games/gmloader/platform/MiSTer_hybrid"; exit 1; }
+REG="$TMP/out/bundle/games/gmloader/platform/hybrid.d/Maldita Castilla.conf"
 for l in "launcher=/media/fat/games/gmloader/launch.sh" "osd_reset=19"; do
     grep -qxF "$l" "$REG" || { echo "FAIL: registry entry lacks '$l'"; exit 1; }
 done
