@@ -56,6 +56,7 @@ _Other/Maldita Castilla.mgl
 _Other/MalditaCastilla_test.rbf
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
+games/gmloader/MiSTer_Maldita
 games/gmloader/launch.sh
 games/gmloader/platform/MiSTer_hybrid
 games/gmloader/platform/hybrid.d/Maldita Castilla.conf
@@ -138,6 +139,10 @@ cmp -s "$GLDIR/libGLES_sw.so" "$REPO/external/gmloader-next/3rdparty/gles2-sw/li
 # core in to the OSD Reset restart (CONF_STR "TJ,Reset;" = status bit 19).
 cmp -s "$WRAPPER" "$TMP/out/bundle/games/gmloader/platform/MiSTer_hybrid" \
     || { echo "FAIL: staged games/gmloader/platform/MiSTer_hybrid differs from $WRAPPER"; exit 1; }
+# games/gmloader/MiSTer_Maldita is the platform's legacy_main stand-in: a v0.3.x
+# MiSTer.ini still names it as main=, so it must hand over to the hook.
+grep -qF 'exec "$HOOK" "$@"' "$TMP/out/bundle/games/gmloader/MiSTer_Maldita" \
+    || { echo "FAIL: games/gmloader/MiSTer_Maldita is not the legacy_main stand-in"; exit 1; }
 grep -qF '/media/fat/games/gmloader/platform/MiSTer_hybrid' "$TMP/out/bundle/Scripts/MalditaCastilla_CoresMenu.sh" \
     || { echo "FAIL: CoresMenu toggle does not point main= at games/gmloader/platform/MiSTer_hybrid"; exit 1; }
 REG="$TMP/out/bundle/games/gmloader/platform/hybrid.d/Maldita Castilla.conf"
