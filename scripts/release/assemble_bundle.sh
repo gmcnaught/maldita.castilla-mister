@@ -104,7 +104,10 @@ cp "$RBF" "$BUNDLE/_Other/"
 # Launcher, platform/ (launch_lib, mem_wc loader + every prebuilt module, DDR map),
 # Scripts/MalditaCastilla.sh (starts the game; also migrates a pre-platform
 # [Maldita Castilla] main=MiSTer_Maldita to MiSTer_hybrid), the CoresMenu toggle,
-# games/gmloader/platform/{MiSTer_hybrid,hybrid.d/Maldita Castilla.conf} and the MGL. The
+# games/gmloader/platform/{MiSTer_hybrid,hybrid.d/Maldita Castilla.conf}, the MGL, and
+# games/gmloader/MiSTer_Maldita: the platform's legacy_main stand-in, so a MiSTer.ini
+# still saying main=games/gmloader/MiSTer_Maldita (v0.3.x) repoints itself at
+# MiSTer_hybrid on the next core load instead of starting stock MiSTer. The
 # launcher is launch.sh, NOT _handler.sh: that name is Master_Daemon's discovery
 # predicate and would put a second engine on the fabric control block.
 python3 "$PLAT/tools/mister_platform.py" render "$REPO/mister-port.toml" --out "$BUNDLE" --hook-binary "$WRAPPER" \
@@ -164,6 +167,7 @@ _Other/$RBF_NAME
 _Other/Maldita Castilla.mgl
 Scripts/MalditaCastilla.sh
 Scripts/MalditaCastilla_CoresMenu.sh
+games/gmloader/MiSTer_Maldita
 games/gmloader/launch.sh
 games/gmloader/platform/MiSTer_hybrid
 games/gmloader/platform/hybrid.d/Maldita Castilla.conf

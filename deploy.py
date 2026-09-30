@@ -49,7 +49,8 @@ Device tree (see gmloader-next/CLAUDE.md "MiSTer Deploy"):
 PLATFORM (2026-09-26): the launcher, Scripts entries, mem_wc and the main= binary
 now come from mister-hybrid-platform. MiSTer.ini [Maldita Castilla]
 main=/media/fat/games/gmloader/platform/MiSTer_hybrid replaces main=.../MiSTer_Maldita;
-the old wrapper is deleted once no section names it. Platform v0.4.0 moved the hook
+that path now holds the platform's legacy_main stand-in, which makes the same
+move on the next core load and then execs MiSTer_hybrid. Platform v0.4.0 moved the hook
 and its registry out of linux/ (the Downloader refuses that root folder for every
 database but distribution_mister); deploy.py moves a v0.3.x main= off
 /media/fat/linux/MiSTer_hybrid the same way the Scripts entry does. The history
@@ -177,7 +178,6 @@ HOOK_PATH = f"{GAMEDIR}/platform/MiSTer_hybrid"
 # Platform v0.3.x shared hook + registry; deploy.py migrates off them.
 LEGACY_HOOK = "/media/fat/linux/MiSTer_hybrid"
 LEGACY_REGISTRY = "/media/fat/linux/hybrid.d"
-LEGACY_WRAPPER = f"{GAMEDIR}/MiSTer_Maldita"
 JSON_DEFAULT    = GMNEXT / "games/gmloader/gmloader.json"
 # The game data is checked in (release/gamedata/, see its SOURCE.txt), so a
 # fresh clone can deploy without a PortMaster-New checkout beside it.
@@ -461,7 +461,9 @@ def install_launch_path(host, hook, arm_main):
     ~20 files, some with a space in their path. Then, on the device: remove what
     pre-platform deploys installed (dist/scripts-extra.sh, as the Scripts entry does), point (or un-point)
     MiSTer.ini [Maldita Castilla] main= at MiSTer_hybrid through the platform's
-    section-scoped ini_main.sh, and delete MiSTer_Maldita once no section names it.
+    section-scoped ini_main.sh. games/gmloader/MiSTer_Maldita is kept: the render
+    puts the platform's legacy_main stand-in there, which repoints an old
+    main=.../MiSTer_Maldita at MiSTer_hybrid on the next core load.
     """
     import os
     import tempfile
@@ -490,9 +492,6 @@ test -e {gd}/_handler.sh && {{ echo "FATAL: _handler.sh survived"; exit 1; }}
 MH_INI_FILE=/media/fat/MiSTer.ini MH_INI_SECTION={shlex.quote(CORENAME)}
 . {gd}/platform/ini_main.sh
 {ini_cmd}
-if [ -f {LEGACY_WRAPPER} ] && ! grep -q '^main={LEGACY_WRAPPER}' /media/fat/MiSTer.ini; then
-    rm -f {LEGACY_WRAPPER} && echo "   removed {LEGACY_WRAPPER}"
-fi
 if [ "$(mh_ini_main)" != {LEGACY_HOOK} ] && [ -f {shlex.quote(LEGACY_REGISTRY + "/" + CORENAME + ".conf")} ]; then
     rm -f {shlex.quote(LEGACY_REGISTRY + "/" + CORENAME + ".conf")} && echo "   removed {LEGACY_REGISTRY}/{CORENAME}.conf"
     rmdir {LEGACY_REGISTRY} 2>/dev/null || true
