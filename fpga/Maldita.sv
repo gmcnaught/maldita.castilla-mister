@@ -281,6 +281,10 @@ localparam CONF_STR = {
 	"-;",
 	"OCE,H Position (CRT),0,+1,+2,+3,-3,-2,-1;",
 	"OFH,V Position (CRT),0,+1,+2,+3,-3,-2,-1;",
+	// status[18]: 224 = the Genesis V28 window (rows `DISP_Y0..), what a consumer CRT
+	// shows; 240 = the whole framebuffer (HDMI, or a CRT with room). The engine's glue
+	// reads it back through C_STATUS bit2 and fits its picture to the lines scanned.
+	"OI,Vertical Lines,224,240;",
 	"-;",
 	"OK,FPS Overlay,Off,On;",
 	"TJ,Reset;",
@@ -426,6 +430,7 @@ wire        blt_demux_dready;
 // the openbor_video_timing instance near the video output.
 wire        tim_hsync, tim_vsync, tim_hblank, tim_vblank, tim_de, tim_new_frame, tim_new_line;
 wire [8:0]  tim_vcount;
+wire        tim_v_full_next;      // u_timing: the Vertical Lines mode of the coming frame
 
 // clk_sys-domain vblank for the coherency flush + the WORK->DDR DMA trigger (blitter_top
 // edge-detects the rising edge -> S_SNAP_* pulses fb_dma_start). [DDR-scanout custom-reader]
@@ -716,6 +721,7 @@ blitter_top blitter
 	.vs             (fb_vs),
 	.osd_restart    (osd_restart),
 	.osd_fps_on     (osd_fps_on),
+	.osd_v_full     (osd_v_full),
 	.fb_dma_start   (fb_dma_start),
 	.fb_dma_busy    (fb_dma_busy),
 	// [app-surface v1] off-screen APPSURF render-target port -> comp_fbram u_fbram
@@ -1007,8 +1013,9 @@ wire FB  = status[5];
 wire [2:0] led = status[8:6];
 wire [2:0] h_pos = status[14:12];  // OSD H Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
 wire [2:0] v_pos = status[17:15];  // OSD V Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
-// status[18] is unused (was OSD Vertical Crop (224p); removed — meaningless at 216
-// active lines, the native height IS the full framebuffer now).
+wire       osd_v_full = status[18];  // OSD Vertical Lines: 0=224 (`DISP_H window), 1=240 (all
+                                       // `FB_H); timing+reader via u_timing.v_full, mirrored to
+                                       // ARM via C_STATUS low32 bit2 (blitter_top S_WR_STATUS)
 wire       osd_restart = status[19];  // OSD Reset (momentary toggle); taken by the wrapper (feat #4)
                                        // via C_STATUS low32 bit0 (blitter_top S_WR_STATUS below)
 wire       osd_fps_on  = status[20];  // OSD FPS Overlay: 0=off, 1=on; mirrored to ARM via
@@ -1131,6 +1138,12 @@ wire signed [3:0] v_adj = (v_pos == 3'd0) ?  4'sd0 : (v_pos == 3'd1) ?  4'sd1 :
                           (v_pos == 3'd2) ?  4'sd2 : (v_pos == 3'd3) ?  4'sd3 :
                           (v_pos == 3'd4) ? -4'sd3 : (v_pos == 3'd5) ? -4'sd2 : -4'sd1;
 
+// OSD Vertical Lines (clk_sys status) -> CLK_VIDEO. A quasi-static level; the timing
+// only samples it once per frame (end of active video), so a 2-FF sync is enough.
+reg [1:0] v_full_vid_sync;
+always @(posedge CLK_VIDEO) v_full_vid_sync <= {v_full_vid_sync[0], osd_v_full};
+wire v_full_vid = v_full_vid_sync[1];
+
 openbor_video_timing u_timing (
 	.clk       (CLK_VIDEO),
 	.ce_pix    (ce_pix_gen),
@@ -1145,7 +1158,9 @@ openbor_video_timing u_timing (
 	.hcount    (),                 // unused (reader uses vcount + new_line/new_frame)
 	.vcount    (tim_vcount),
 	.new_frame (tim_new_frame),
-	.new_line  (tim_new_line)
+	.new_line  (tim_new_line),
+	.v_full      (v_full_vid),
+	.v_full_next (tim_v_full_next)
 );
 
 wire [7:0] reader_r, reader_g, reader_b;
@@ -1171,6 +1186,7 @@ openbor_video_reader #(.FB_QW_BASE(FB_QW_BASE), .SCANOUT_ONLY(1'b1)) u_reader (
 	.new_frame      (tim_new_frame),
 	.new_line       (tim_new_line),
 	.vcount         (tim_vcount),
+	.v_full         (tim_v_full_next),
 	// ioctl HPS-I/O DEFERRED — tied off; audio is LIVE (absolute ring map)
 	.ioctl_download (1'b0),
 	.ioctl_wr       (1'b0),

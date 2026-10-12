@@ -56,8 +56,16 @@ module tb_reader_ddr;
     localparam integer NQW    = `FB_QWORDS;      // qwords per framebuffer (15552 @288x216)
     localparam integer STRIDE = `FB_STRIDE_QW;   // qwords per FB row (72 @288)
     localparam [7:0]   BURST_B = 8'(`FB_STRIDE_QW); // reader per-line burst-beat count (sized)
+`ifdef V_FULL_240
+    // OSD Vertical Lines = 240 (tb_reader_ddr_v240): every framebuffer row, from row 0.
+    localparam integer VACT   = `FB_H;
+    localparam integer Y0     = 0;
+    localparam         VFULL  = 1'b1;
+`else
     localparam integer VACT   = `DISP_H;    // scanout window lines (timing V_ACTIVE)
     localparam integer Y0     = `DISP_Y0;   // screen row r shows framebuffer row r + Y0
+    localparam         VFULL  = 1'b0;
+`endif
     localparam integer HACT   = `FB_W;
 
     reg clk = 1'b0; always #5 clk = ~clk;          // single clock (clk_vid == ddr_clk)
@@ -72,12 +80,14 @@ module tb_reader_ddr;
     // ── timing ───────────────────────────────────────────────────────────────────
     wire        tim_hs, tim_vs, tim_hb, tim_vb, tim_de, tim_nf, tim_nl;
     wire [8:0]  tim_vc;
+    wire        tim_vfn;  // timing -> reader: Vertical Lines mode of the coming frame
     wire [9:0]  tim_hc;   // [#32] screen column, the mixer's view — NOT the reader's internal hcol
     openbor_video_timing u_timing (
         .clk(clk), .ce_pix(ce_pix), .reset(reset),
         .h_adj(5'sd0), .v_adj(4'sd0),
         .hsync(tim_hs), .vsync(tim_vs), .hblank(tim_hb), .vblank(tim_vb), .de(tim_de),
-        .hcount(tim_hc), .vcount(tim_vc), .new_frame(tim_nf), .new_line(tim_nl)
+        .hcount(tim_hc), .vcount(tim_vc), .new_frame(tim_nf), .new_line(tim_nl),
+        .v_full(VFULL), .v_full_next(tim_vfn)
     );
 
     // ── reader (SCANOUT_ONLY, base 0) ─────────────────────────────────────────────
@@ -97,7 +107,7 @@ module tb_reader_ddr;
         .ddr_dout_ready(r_dout_ready), .ddr_rd(r_rd), .ddr_din(r_din), .ddr_be(r_be), .ddr_we(r_we),
         .clk_vid(clk), .ce_pix(ce_pix), .reset(reset),
         .de(tim_de), .hblank(tim_hb), .vblank(tim_vb), .new_frame(tim_nf), .new_line(tim_nl),
-        .vcount(tim_vc),
+        .vcount(tim_vc), .v_full(tim_vfn),
         .ioctl_download(1'b0), .ioctl_wr(1'b0), .ioctl_addr(27'd0), .ioctl_dout(8'd0), .ioctl_wait(),
         .joystick_0(JOY0_VAL), .joystick_1(JOY1_VAL), .joystick_2(32'd0), .joystick_3(32'd0),
         .joystick_l_analog_0(16'd0),

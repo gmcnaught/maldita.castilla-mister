@@ -50,6 +50,8 @@ module blitter_top #(
     // features-design.md for why a new register was the original sketch.
     input  wire          osd_restart, // status[19]: Restart Quest (momentary toggle)
     input  wire          osd_fps_on,  // status[20]: FPS Overlay on/off
+    input  wire          osd_v_full,  // status[18]: Vertical Lines 240 (C_STATUS low32 bit2), read
+                                      // by the host glue to size its picture to the scanned lines
     // Avalon-MM-ish master to shared DDR (qword addressed). Driven by an OWNER
     // MUX (see bottom of module): the FSM drives them via its bm_* regs for ring/
     // clear/STAGE/status traffic; while a render runs, comp_pipeline drives them.
@@ -2569,8 +2571,8 @@ module blitter_top #(
             end
             S_WR_STATUS: begin
                 // low32 = OSD mirror bits (bit0=osd_restart_pending, the sticky-latched
-                // trigger — see the latch above; bit1=osd_fps_on, a genuine persistent
-                // level so it's read raw); high32 = compositor-busy (pipe_busy) cyc this
+                // trigger — see the latch above; bit1=osd_fps_on and bit2=osd_v_full,
+                // genuine persistent levels so they're read raw); high32 = compositor-busy (pipe_busy) cyc this
                 // frame — unchanged.
                 // [profiling] high32 repurposed perf_pipe_cyc -> perf_texwait_cyc (the
                 // per-pixel texel-fetch stall). perf_pipe_cyc (~2.45ms) is already known.
@@ -2578,9 +2580,9 @@ module blitter_top #(
 `ifdef SOLARUS_DBG_PROBES
                 // [wedge probe v2] high32 = wedge_snap2 (bbox at peak stuck: maxx|maxy<<16) for the
                 // runaway-walk check; low32 OSD bits preserved. Host reads bbox at C_STATUS+4 = 0x3B000034.
-                bm_din<={wedge_snap2, wd_fire_count, 6'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={wedge_snap2, wd_fire_count, 5'd0, osd_v_full, osd_fps_on, osd_restart_pending};
 `else
-                bm_din<={perf_texwait_cyc, wd_fire_count, 6'd0, osd_fps_on, osd_restart_pending};
+                bm_din<={perf_texwait_cyc, wd_fire_count, 5'd0, osd_v_full, osd_fps_on, osd_restart_pending};
 `endif
                 wr_ret<=S_WR_PERF;
                 state<=S_WR_WAIT;

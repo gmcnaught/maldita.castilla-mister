@@ -106,6 +106,8 @@ wire signed [3:0] v_adj = (v_offset == 3'd0) ?  4'sd0 :
                           (v_offset == 3'd5) ? -4'sd2 :
                                                -4'sd1;
 
+wire tim_v_full;
+
 openbor_video_timing timing (
     .clk       (clk_vid),
     .ce_pix    (ce_pix),
@@ -120,7 +122,9 @@ openbor_video_timing timing (
     .hcount    (tim_hcount),
     .vcount    (tim_vcount),
     .new_frame (tim_new_frame),
-    .new_line  (tim_new_line)
+    .new_line  (tim_new_line),
+    .v_full      (1'b0),       // legacy wrapper: the `DISP_H-line window only
+    .v_full_next (tim_v_full)
 );
 
 // -- DDR3 Pixel Reader -------------------------------------------------
@@ -153,6 +157,7 @@ openbor_video_reader reader (
     .new_frame      (tim_new_frame),
     .new_line       (tim_new_line),
     .vcount         (tim_vcount),
+    .v_full         (tim_v_full),
 
     .r_out          (reader_r),
     .g_out          (reader_g),

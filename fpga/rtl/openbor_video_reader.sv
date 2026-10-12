@@ -77,6 +77,9 @@ module openbor_video_reader #(
     input  wire        new_frame,
     input  wire        new_line,
     input  wire  [8:0] vcount,
+    // OSD Vertical Lines for the NEXT frame (timing's v_full_next, a clk_vid level
+    // that only changes at the end of active video): 1 = scan out all `FB_H rows.
+    input  wire        v_full,
 
     // Cart loading via ioctl (from hps_io)
     input  wire        ioctl_download,
@@ -206,10 +209,15 @@ localparam [28:0] DIAG_ADDR       = FB_QW_BASE + 29'h16000; // = byte 0x3BFF0000
 localparam [7:0]  LINE_BURST   = 8'(`FB_STRIDE_QW);
 // Each scanline takes `FB_STRIDE_QW qword addresses
 localparam [28:0] LINE_STRIDE  = 29'(`FB_STRIDE_QW);
-// Display lines (== timing V_ACTIVE == `DISP_H, so every fetched row is displayed).
-// Display line N shows framebuffer row N + `DISP_Y0 (blitter_defs.vh).
-localparam [8:0]  V_ACTIVE     = 9'(`DISP_H);
-localparam [8:0]  DISP_Y0      = 9'(`DISP_Y0);
+// Display lines (== timing V_ACTIVE, so every fetched row is displayed).
+// Display line N shows framebuffer row N + DISP_Y0: the `DISP_H-line window from row
+// `DISP_Y0 (blitter_defs.vh), or with OSD Vertical Lines = 240 all `FB_H rows from 0.
+// v_full_frame is latched only where a frame restarts (ST_CHECK_CTRL, inside vblank,
+// after the timing has sampled the mode the coming frame is scanned in), so one
+// frame's fetch never mixes the two geometries.
+reg               v_full_frame;
+wire [8:0]        V_ACTIVE     = v_full_frame ? 9'(`FB_H) : 9'(`DISP_H);
+wire [8:0]        DISP_Y0      = v_full_frame ? 9'd0      : 9'(`DISP_Y0);
 
 localparam [19:0] TIMEOUT_MAX = 20'hF_FFFF;
 
@@ -268,6 +276,16 @@ always @(posedge ddr_clk) begin
         new_line_sync <= {new_line_sync[1:0], new_line};
 end
 wire new_line_ddr = ~new_line_sync[2] & new_line_sync[1];
+
+// -- CDC: v_full level (quasi-static: changes once per OSD toggle, in vblank) --
+reg [1:0] v_full_sync;
+always @(posedge ddr_clk) begin
+    if (reset)
+        v_full_sync <= 2'b0;
+    else
+        v_full_sync <= {v_full_sync[0], v_full};
+end
+wire v_full_ddr = v_full_sync[1];
 
 // -- CDC: vblank level -------------------------------------------------
 reg [1:0] vblank_sync;
@@ -479,6 +497,7 @@ always @(posedge ddr_clk) begin
         ctrl_word          <= 32'd0;
         prev_frame_counter <= 30'd0;
         active_buffer      <= 1'b0;
+        v_full_frame       <= 1'b0;
         vsync_count        <= 32'd0;
         buf_base_addr      <= 29'd0;
         display_line       <= 9'd0;
@@ -919,6 +938,7 @@ always @(posedge ddr_clk) begin
                     // for the whole frame (tear-free: a mid-frame comp_fb_dma flip cannot move
                     // the displayed buffer). Proven MiSTer_OpenBOR_7533 reader idiom.
                     buf_base_addr      <= ctrl_word[0] ? BUF1_ADDR : BUF0_ADDR;
+                    v_full_frame       <= v_full_ddr;
                     display_line       <= 9'd0;
                     preloading         <= 1'b1;
                     fifo_aclr_cnt      <= 4'd8;
@@ -939,6 +959,7 @@ always @(posedge ddr_clk) begin
                         stale_vblank_count <= stale_vblank_count + 5'd1;
                     if (stale_vblank_count >= 5'd29)
                         frame_ready_reg <= 1'b0;
+                    v_full_frame  <= v_full_ddr;
                     display_line  <= 9'd0;
                     preloading    <= 1'b1;
                     fifo_aclr_cnt <= 4'd8;
