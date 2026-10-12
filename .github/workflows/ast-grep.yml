@@ -48,8 +48,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # Pinned: 0.50.0 ignores sgconfig customLanguages without --custom-languages allow,
+      # so the SV grammar never loads, every inline rule fails to parse and the gate's
+      # self-test exits silently. Bump deliberately, re-running the self-test.
       - name: Install ast-grep
-        run: npm install -g @ast-grep/cli
+        run: npm install -g @ast-grep/cli@0.45.3
       # gmlarumbe/tree-sitter-systemverilog ships a pre-generated parser.c with no external
       # scanner, so the default runner toolchain (cc) builds it in one command.
       - name: Build the SystemVerilog tree-sitter grammar
@@ -66,8 +69,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # Pinned: 0.50.0 ignores sgconfig customLanguages without --custom-languages allow,
+      # so the SV grammar never loads, every inline rule fails to parse and the gate's
+      # self-test exits silently. Bump deliberately, re-running the self-test.
       - name: Install ast-grep
-        run: npm install -g @ast-grep/cli
+        run: npm install -g @ast-grep/cli@0.45.3
       - name: Build the SystemVerilog tree-sitter grammar
         run: bash scripts/provision_ast_grep_sv.sh
       - name: Scan (never fails the run)
