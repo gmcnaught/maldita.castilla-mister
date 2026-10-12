@@ -32,7 +32,8 @@
 // -- a full 240-line picture lost ~8 lines top and more at the bottom to
 // overscan. Donut Dodo leaves rows 0-6 blank and starts its HUD at row 7, so the
 // window is rows 7..230 and only the bottom floor edge (231..239) is cropped.
-// OSD Vertical Lines = 240 (status[18]) overrides this window at run time and scans
+// OSD Vertical Lines = 240 (the DonutDodo build's default; Maldita.sv
+// CORE_VLINES_STR) overrides this window at run time and scans
 // out all `FB_H rows from row 0 (openbor_video_timing / openbor_video_reader); the
 // host glue reads the choice back from C_STATUS low32 bit2.
 `define DISP_H      224                   // scanout active lines (timing V_ACTIVE, 224 mode)

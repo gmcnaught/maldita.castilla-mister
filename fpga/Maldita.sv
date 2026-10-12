@@ -272,9 +272,17 @@ assign LED_POWER[0]= FB ? led[2] : act_cnt2[26] ? act_cnt2[25:18] > act_cnt2[7:0
 // Cash Cow's engine maps word bits 4.. to Godot A,B,X,Y,Start,Back,L,R; the
 // game binds A=jump/accept, B=cancel, Start, Back=select; nothing else.
 `define CORE_J1_STR "J1,Jump/OK,Back,Unused X,Unused Y,Start,Select,Unused L,Unused R;"
+// Vertical Lines default 224: the window Cash Cow's PLAN §6.21 checked against its HUD.
+`define CORE_VLINES_STR "OI,Vertical Lines,224,240;"
+`define CORE_VLINES_240_FIRST 1'b0
 `else
 `define CORE_NAME_STR "DonutDodo;;"
 `define CORE_J1_STR "J1,Jump/OK,Back,Unused,Options,Start,Select/Coin,Unused L,Unused R;"
+// Vertical Lines default 240: Donut Dodo's HUD is not inside a 224-line window, and
+// filling 224 lines with 240 rows (aa90ce2, reverted 3d853ad) looked uneven on a CRT.
+// The OSD lists the default first, so status[18]=0 means 240 here.
+`define CORE_VLINES_STR "OI,Vertical Lines,240,224;"
+`define CORE_VLINES_240_FIRST 1'b1
 `endif
 localparam CONF_STR = {
 	`CORE_NAME_STR,
@@ -284,7 +292,8 @@ localparam CONF_STR = {
 	// status[18]: 224 = the Genesis V28 window (rows `DISP_Y0..), what a consumer CRT
 	// shows; 240 = the whole framebuffer (HDMI, or a CRT with room). The engine's glue
 	// reads it back through C_STATUS bit2 and fits its picture to the lines scanned.
-	"OI,Vertical Lines,224,240;",
+	// Option order (the default) is per variant: CORE_VLINES_STR above.
+	`CORE_VLINES_STR,
 	"-;",
 	"OK,FPS Overlay,Off,On;",
 	"TJ,Reset;",
@@ -1013,9 +1022,12 @@ wire FB  = status[5];
 wire [2:0] led = status[8:6];
 wire [2:0] h_pos = status[14:12];  // OSD H Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
 wire [2:0] v_pos = status[17:15];  // OSD V Position (CRT): 0..6 → 0,+1,+2,+3,-3,-2,-1
-wire       osd_v_full = status[18];  // OSD Vertical Lines: 0=224 (`DISP_H window), 1=240 (all
-                                       // `FB_H); timing+reader via u_timing.v_full, mirrored to
-                                       // ARM via C_STATUS low32 bit2 (blitter_top S_WR_STATUS)
+wire       osd_v_full = status[18] ^ `CORE_VLINES_240_FIRST;
+                                       // OSD Vertical Lines: 0=224 (`DISP_H window), 1=240 (all
+                                       // `FB_H); status[18]=0 is the variant's default (first
+                                       // option, CORE_VLINES_STR). Timing+reader via
+                                       // u_timing.v_full, mirrored to ARM via C_STATUS low32
+                                       // bit2 (blitter_top S_WR_STATUS) -- 1 always means 240
 wire       osd_restart = status[19];  // OSD Reset (momentary toggle); taken by the wrapper (feat #4)
                                        // via C_STATUS low32 bit0 (blitter_top S_WR_STATUS below)
 wire       osd_fps_on  = status[20];  // OSD FPS Overlay: 0=off, 1=on; mirrored to ARM via
