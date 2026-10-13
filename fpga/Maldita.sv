@@ -294,6 +294,14 @@ localparam CONF_STR = {
 	// reads it back through C_STATUS bit2 and fits its picture to the lines scanned.
 	// Option order (the default) is per variant: CORE_VLINES_STR above.
 	`CORE_VLINES_STR,
+`ifndef CASHCOW_CORE
+	// [CRT layout] status[22:21] / [25:23], mirrored to C_STATUS low32 bits 4:3 / 7:5.
+	// The Donut Dodo glue reads them every frame: HUD Down moves the game's score
+	// bar down (port script, src/godot/mister_layout.gd), Picture Up moves the whole
+	// picture up (glue v_shift). 0 leaves display.cfg's hud_offset / v_shift in force.
+	"OLM,HUD Down,+0,+4,+8,+12;",
+	"ONP,Picture Up,+0,+2,+4,+6,+8,+10,+12,+16;",
+`endif
 	"-;",
 	"OK,FPS Overlay,Off,On;",
 	"TJ,Reset;",
@@ -440,6 +448,7 @@ wire        blt_demux_dready;
 wire        tim_hsync, tim_vsync, tim_hblank, tim_vblank, tim_de, tim_new_frame, tim_new_line;
 wire [8:0]  tim_vcount;
 wire        tim_v_full_next;      // u_timing: the Vertical Lines mode of the coming frame
+wire  [4:0] osd_crt_layout;       // OSD HUD Down / Picture Up -> blitter_top C_STATUS (assigned below)
 
 // clk_sys-domain vblank for the coherency flush + the WORK->DDR DMA trigger (blitter_top
 // edge-detects the rising edge -> S_SNAP_* pulses fb_dma_start). [DDR-scanout custom-reader]
@@ -731,6 +740,7 @@ blitter_top blitter
 	.osd_restart    (osd_restart),
 	.osd_fps_on     (osd_fps_on),
 	.osd_v_full     (osd_v_full),
+	.osd_crt_layout (osd_crt_layout),
 	.fb_dma_start   (fb_dma_start),
 	.fb_dma_busy    (fb_dma_busy),
 	// [app-surface v1] off-screen APPSURF render-target port -> comp_fbram u_fbram
@@ -1032,6 +1042,14 @@ wire       osd_restart = status[19];  // OSD Reset (momentary toggle); taken by 
                                        // via C_STATUS low32 bit0 (blitter_top S_WR_STATUS below)
 wire       osd_fps_on  = status[20];  // OSD FPS Overlay: 0=off, 1=on; mirrored to ARM via
                                        // C_STATUS low32 bit1 (blitter_top S_WR_STATUS below)
+// OSD CRT layout (DonutDodo build): {Picture Up status[25:23], HUD Down status[22:21]},
+// mirrored raw to C_STATUS low32 bits 7:3. The host glue decodes the steps. Cash Cow DX
+// has no such options and reports 0 (its saved configs may hold other bits there).
+`ifdef CASHCOW_CORE
+assign osd_crt_layout = 5'd0;
+`else
+assign osd_crt_layout = {status[25:23], status[22:21]};
+`endif
 
 // CROP is permanently off at native 216p (video_freak's CROP_SIZE=0 convention):
 // the active area already equals the full framebuffer, so there is nothing left
