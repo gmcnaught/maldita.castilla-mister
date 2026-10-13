@@ -2,18 +2,20 @@
 //
 //  OpenBOR Native Video Timing Generator
 //
-//  288x216 active @ 59.92 Hz (380x262 total)
-//  Native-resolution scanout — the active area IS the framebuffer, 15 kHz
-//  CRT-compatible, NTSC-derived MCLK from colorburst crystal, uniform /9
-//  pixel clock (see Maldita.sv ce_pix_gen).
+//  320 x 224 (or 240) active @ 59.92 Hz, 420 x 262 total -- Genesis H40 raster,
+//  15 kHz CRT-compatible, NTSC-derived MCLK, mixed /8,/9,/10 pixel clock
+//  (see Maldita.sv ce_pix_gen).
 //
-//  H: 288 active + 92 blanking = 380 total (uniform /9)
-//  V: 216 active + 14 FP + 3 sync + 29 BP = 262 total (V28's window shrunk 4 lines off
-//     top AND bottom, still CENTERED; H rate + refresh unchanged)
+//  H: 320 active + 100 blanking = 420 total (3420 MCLK)
+//  V, OSD Vertical Lines = 224: 224 active (rows `DISP_Y0.. of the framebuffer)
+//     + 11 FP + 3 sync + 24 BP = 262 (Genesis V28)
+//  V, OSD Vertical Lines = 240: 240 active (every row) + 3 FP + 3 sync + 16 BP = 262;
+//     the 16 extra lines come 8 from each porch, so vsync keeps its place relative
+//     to the picture centre and a CRT does not re-lock
 //
-//  Refresh: 15,700 / 262 = 59.92 Hz (unchanged)
-//  H freq:  53,693,182 / 3420 = 15,700 Hz (unchanged; 380 px/line x 9 MCLK = 3420 MCLK/line)
-//  H active time: 288 x 9 / 53.693MHz = 48.3 us (~= the standard 47.7 us console window)
+//  Refresh: 15,700 / 262 = 59.92 Hz (both modes)
+//  H freq:  53,693,182 / 3420 = 15,700 Hz
+//  H active time: 47.68 us (the standard console window)
 //
 //  Adapted from MiSTer_PICO-8 by MiSTer Organize
 //  Copyright (C) 2026 MiSTer Organize -- GPL-3.0
@@ -30,6 +32,12 @@ module openbor_video_timing (
     // CRT position offset (signed: -3 to +3, from OSD)
     input  wire signed [4:0] h_adj,  // horizontal: positive = shift right
     input  wire signed [3:0] v_adj,  // vertical: positive = shift down
+
+    // OSD Vertical Lines (synced to clk): 0 = the `DISP_H-line window, 1 = all `FB_H
+    // lines. Sampled at the end of active video into v_full_next, adopted at the end
+    // of the frame, so every frame is scanned in one mode.
+    input  wire        v_full,
+    output reg         v_full_next, // the mode the NEXT frame uses (stable all vblank)
 
     output reg         hsync,      // active low
     output reg         vsync,      // active low
@@ -59,12 +67,33 @@ localparam H_SYNC   = 38;
 localparam H_BP     = 45;
 localparam H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;   // 420 (3420 MCLK, mixed /8,/9,/10)
 
-localparam V_ACTIVE = `DISP_H; // 224-line V28 window of the `FB_H framebuffer
-                              // (blitter_defs.vh: rows `DISP_Y0.. are scanned out)
-localparam V_FP     = 11;     // Genesis V28 NTSC: 8 bottom border + 3 blank
-localparam V_SYNC   = 3;      // NTSC vsync = 3 lines (unchanged)
-localparam V_BP     = 24;     // Genesis V28 NTSC: 13 blank + 11 top border
-localparam V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP;   // 262 (H rate + refresh unchanged)
+localparam V_ACTIVE_W = `DISP_H; // 224-line V28 window of the `FB_H framebuffer
+                                 // (blitter_defs.vh: rows `DISP_Y0.. are scanned out)
+localparam V_FP_W     = 11;     // Genesis V28 NTSC: 8 bottom border + 3 blank
+localparam V_SYNC     = 3;      // NTSC vsync = 3 lines (unchanged)
+localparam V_BP_W     = 24;     // Genesis V28 NTSC: 13 blank + 11 top border
+localparam V_TOTAL    = V_ACTIVE_W + V_FP_W + V_SYNC + V_BP_W;   // 262 (H rate + refresh unchanged)
+
+// [OSD Vertical Lines = 240] All `FB_H lines. The extra lines come out of the
+// borders on both sides -- (`FB_H-`DISP_H)/2 = 8 from the front porch and 8 from
+// the back porch -- so vsync keeps its position relative to the picture centre, the
+// total stays 262 and a CRT does not have to re-lock (no roll beyond the one frame
+// the counter origin moves on a switch). V_FP 3 with the OSD's v_adj = -3 puts
+// vsync on the first blank line, never inside active video (the clamp below).
+localparam V_ACTIVE_F = `FB_H;
+localparam V_EXTRA    = (V_ACTIVE_F - V_ACTIVE_W) / 2;   // 8
+localparam V_FP_F     = V_FP_W - V_EXTRA;                // 3
+localparam V_BP_F     = V_TOTAL - V_ACTIVE_F - V_FP_F - V_SYNC;   // 16
+// synthesis translate_off
+initial begin
+    if (V_ACTIVE_F + V_FP_F + V_SYNC + V_BP_F != V_TOTAL || V_FP_F < 3 || V_BP_F < 1)
+        $error("openbor_video_timing: 240-line mode does not fit the 262-line frame");
+end
+// synthesis translate_on
+
+reg        v_full_cur;   // the mode THIS frame is scanned in
+wire [8:0] V_ACTIVE = v_full_cur ? 9'(V_ACTIVE_F) : 9'(V_ACTIVE_W);
+wire [8:0] V_FP     = v_full_cur ? 9'(V_FP_F)     : 9'(V_FP_W);
 
 // Derived boundaries — adjusted by OSD H/V position offset.
 wire [9:0] h_sync_start = H_ACTIVE + H_FP + {{5{h_adj[4]}}, h_adj};
@@ -114,16 +143,25 @@ always @(posedge clk) begin
         de        <= 1'b1;
         new_frame <= 1'b0;
         new_line  <= 1'b0;
+        v_full_cur  <= v_full;   // come out of reset already in the requested mode
+        v_full_next <= v_full;
     end
     else if (ce_pix) begin
         new_frame <= 1'b0;
         new_line  <= 1'b0;
 
+        // Vertical Lines mode: sample at the end of active video (the reader re-arms
+        // its fetch during this vblank and reads v_full_next), adopt at the frame wrap.
+        if (hcount == H_TOTAL - 1 && vcount == V_ACTIVE - 1)
+            v_full_next <= v_full;
+
         // Horizontal counter
         if (hcount == H_TOTAL - 1) begin
             hcount <= 10'd0;
-            if (vcount == V_TOTAL - 1)
-                vcount <= 9'd0;
+            if (vcount == V_TOTAL - 1) begin
+                vcount     <= 9'd0;
+                v_full_cur <= v_full_next;
+            end
             else
                 vcount <= vcount + 9'd1;
         end

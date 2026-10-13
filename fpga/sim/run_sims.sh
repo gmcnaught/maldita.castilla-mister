@@ -245,6 +245,7 @@ timeout_s() { case "$1" in
   # concurrent suite load. Same situation and same remedy as tb_vram_contention above.
   # The frame count is a floor, not slack: the beacon period sets it.
   tb_reader_ddr)                           echo 300 ;;
+  tb_reader_ddr_v240)                      echo 300 ;;
   # Non-gating real-cache+mt48 TRILIST co-sim (see NONGATING note above). Wall time
   # is HIGHLY contention-sensitive: ~45-60s isolated, but observed 8+ min under
   # concurrent CPU load from other sims/builds on the same machine (this bench
